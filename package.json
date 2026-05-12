@@ -1,0 +1,77 @@
+{
+  "name": "bambu_monitor",
+  "private": true,
+  "version": "1.0.1",
+  "description": "Bambu Lab 3D Printer Monitor Overlay",
+  "author": "Antigravity",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && ELECTRON_START_URL=http://localhost:5173 electron .\"",
+    "electron:build": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.bambumonitor.app",
+    "productName": "BambuMonitor",
+    "icon": "build/icon.ico",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/mqtt/**",
+      "node_modules/readable-stream/**",
+      "node_modules/ws/**",
+      "node_modules/debug/**",
+      "node_modules/lru-cache/**",
+      "node_modules/number-allocator/**",
+      "node_modules/commist/**",
+      "node_modules/help-me/**"
+    ],
+    "files": [
+      "dist/**/*",
+      "electron/main.cjs",
+      "electron/preload.cjs"
+    ],
+    "extraResources": [],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.utilities",
+      "identity": null
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "build/icon.png"
+    }
+  },
+  "dependencies": {
+    "lucide-react": "^0.563.0",
+    "mqtt": "^5.14.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^19.0.2",
+    "@eslint/js": "^9.39.1",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.2.1",
+    "electron": "^40.1.0",
+    "electron-builder": "^26.4.0",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
+    "vite": "^7.2.4",
+    "wait-on": "^9.0.3"
+  }
+}
