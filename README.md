@@ -57,6 +57,10 @@ npm run electron:build
 
 The packaged Windows installer is generated in `release/`. Build outputs are intentionally not committed.
 
+## Versioning
+
+后续每次功能或打包更新都递增一个小版号，按 npm/electron-builder 兼容的语义化版本执行：`1.0.1` -> `1.0.2` -> `1.0.3`。
+
 ## Common Shortcuts
 
 - `Ctrl + Shift + L`: lock or unlock click-through mode
