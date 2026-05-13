@@ -1,7 +1,7 @@
 {
   "name": "bambu_monitor",
   "private": true,
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Bambu Lab / 拓竹桌面打印机悬浮监控工具",
   "author": "Antigravity",
   "main": "electron/main.cjs",

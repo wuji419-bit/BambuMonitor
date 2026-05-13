@@ -10,7 +10,9 @@ import {
 } from '../services/notifications';
 
 const statusMap = {
-  no_ip: ['未配置 IP', '#ffcf70', 'rgba(255, 183, 77, 0.14)', 'rgba(255, 183, 77, 0.24)'],
+  no_ip: ['云端概览', '#8cc8ff', 'rgba(102, 178, 255, 0.14)', 'rgba(102, 178, 255, 0.22)'],
+  cloud_overview: ['云端概览', '#8cc8ff', 'rgba(102, 178, 255, 0.14)', 'rgba(102, 178, 255, 0.22)'],
+  cloud_offline: ['云端离线', '#a9b5c7', 'rgba(255, 255, 255, 0.08)', 'rgba(255, 255, 255, 0.12)'],
   connecting: ['连接中...', '#8cc8ff', 'rgba(102, 178, 255, 0.14)', 'rgba(102, 178, 255, 0.22)'],
   connected: ['已连接', '#89d8ff', 'rgba(91, 177, 255, 0.12)', 'rgba(91, 177, 255, 0.2)'],
   idle: ['闲置', '#dce6f9', 'rgba(255, 255, 255, 0.09)', 'rgba(255, 255, 255, 0.12)'],
@@ -53,7 +55,20 @@ const ALWAYS_ON_TOP_KEY = 'bambu_widget_always_on_top';
 const OPACITY_KEY = 'bambu_widget_opacity';
 const MINI_ROTATE_MS = 3000;
 
+function isCloudOverview(printer) {
+  return !printer?.ip && (printer?.statusSource === 'cloud' || ['cloud_overview', 'cloud_offline', 'no_ip'].includes(printer?.status));
+}
+
 function statusText(printer) {
+  if (isCloudOverview(printer)) {
+    if (printer.status === 'cloud_offline' || printer.cloudOnline === false) return '云端离线';
+    if (printer.status === 'printing') return '云端：打印中';
+    if (printer.status === 'paused') return '云端：暂停';
+    if (printer.status === 'preparing') return '云端：准备';
+    if (printer.status === 'finished') return '云端：完成';
+    if (printer.status === 'idle') return '云端：空闲';
+    return '云端概览';
+  }
   if (printer.status === 'printing') return `${printer.progress || 0}% • ${printer.timeLeft || '--'}`;
   return (statusMap[printer.status] || [printer.status || '--'])[0];
 }
@@ -99,6 +114,14 @@ function amsInfo(printer) {
 }
 
 function infoLine(printer) {
+  if (isCloudOverview(printer)) {
+    const cloudLabel = statusText(printer).replace('云端：', '');
+    return {
+      left: cloudLabel === '云端概览' ? '云端概览模式' : `云端状态：${cloudLabel}`,
+      right: '温度 / AMS / 层数需本地实时连接',
+    };
+  }
+
   const left = printer.filename || '等待任务下发';
   const right = [];
   if (printer.layer) right.push(`层 ${printer.layer}`);
@@ -116,6 +139,7 @@ function formatTemperatureValue(value) {
 }
 
 function temperatureText(printer) {
+  if (isCloudOverview(printer)) return '云端状态 · 非实时遥测';
   const temperature = printer.temperature || {};
   return `喷嘴 ${formatTemperatureValue(temperature.nozzle)} · 热床 ${formatTemperatureValue(temperature.bed)}`;
 }
@@ -126,12 +150,33 @@ function isFinishedPrinter(printer) {
 
 function miniRemainingText(printer) {
   if (!printer) return '--';
+  if (isCloudOverview(printer)) return statusText(printer).replace('云端：', '');
   if (printer.timeLeft && printer.timeLeft !== '--') return printer.timeLeft;
   return statusMap[printer.status]?.[0] || '--';
 }
 
 function miniRingState(printer) {
   const progress = safeProgress(printer?.progress);
+  if (isCloudOverview(printer)) {
+    const offline = printer.status === 'cloud_offline' || printer.cloudOnline === false;
+    if (printer.status === 'finished') {
+      return {
+        progress: 100,
+        label: '完成',
+        color: '#78f0b8',
+        glow: 'rgba(120, 240, 184, 0.34)',
+        track: 'rgba(120, 240, 184, 0.14)',
+      };
+    }
+    return {
+      progress: offline ? 100 : Math.max(16, progress),
+      label: offline ? '离线' : miniRemainingText(printer),
+      color: offline ? '#a9b5c7' : '#8cc8ff',
+      glow: offline ? 'rgba(169, 181, 199, 0.2)' : 'rgba(102, 178, 255, 0.3)',
+      track: offline ? 'rgba(255,255,255,0.1)' : 'rgba(102, 178, 255, 0.14)',
+    };
+  }
+
   if (['error', 'disconnected'].includes(printer?.status)) {
     return {
       progress: 100,
@@ -378,8 +423,9 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
 
   const isCompact = viewMode === 'compact';
   const isMini = viewMode === 'mini';
-  const onlineCount = printers.filter((printer) => !['error', 'disconnected', 'no_ip'].includes(printer.status)).length;
+  const onlineCount = printers.filter((printer) => !['error', 'disconnected', 'cloud_offline'].includes(printer.status) && printer.cloudOnline !== false).length;
   const printingCount = printers.filter((printer) => printer.status === 'printing').length;
+  const cloudOverviewCount = printers.filter((printer) => isCloudOverview(printer)).length;
   const finishedPrinters = printers.filter((printer) => isFinishedPrinter(printer));
   const activeMiniPrinters = printers.filter((printer) => !isFinishedPrinter(printer));
   const rotatingMiniPrinter = activeMiniPrinters.length > 0
@@ -568,6 +614,25 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
     }
   };
 
+  const renderCloudNotice = (compact = false) => {
+    if (cloudOverviewCount === 0) return null;
+    return (
+      <div
+        style={{
+          padding: compact ? '9px 10px' : '10px 12px',
+          borderRadius: compact ? 13 : 14,
+          background: 'linear-gradient(135deg, rgba(102,178,255,0.12), rgba(126,240,196,0.08))',
+          border: '1px solid rgba(135,195,255,0.18)',
+          color: 'rgba(226,238,255,0.78)',
+          fontSize: compact ? 10 : 11,
+          lineHeight: 1.55,
+        }}
+      >
+        {cloudOverviewCount} 台处于云端概览：可看云端在线/打印状态；温度、AMS、层数和精确进度需要本地或 VPN 实时连接。
+      </div>
+    );
+  };
+
   const toggleAlwaysOnTop = () => {
     setIsAlwaysOnTop((prev) => !prev);
   };
@@ -737,14 +802,15 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
       fontWeight: 600,
     };
 
-    if (printer.status === 'no_ip') {
+    if (isCloudOverview(printer) || printer.status === 'no_ip') {
       return (
         <button
           type="button"
           onClick={() => openIpDialog(printer)}
           style={{ ...buttonStyle, color: '#ffd287', background: 'rgba(255,183,77,0.14)', border: '1px solid rgba(255,183,77,0.24)' }}
+          title="填写当前电脑可访问的 IP，切换为完整实时监控"
         >
-          设置 IP
+          连实时
         </button>
       );
     }
@@ -849,6 +915,8 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
             </div>
           </div>
 
+          {renderCloudNotice(true)}
+
           {printers.length === 0 ? (
             <div style={{ padding: '14px 12px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 12, background: 'rgba(255,255,255,0.05)', borderRadius: 14, border: '1px solid rgba(255,255,255,0.06)' }}>
               正在同步设备...
@@ -908,7 +976,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                 {printers.length > 0 ? `${printers.length} 台打印机 · ${onlineCount} 台在线` : '正在准备打印机数据'}
               </div>
               <div style={{ marginTop: 5, fontSize: 11, color: 'rgba(203,217,239,0.58)' }}>
-                {isHorizontal ? '横向总览模式' : '纵向实时监控模式'}
+                {cloudOverviewCount > 0 ? '云端概览 + 本地实时混合模式' : (isHorizontal ? '横向总览模式' : '纵向实时监控模式')}
               </div>
             </div>
 
@@ -953,6 +1021,8 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
             </div>
           </div>
 
+          {renderCloudNotice()}
+
           {printers.length === 0 ? (
             <div style={{ padding: '24px 18px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 13, background: 'rgba(255,255,255,0.05)', borderRadius: 16, border: '1px solid rgba(255,255,255,0.06)' }}>
               正在同步云端设备并等待本地遥测...
@@ -986,7 +1056,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                           {printer.name || '未命名打印机'}
                         </div>
                         <div style={{ marginTop: 4, fontSize: 11, color: 'rgba(200,214,234,0.58)' }}>
-                          {printer.ip ? `IP ${printer.ip}` : '等待填写可访问 IP'}
+                          {printer.ip ? `IP ${printer.ip}` : (isCloudOverview(printer) ? '云端概览 · 连实时需填写可访问 IP' : '等待填写可访问 IP')}
                         </div>
                       </div>
                       {renderAction(printer, isHorizontal)}
@@ -1008,7 +1078,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                             letterSpacing: '0.02em',
                           }}
                         >
-                          {progress}%
+                          {isCloudOverview(printer) ? statusText(printer).replace('云端：', '') : `${progress}%`}
                         </span>
                       </div>
                       <ProgressBar progress={progress} status={printer.status} />

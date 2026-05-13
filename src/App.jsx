@@ -20,17 +20,18 @@ const isTokenInvalidError = (errorText) => (
   /expired|invalid|unauthorized|forbidden|401|token/i.test(String(errorText || ''))
 );
 
-const mapCloudPrintStatus = (printStatus, hasIp) => {
+const mapCloudPrintStatus = (printStatus, hasIp, online) => {
   const statusText = String(printStatus || '').toUpperCase();
 
-  if (!statusText) return hasIp ? 'connecting' : 'no_ip';
+  if (!hasIp && online === false) return 'cloud_offline';
+  if (!statusText) return hasIp ? 'connecting' : 'cloud_overview';
   if (statusText.includes('RUN') || statusText.includes('PRINT')) return 'printing';
   if (statusText.includes('PAUSE')) return 'paused';
   if (statusText.includes('PREPARE')) return 'preparing';
   if (statusText.includes('FINISH')) return 'finished';
   if (statusText.includes('IDLE')) return 'idle';
 
-  return hasIp ? 'connecting' : 'no_ip';
+  return hasIp ? 'connecting' : 'cloud_overview';
 };
 
 const mergeTelemetryNumber = (nextValue, previousValue, fallback = 0) => {
@@ -208,8 +209,9 @@ function ConnectionScreen({ onConnect, isElectron }) {
         name: device.name,
         ip: device.ip,
         accessCode: device.accessCode,
-        status: mapCloudPrintStatus(device.printStatus, Boolean(device.ip)),
+        status: mapCloudPrintStatus(device.printStatus, Boolean(device.ip), device.online),
         statusSource: device.ip ? 'local' : 'cloud',
+        cloudOnline: device.online,
         progress: 0,
         timeLeft: '--',
         temperature: { nozzle: 0, bed: 0, chamber: 0 },
@@ -224,7 +226,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
       setSuccessMsg(
         reachableDevices.length > 0
           ? `已找到 ${cloudDevices.length} 台设备，正在连接 ${reachableDevices.length} 台局域网可达设备...`
-          : '已同步云端设备，未自动发现 IP 的设备可在悬浮窗中手动设置。',
+          : '已进入云端概览模式：可查看云端在线/打印状态；填写可访问 IP 后切换完整实时监控。',
       );
 
       reachableDevices.forEach((device) => {
@@ -607,7 +609,13 @@ function App() {
       const index = prev.findIndex((item) => item.dev_id === serial);
       if (index === -1) return prev;
       const next = [...prev];
-      next[index] = { ...next[index], status: 'connecting', ip: normalizedIp, errorMsg: '' };
+      next[index] = {
+        ...next[index],
+        status: 'connecting',
+        statusSource: 'local',
+        ip: normalizedIp,
+        errorMsg: '',
+      };
       return next;
     });
 
