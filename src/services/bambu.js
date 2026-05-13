@@ -23,6 +23,7 @@ export class BambuClient {
         this.printers = new Map();
         this.callbacks = new Map();
         this.ipcListenerSetup = false;
+        this.countdownTimer = null;
     }
 
     emitUpdate(serialNumber) {
@@ -33,6 +34,27 @@ export class BambuClient {
         if (callback) {
             callback({ ...printer });
         }
+    }
+
+    ensureCountdownTimer() {
+        if (this.countdownTimer) return;
+
+        this.countdownTimer = setInterval(() => {
+            for (const serialNumber of this.printers.keys()) {
+                const updated = this.refreshLiveRemainingTime(serialNumber);
+                if (updated) this.emitUpdate(serialNumber);
+            }
+
+            if (this.printers.size === 0) {
+                this.stopCountdownTimer();
+            }
+        }, 15000);
+    }
+
+    stopCountdownTimer() {
+        if (!this.countdownTimer) return;
+        clearInterval(this.countdownTimer);
+        this.countdownTimer = null;
     }
 
     // Setup IPC listeners for MQTT data from main process
@@ -85,6 +107,7 @@ export class BambuClient {
 
         this.printers.set(serialNumber, printer);
         this.callbacks.set(serialNumber, onUpdate);
+        this.ensureCountdownTimer();
 
         // Notify connecting status
         this.emitUpdate(serialNumber);
@@ -118,15 +141,14 @@ export class BambuClient {
         const data = payload.print || payload;
         if (!data) return;
 
+        let nextStatus = printer.status;
+
         // Update printer state
         if (data.mc_percent !== undefined) {
             const progress = Number(data.mc_percent);
             if (Number.isFinite(progress)) {
                 printer.progress = Math.min(100, Math.max(0, progress));
             }
-        }
-        if (data.mc_remaining_time !== undefined) {
-            printer.timeLeft = this.formatTime(Number(data.mc_remaining_time));
         }
         if (data.gcode_state) {
             const stateMap = {
@@ -137,8 +159,12 @@ export class BambuClient {
                 'FAILED': 'error',
                 'PREPARE': 'preparing'
             };
-            printer.status = stateMap[data.gcode_state] || data.gcode_state.toLowerCase();
+            nextStatus = stateMap[data.gcode_state] || data.gcode_state.toLowerCase();
+            printer.status = nextStatus;
         }
+
+        this.updateRemainingTime(printer, data, nextStatus);
+
         if (data.layer_num !== undefined) {
             const currentLayer = Number(data.layer_num);
             const totalLayer = Number(data.total_layer_num);
@@ -249,10 +275,75 @@ export class BambuClient {
         this.emitUpdate(serialNumber);
     }
 
+    getRemainingMinutes(data) {
+        const candidates = [
+            data.mc_remaining_time,
+            data.remaining_time,
+            data.remain_time,
+            data.print_remaining_time,
+            data.left_time,
+        ];
+
+        for (const value of candidates) {
+            if (value === undefined || value === null || value === '') continue;
+            const minutes = Number(value);
+            if (Number.isFinite(minutes) && minutes >= 0) return minutes;
+        }
+
+        return null;
+    }
+
+    updateRemainingTime(printer, data, status = printer.status) {
+        const remainingMinutes = this.getRemainingMinutes(data);
+        if (remainingMinutes !== null) {
+            printer.remainingMinutesRaw = remainingMinutes;
+            printer.remainingUpdatedAt = Date.now();
+            printer.remainingStatus = status;
+        }
+
+        if (['finished', 'idle', 'error', 'disconnected'].includes(status)) {
+            printer.timeLeft = '--';
+            delete printer.remainingMinutesRaw;
+            delete printer.remainingUpdatedAt;
+            delete printer.remainingStatus;
+            return;
+        }
+
+        printer.timeLeft = this.formatLiveTime(printer);
+    }
+
+    refreshLiveRemainingTime(serialNumber) {
+        const printer = this.printers.get(serialNumber);
+        if (!printer || !Number.isFinite(printer.remainingMinutesRaw)) return false;
+
+        const previous = printer.timeLeft;
+        printer.timeLeft = this.formatLiveTime(printer);
+        return previous !== printer.timeLeft;
+    }
+
+    getLiveRemainingMinutes(printer) {
+        const base = Number(printer.remainingMinutesRaw);
+        if (!Number.isFinite(base) || base < 0) return null;
+
+        if (printer.status !== 'printing') return base;
+
+        const updatedAt = Number(printer.remainingUpdatedAt);
+        if (!Number.isFinite(updatedAt) || updatedAt <= 0) return base;
+
+        const elapsedMinutes = Math.max(0, (Date.now() - updatedAt) / 60000);
+        return Math.max(0, base - elapsedMinutes);
+    }
+
+    formatLiveTime(printer) {
+        const minutes = this.getLiveRemainingMinutes(printer);
+        return this.formatTime(minutes);
+    }
+
     formatTime(minutes) {
-        if (!minutes || minutes <= 0) return '--';
-        const h = Math.floor(minutes / 60);
-        const m = minutes % 60;
+        const totalMinutes = Math.ceil(Number(minutes));
+        if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return '--';
+        const h = Math.floor(totalMinutes / 60);
+        const m = totalMinutes % 60;
         if (h > 0) return `${h}h ${m}m`;
         return `${m}m`;
     }
@@ -264,11 +355,13 @@ export class BambuClient {
             await electronMqtt.disconnect({ serialNumber });
             this.printers.delete(serialNumber);
             this.callbacks.delete(serialNumber);
+            if (this.printers.size === 0) this.stopCountdownTimer();
         } else {
             // Disconnect all
             await electronMqtt.disconnectAll();
             this.printers.clear();
             this.callbacks.clear();
+            this.stopCountdownTimer();
         }
     }
 
