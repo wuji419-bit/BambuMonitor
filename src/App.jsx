@@ -590,7 +590,7 @@ function App() {
   const handleUpdateIp = async (serial, ip) => {
     const normalizedIp = String(ip || '').trim();
     if (!normalizedIp) {
-      throw new Error('请输入有效的局域网 IP');
+      throw new Error('请输入当前电脑可访问的打印机 IP');
     }
 
     const printer = printers.find((item) => item.dev_id === serial);

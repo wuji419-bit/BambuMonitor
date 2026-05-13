@@ -504,7 +504,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
     if (!ipDialog) return;
     const value = String(ipDialog.value || '').trim();
     if (!value) {
-      setIpDialogError('请输入局域网 IP，例如 192.168.1.100');
+      setIpDialogError('请输入当前电脑可访问的打印机 IP，例如 192.168.1.100 或 VPN/Tailscale IP');
       return;
     }
     setSubmittingIp(true);
@@ -986,7 +986,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                           {printer.name || '未命名打印机'}
                         </div>
                         <div style={{ marginTop: 4, fontSize: 11, color: 'rgba(200,214,234,0.58)' }}>
-                          {printer.ip ? `IP ${printer.ip}` : '等待填写局域网 IP'}
+                          {printer.ip ? `IP ${printer.ip}` : '等待填写可访问 IP'}
                         </div>
                       </div>
                       {renderAction(printer, isHorizontal)}
@@ -1208,7 +1208,9 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
             <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(203,217,239,0.68)', lineHeight: 1.5 }}>
               {ipDialog.name || '当前设备'}
               <br />
-              请输入局域网 IP，例如 192.168.1.100
+              实时监控走打印机本地 MQTT，需要这台电脑能访问到打印机。
+              <br />
+              在外面使用时，请先通过 Tailscale、ZeroTier 或 VPN 连回同一网络，再填写对应 IP。
             </div>
 
             <input
@@ -1219,7 +1221,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                 setIpDialog((prev) => (prev ? { ...prev, value: event.target.value } : prev));
                 if (ipDialogError) setIpDialogError('');
               }}
-              placeholder="192.168.1.100"
+              placeholder="192.168.1.100 或 VPN/Tailscale IP"
               style={{ width: '100%', marginTop: 16, padding: '12px 14px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.06)', color: '#f7fbff', outline: 'none' }}
             />
 
