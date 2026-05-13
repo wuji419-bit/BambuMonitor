@@ -58,6 +58,8 @@ bambu-icon-*.png
 login-redesign-preview.png
 design-preview-mini-modes.png
 design-preview-mini-modes.svg
+!docs/screenshots/
+!docs/screenshots/*.png
 
 # Keep only packaged icon sources from build/
 build/*
