@@ -10,6 +10,8 @@ BambuMonitor 是一款面向 Bambu Lab / 拓竹打印机的 Windows 桌面悬浮
 
 ![监控面板](./docs/screenshots/dashboard.png)
 
+![超迷你模式](./docs/screenshots/mini.png)
+
 ## 下载安装
 
 Windows 安装包在 GitHub Release 中提供：
@@ -60,7 +62,7 @@ npm run electron:build
 
 ## 版本规则
 
-后续每次功能或打包更新都递增一个小版号，按 npm/electron-builder 兼容的语义化版本执行：`1.0.1` -> `1.0.2` -> `1.0.3`。
+后续只有应用代码、图标或安装包内容发生实际变化时，才递增一个小版号并重新打包，例如：`1.0.2` -> `1.0.3`。
 
 ## English
 
