@@ -629,6 +629,8 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
         }}
       >
         {cloudOverviewCount} 台处于云端概览：可看云端在线/打印状态；温度、AMS、层数和精确进度需要本地或 VPN 实时连接。
+        <br />
+        官方远程视图请使用 Bambu Connect / Bambu Handy；本工具不读取私有网络插件数据。
       </div>
     );
   };
