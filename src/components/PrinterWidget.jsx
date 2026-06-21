@@ -1,6 +1,24 @@
-﻿import React, { useEffect, useRef, useState } from 'react';
-import { Bell, Copy, LayoutGrid, Lock, Maximize2, Minimize2, Pin, PinOff, Power, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
-import { electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
+import React, { useEffect, useRef, useState } from 'react';
+import { Camera, Copy, GripHorizontal, LayoutGrid, Lock, Maximize2, Minimize2, Pin, PinOff, Power, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
+import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
+import {
+  cameraCompatibilityNote,
+  createDefaultCameraConfig,
+  getCameraTransport,
+  getCameraConfig,
+  getCustomCameraUrl,
+  getPrinterCameraKey,
+  isAutoCameraSupported,
+  saveCameraConfig,
+} from '../services/camera';
+import { buildCameraFrameUrl, isChamberSnapshotStream } from '../utils/cameraFrame';
+import {
+  buildInitialCameraState,
+  cameraStartErrorState,
+  cameraStartResultState,
+  cameraStartWithTimeout,
+  DEFAULT_CAMERA_START_TIMEOUT_MS,
+} from '../utils/cameraStartup';
 import {
   buildIntegrationSnippet,
   createDefaultNotificationConfig,
@@ -117,8 +135,8 @@ function infoLine(printer) {
   if (isCloudOverview(printer)) {
     const cloudLabel = statusText(printer).replace('云端：', '');
     return {
-      left: cloudLabel === '云端概览' ? '云端概览模式' : `云端状态：${cloudLabel}`,
-      right: '温度 / AMS / 层数需本地实时连接',
+      left: cloudLabel === '云端概览' ? '未识别本地 IP' : `云端状态：${cloudLabel}`,
+      right: '本地实时需填写这台电脑可访问的 IP',
     };
   }
 
@@ -139,7 +157,7 @@ function formatTemperatureValue(value) {
 }
 
 function temperatureText(printer) {
-  if (isCloudOverview(printer)) return '云端状态 · 非实时遥测';
+  if (isCloudOverview(printer)) return '等待本地实时数据';
   const temperature = printer.temperature || {};
   return `喷嘴 ${formatTemperatureValue(temperature.nozzle)} · 热床 ${formatTemperatureValue(temperature.bed)}`;
 }
@@ -348,13 +366,146 @@ function ProgressBar({ progress, status = 'idle', compact = false }) {
               width: capSize,
               height: capSize,
               borderRadius: '50%',
-              background: `radial-gradient(circle at 35% 35%, ${palette.cap} 0%, rgba(255,255,255,0.92) 28%, rgba(255,255,255,0.18) 62%, transparent 70%)`,
+              background: palette.cap,
               boxShadow: `0 0 0 1px rgba(255,255,255,0.16), 0 0 ${compact ? 10 : 16}px ${palette.glow}`,
             }}
           />
         ) : null}
       </div>
     </div>
+  );
+}
+
+async function decodeCameraFrame(blob) {
+  if (typeof createImageBitmap === 'function') {
+    return createImageBitmap(blob);
+  }
+
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('camera frame decode failed'));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function drawCameraFrame(canvas, image) {
+  const context = canvas.getContext('2d');
+  if (!context) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const pixelRatio = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round((canvas.clientWidth || rect.width || 320) * pixelRatio));
+  const height = Math.max(1, Math.round((canvas.clientHeight || rect.height || 200) * pixelRatio));
+
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  const sourceWidth = image.width || image.naturalWidth || width;
+  const sourceHeight = image.height || image.naturalHeight || height;
+  const scale = Math.max(width / sourceWidth, height / sourceHeight);
+  const drawWidth = sourceWidth * scale;
+  const drawHeight = sourceHeight * scale;
+  const drawX = (width - drawWidth) / 2;
+  const drawY = (height - drawHeight) / 2;
+
+  context.clearRect(0, 0, width, height);
+  context.drawImage(image, drawX, drawY, drawWidth, drawHeight);
+}
+
+function ChamberSnapshotCanvas({ snapshotUrl, imageKey, alt, isReady, setCameraImageStates }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    if (!snapshotUrl || !imageKey) return undefined;
+
+    let stopped = false;
+    let frame = 0;
+    let timer = 0;
+    let activeController = null;
+
+    const markReady = () => {
+      setCameraImageStates((prev) => {
+        if (prev[imageKey]?.status === 'ready') return prev;
+        return {
+          ...prev,
+          [imageKey]: { status: 'ready' },
+        };
+      });
+    };
+
+    const markWaiting = () => {
+      setCameraImageStates((prev) => {
+        if (prev[imageKey]?.status === 'ready') return prev;
+        return {
+          ...prev,
+          [imageKey]: {
+            status: 'loading',
+            message: '正在等待摄像头画面...',
+          },
+        };
+      });
+    };
+
+    const paintNextFrame = async () => {
+      activeController = new AbortController();
+      const requestUrl = buildCameraFrameUrl(snapshotUrl, frame += 1);
+
+      try {
+        const response = await fetch(requestUrl, {
+          cache: 'no-store',
+          headers: { accept: 'image/jpeg' },
+          signal: activeController.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`camera frame request failed: ${response.status}`);
+        }
+
+        const blob = await response.blob();
+        const image = await decodeCameraFrame(blob);
+
+        if (!stopped && canvasRef.current) {
+          drawCameraFrame(canvasRef.current, image);
+          markReady();
+        }
+
+        if (typeof image.close === 'function') image.close();
+      } catch (error) {
+        if (!stopped && error?.name !== 'AbortError') {
+          markWaiting();
+        }
+      } finally {
+        activeController = null;
+        if (!stopped) timer = window.setTimeout(paintNextFrame, 700);
+      }
+    };
+
+    paintNextFrame();
+
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      if (activeController) activeController.abort();
+    };
+  }, [imageKey, setCameraImageStates, snapshotUrl]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      role="img"
+      aria-label={alt}
+      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', opacity: isReady ? 1 : 0.35, transition: 'opacity 0.2s ease' }}
+    />
   );
 }
 
@@ -377,6 +528,62 @@ function StatusBadge({ printer, compact = false }) {
     >
       {statusText(printer)}
     </span>
+  );
+}
+
+function SummaryPill({ label, value, tone = 'neutral' }) {
+  const tones = {
+    neutral: ['rgba(255,255,255,0.055)', 'rgba(255,255,255,0.08)', 'rgba(230,238,250,0.72)', '#f6fbff'],
+    live: ['rgba(91,226,170,0.12)', 'rgba(91,226,170,0.22)', 'rgba(181,255,229,0.72)', '#91f3c5'],
+    cloud: ['rgba(116,184,255,0.12)', 'rgba(116,184,255,0.22)', 'rgba(205,229,255,0.72)', '#9fcbff'],
+    warn: ['rgba(255,209,102,0.12)', 'rgba(255,209,102,0.22)', 'rgba(255,233,178,0.76)', '#ffd985'],
+  };
+  const [background, border, muted, strong] = tones[tone] || tones.neutral;
+  return (
+    <div
+      style={{
+        minWidth: 0,
+        minHeight: 42,
+        display: 'grid',
+        alignContent: 'center',
+        gap: 3,
+        padding: '8px 10px',
+        borderRadius: 8,
+        background,
+        border: `1px solid ${border}`,
+      }}
+    >
+      <span style={{ fontSize: 10, color: muted, lineHeight: 1.1 }}>{label}</span>
+      <strong style={{ fontSize: 14, color: strong, lineHeight: 1.1, fontWeight: 850 }}>{value}</strong>
+    </div>
+  );
+}
+
+function PrinterAvatar({ printer, palette }) {
+  const name = String(printer?.name || 'BM').trim();
+  const label = name.replace(/[^\p{L}\p{N}]/gu, '').slice(0, 2).toUpperCase() || 'BM';
+  return (
+    <div
+      aria-hidden="true"
+      style={{
+        width: 38,
+        height: 38,
+        flex: '0 0 auto',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 8,
+        color: palette.text,
+        background: `linear-gradient(145deg, ${palette.badge}, rgba(255,255,255,0.045))`,
+        border: `1px solid ${palette.border}`,
+        boxShadow: `0 0 18px ${palette.glow}`,
+        fontSize: 11,
+        fontWeight: 850,
+        letterSpacing: 0,
+      }}
+    >
+      {label}
+    </div>
   );
 }
 
@@ -418,6 +625,14 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
   const [notificationConfig, setNotificationConfig] = useState(() => createDefaultNotificationConfig());
   const [notificationFeedback, setNotificationFeedback] = useState('');
   const [testingTargetId, setTestingTargetId] = useState('');
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraConfig, setCameraConfig] = useState(() => createDefaultCameraConfig());
+  const [cameraStreams, setCameraStreams] = useState({});
+  const [cameraImageStates, setCameraImageStates] = useState({});
+  const [cameraFeedback, setCameraFeedback] = useState('');
+  const [startupEnabled, setStartupEnabledState] = useState(false);
+  const [startupBusy, setStartupBusy] = useState(false);
+  const [startupFeedback, setStartupFeedback] = useState('');
   const widgetRef = useRef(null);
   const lastResizeRef = useRef({ width: 0, height: 0 });
 
@@ -426,6 +641,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
   const onlineCount = printers.filter((printer) => !['error', 'disconnected', 'cloud_offline'].includes(printer.status) && printer.cloudOnline !== false).length;
   const printingCount = printers.filter((printer) => printer.status === 'printing').length;
   const cloudOverviewCount = printers.filter((printer) => isCloudOverview(printer)).length;
+  const attentionCount = printers.filter((printer) => ['error', 'disconnected', 'paused', 'cloud_offline', 'no_ip'].includes(printer.status) || printer.cloudOnline === false).length;
   const finishedPrinters = printers.filter((printer) => isFinishedPrinter(printer));
   const activeMiniPrinters = printers.filter((printer) => !isFinishedPrinter(printer));
   const rotatingMiniPrinter = activeMiniPrinters.length > 0
@@ -434,8 +650,23 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
   const compactProgress = printers.length > 0
     ? Math.round(printers.reduce((sum, printer) => sum + safeProgress(printer.progress), 0) / printers.length)
     : 0;
-  const miniAutoSize = isMini && !settingsOpen && !ipDialog;
-  const panelWidth = settingsOpen ? 432 : (ipDialog ? 360 : (isCompact ? 396 : (isHorizontal ? Math.min(120 + Math.max(printers.length, 1) * 232, 1600) : 432)));
+  const miniAutoSize = isMini && !cameraOpen && !settingsOpen && !ipDialog;
+  const panelWidth = cameraOpen ? 760 : (settingsOpen ? 432 : (ipDialog ? 360 : (isCompact ? 396 : (isHorizontal ? Math.min(120 + Math.max(printers.length, 1) * 232, 1600) : 432))));
+  const cameraSourceKey = JSON.stringify(printers.map((printer) => {
+    const key = getPrinterCameraKey(printer);
+    return {
+      key,
+      cloudId: printer.cloudId || '',
+      name: printer.name || '',
+      model: printer.model || printer.modelCode || '',
+      modelCode: printer.modelCode || '',
+      ip: printer.ip || '',
+      accessCode: printer.accessCode || '',
+      customUrl: getCustomCameraUrl(cameraConfig, printer),
+      cameraMode: getCameraTransport(printer),
+      autoCameraSupported: isAutoCameraSupported(printer),
+    };
+  }));
 
   useEffect(() => {
     if (!isElectronEnvironment()) return undefined;
@@ -487,7 +718,143 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
 
   useEffect(() => {
     setNotificationConfig(getNotificationConfig());
+    setCameraConfig(getCameraConfig());
   }, []);
+
+  useEffect(() => {
+    if (!isElectronEnvironment()) return undefined;
+
+    let cancelled = false;
+    electronApp.getStartupEnabled()
+      .then((result) => {
+        if (!cancelled && result?.success) {
+          setStartupEnabledState(Boolean(result.enabled));
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setStartupFeedback(error?.message || '读取开机启动状态失败');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (cameraConfig.autoOpen && printers.length > 0) {
+      setCameraOpen(true);
+    }
+  }, [cameraConfig.autoOpen, printers.length]);
+
+  useEffect(() => {
+    if (!cameraOpen || !isElectronEnvironment()) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const startCameraStreams = () => {
+      setCameraFeedback('');
+      const initialStreams = {};
+      const initialImageStates = {};
+      const startableSources = [];
+      let sources = [];
+
+      try {
+        sources = JSON.parse(cameraSourceKey);
+      } catch {
+        sources = [];
+      }
+
+      for (const source of sources) {
+        const initialState = buildInitialCameraState(source);
+        if (!initialState) continue;
+        initialStreams[initialState.key] = initialState.stream;
+        initialImageStates[initialState.key] = initialState.imageState;
+        if (initialState.shouldStart) startableSources.push(source);
+      }
+
+      if (!cancelled) {
+        setCameraStreams(initialStreams);
+        setCameraImageStates(initialImageStates);
+      }
+
+      const updateCameraState = (key, nextState) => {
+        if (cancelled || !key || !nextState) return;
+        setCameraStreams((prev) => ({
+          ...prev,
+          [key]: nextState.stream,
+        }));
+        setCameraImageStates((prev) => ({
+          ...prev,
+          [key]: nextState.imageState,
+        }));
+      };
+
+      startableSources.forEach(async (source) => {
+        const key = source.key;
+        try {
+          const result = await cameraStartWithTimeout(
+            electronCamera.start({
+              serialNumber: key,
+              cloudId: source.cloudId,
+              name: source.name,
+              model: source.model,
+              modelCode: source.modelCode,
+              cameraMode: source.cameraMode,
+              ip: source.ip,
+              accessCode: source.accessCode,
+            }),
+            DEFAULT_CAMERA_START_TIMEOUT_MS,
+            source.name || key,
+          );
+          updateCameraState(key, cameraStartResultState(result));
+        } catch (error) {
+          updateCameraState(key, cameraStartErrorState(error));
+        }
+      });
+    };
+
+    startCameraStreams();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cameraOpen, cameraSourceKey]);
+
+  useEffect(() => {
+    if (cameraOpen) return undefined;
+    setCameraStreams({});
+    setCameraImageStates({});
+    if (!isElectronEnvironment()) return undefined;
+    electronCamera.stopAll().catch(() => {});
+    return undefined;
+  }, [cameraOpen]);
+
+  useEffect(() => {
+    if (!cameraOpen) return undefined;
+
+    const timers = Object.entries(cameraStreams)
+      .filter(([, stream]) => stream?.success && stream.url && stream.mode !== 'chamber-image-mjpeg')
+      .map(([key, stream]) => window.setTimeout(() => {
+        setCameraImageStates((prev) => {
+          if (prev[key]?.status === 'ready') return prev;
+          return {
+            ...prev,
+            [key]: {
+              status: 'error',
+              message: stream.mode === 'custom'
+                ? '自定义摄像头地址没有返回画面'
+                : '自动摄像头没有返回画面，可在设置里填写 MJPEG 或快照 URL',
+            },
+          };
+        });
+      }, 8000));
+
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [cameraOpen, cameraStreams]);
 
   useEffect(() => {
     if (!isElectronEnvironment()) return;
@@ -501,8 +868,8 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
         const rect = node.getBoundingClientRect();
         const measuredWidth = Math.ceil(rect.width);
         const measuredHeight = Math.ceil(node.scrollHeight || rect.height);
-        const minWindowWidth = miniAutoSize ? 1 : (isCompact ? 360 : 320);
-        const minWindowHeight = miniAutoSize ? 1 : 80;
+        const minWindowWidth = miniAutoSize ? 148 : (cameraOpen ? 680 : (isCompact ? 360 : 320));
+        const minWindowHeight = miniAutoSize ? 74 : (cameraOpen ? 420 : 80);
         const width = Math.max(minWindowWidth, measuredWidth);
         const height = Math.max(minWindowHeight, measuredHeight);
 
@@ -511,7 +878,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
           || Math.abs(lastResizeRef.current.height - height) > 1
         ) {
           lastResizeRef.current = { width, height };
-          electronWindow.resize({ width, height });
+          electronWindow.resize({ width, height, minWidth: minWindowWidth, minHeight: minWindowHeight });
         }
       });
     };
@@ -531,7 +898,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
       if (frameId) cancelAnimationFrame(frameId);
       observer.disconnect();
     };
-  }, [printers.length, miniAutoSize, isCompact, isHorizontal, ipDialog, settingsOpen, panelWidth, finishedPrinters.length, activeMiniPrinters.length]);
+  }, [printers.length, miniAutoSize, cameraOpen, isCompact, isHorizontal, ipDialog, settingsOpen, panelWidth, finishedPrinters.length, activeMiniPrinters.length, cameraSourceKey]);
 
   const openIpDialog = (printer) => {
     setIpDialog({ serial: printer.dev_id, name: printer.name, value: printer.ip || '' });
@@ -614,13 +981,51 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
     }
   };
 
+  const updateCameraConfig = (updater) => {
+    setCameraFeedback('');
+    setCameraConfig((prev) => {
+      const base = prev || createDefaultCameraConfig();
+      const next = typeof updater === 'function' ? updater(base) : { ...base, ...updater };
+      saveCameraConfig(next);
+      return next;
+    });
+  };
+
+  const updateCameraUrl = (printer, value) => {
+    const key = getPrinterCameraKey(printer);
+    updateCameraConfig((prev) => ({
+      ...prev,
+      customUrls: {
+        ...(prev.customUrls || {}),
+        [key]: value,
+      },
+    }));
+  };
+
+  const toggleStartup = async (enabled) => {
+    setStartupBusy(true);
+    setStartupFeedback('');
+    try {
+      const result = await electronApp.setStartupEnabled({ enabled });
+      if (!result?.success) {
+        throw new Error(result?.error || '设置开机启动失败');
+      }
+      setStartupEnabledState(Boolean(result.enabled));
+      setStartupFeedback(result.enabled ? '已开启开机自启动' : '已关闭开机自启动');
+    } catch (error) {
+      setStartupFeedback(error?.message || '设置开机启动失败');
+    } finally {
+      setStartupBusy(false);
+    }
+  };
+
   const renderCloudNotice = (compact = false) => {
     if (cloudOverviewCount === 0) return null;
     return (
       <div
         style={{
           padding: compact ? '9px 10px' : '10px 12px',
-          borderRadius: compact ? 13 : 14,
+          borderRadius: 8,
           background: 'linear-gradient(135deg, rgba(102,178,255,0.12), rgba(126,240,196,0.08))',
           border: '1px solid rgba(135,195,255,0.18)',
           color: 'rgba(226,238,255,0.78)',
@@ -628,7 +1033,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
           lineHeight: 1.55,
         }}
       >
-        {cloudOverviewCount} 台处于云端概览：可看云端在线/打印状态；温度、AMS、层数和精确进度需要本地或 VPN 实时连接。
+        {cloudOverviewCount} 台未识别本地 IP：当前只能看云端在线/打印状态；温度、AMS、层数和精确进度需要本地或 VPN 实时连接。
         <br />
         官方远程视图请使用 Bambu Connect / Bambu Handy；本工具不读取私有网络插件数据。
       </div>
@@ -669,8 +1074,46 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
     </button>
   );
 
+  const renderSettingsButton = (size = 34) => (
+    <button
+      type="button"
+      onClick={() => setSettingsOpen(true)}
+      title="设置"
+      style={{
+        ...interactive,
+        width: size,
+        height: size,
+        borderRadius: size <= 28 ? 8 : (size <= 30 ? 10 : 11),
+        color: notificationConfig.enabled ? '#8df0c0' : 'rgba(246,250,255,0.88)',
+        background: notificationConfig.enabled ? 'rgba(86,226,168,0.14)' : 'rgba(255,255,255,0.08)',
+        border: notificationConfig.enabled ? '1px solid rgba(86,226,168,0.24)' : '1px solid rgba(255,255,255,0.1)',
+      }}
+    >
+      <Settings size={size <= 24 ? 12 : (size <= 30 ? 14 : 16)} />
+    </button>
+  );
+
+  const renderCameraButton = (size = 34) => (
+    <button
+      type="button"
+      onClick={() => setCameraOpen((prev) => !prev)}
+      title={cameraOpen ? '返回监控面板' : '打开摄像头墙'}
+      style={{
+        ...interactive,
+        width: size,
+        height: size,
+        borderRadius: size <= 28 ? 8 : (size <= 30 ? 10 : 11),
+        color: cameraOpen ? '#8bc3ff' : 'rgba(246,250,255,0.88)',
+        background: cameraOpen ? 'rgba(91,177,255,0.16)' : 'rgba(255,255,255,0.08)',
+        border: cameraOpen ? '1px solid rgba(91,177,255,0.28)' : '1px solid rgba(255,255,255,0.1)',
+      }}
+    >
+      <Camera size={size <= 24 ? 12 : (size <= 30 ? 14 : 16)} />
+    </button>
+  );
+
   const renderOpacityControl = () => (
-    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 10, alignItems: 'center', padding: '10px 12px', borderRadius: 12, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 10, alignItems: 'center', padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
       <div style={{ fontSize: 12, color: 'rgba(203,217,239,0.72)', fontWeight: 700 }}>窗口透明度</div>
       <input
         type="range"
@@ -756,7 +1199,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                 }}
               />
             </svg>
-            <span style={{ position: 'relative', zIndex: 1, color: ring.color, fontSize: ring.label.length > 5 ? 6 : (ring.label.length > 3 ? 7 : 8), lineHeight: 1, fontWeight: 900, letterSpacing: '-0.04em' }}>
+            <span style={{ position: 'relative', zIndex: 1, color: ring.color, fontSize: ring.label.length > 5 ? 6 : (ring.label.length > 3 ? 7 : 8), lineHeight: 1, fontWeight: 900, letterSpacing: 0 }}>
               {ring.label}
             </span>
           </span>
@@ -775,7 +1218,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
           width: 'max-content',
           maxWidth: '100%',
           padding: '5px 8px',
-          borderRadius: 11,
+          borderRadius: 8,
           background: 'linear-gradient(180deg, rgba(255,255,255,0.062), rgba(255,255,255,0.038))',
           border: '1px solid rgba(126,240,196,0.2)',
           boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.05)',
@@ -810,9 +1253,9 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
           type="button"
           onClick={() => openIpDialog(printer)}
           style={{ ...buttonStyle, color: '#ffd287', background: 'rgba(255,183,77,0.14)', border: '1px solid rgba(255,183,77,0.24)' }}
-          title="填写当前电脑可访问的 IP，切换为完整实时监控"
+          title="未识别本地 IP，填写后会记住并自动连接实时监控"
         >
-          连实时
+          填 IP
         </button>
       );
     }
@@ -834,6 +1277,128 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
     return <StatusBadge printer={printer} compact={compact} />;
   };
 
+  const renderCameraView = () => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minHeight: 390 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 800, color: '#f7fbff' }}>
+            <Camera size={17} />
+            摄像头墙
+          </div>
+          <div style={{ marginTop: 5, fontSize: 11, color: 'rgba(203,217,239,0.62)', lineHeight: 1.5 }}>
+            H2D/X1/P2S 走 RTSPS；A1/P1/A2 会自动尝试 6000 端口 JPEG 流，统一转成浏览器可显示的 MJPEG。
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, WebkitAppRegion: 'no-drag' }}>
+          <button type="button" onClick={() => setCameraOpen(false)} title="返回监控面板" style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
+            <Rows3 size={16} />
+          </button>
+          {renderSettingsButton(34)}
+          {renderTopButton(34)}
+        </div>
+      </div>
+
+      {cameraFeedback ? (
+        <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,183,77,0.12)', border: '1px solid rgba(255,183,77,0.18)', color: '#ffdca2', fontSize: 12, lineHeight: 1.5 }}>
+          {cameraFeedback}
+        </div>
+      ) : null}
+
+      {printers.length === 0 ? (
+        <div style={{ padding: '24px 18px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 13, background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
+          正在等待打印机列表...
+        </div>
+      ) : (
+        <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, overflowY: 'auto', paddingRight: 2 }}>
+          {printers.map((printer) => {
+            const key = getPrinterCameraKey(printer);
+            const stream = cameraStreams[key];
+            const customUrl = getCustomCameraUrl(cameraConfig, printer);
+            const note = cameraCompatibilityNote(printer);
+            const imageState = cameraImageStates[key];
+            const isSnapshotStream = isChamberSnapshotStream(stream);
+            const imageUrl = isSnapshotStream ? stream.snapshotUrl : stream?.url;
+            const showImage = stream?.success && imageUrl && imageState?.status !== 'error';
+            const isImageReady = imageState?.status === 'ready';
+            const isCameraPending = stream?.pending || imageState?.status === 'loading';
+            const cameraStatusLabel = isImageReady
+              ? (customUrl ? '自定义' : '有画面')
+              : (imageState?.status === 'manual' ? '需配置' : (imageState?.status === 'error' ? '无画面' : (isCameraPending || stream?.success ? '连接中' : '待连接')));
+            const cameraStatusColor = isImageReady
+              ? '#8df0c0'
+              : (imageState?.status === 'manual' ? '#ffd08a' : (imageState?.status === 'error' ? '#ffd08a' : 'rgba(203,217,239,0.62)'));
+            const cameraMessage = imageState?.message || stream?.error || '正在打开摄像头...';
+
+            return (
+              <section key={`camera-${key}`} style={{ overflow: 'hidden', borderRadius: 8, background: 'linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.035))', border: '1px solid rgba(255,255,255,0.08)' }}>
+                <div style={{ aspectRatio: '16 / 10', background: 'rgba(3,8,16,0.72)', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}>
+                  {showImage ? (
+                    <>
+                      {isSnapshotStream ? (
+                        <ChamberSnapshotCanvas
+                          snapshotUrl={imageUrl}
+                          imageKey={key}
+                          alt={`${printer.name || '打印机'} 摄像头`}
+                          isReady={isImageReady}
+                          setCameraImageStates={setCameraImageStates}
+                        />
+                      ) : (
+                        <img
+                          src={imageUrl}
+                          alt={`${printer.name || '打印机'} 摄像头`}
+                          onLoad={() => {
+                            setCameraImageStates((prev) => ({
+                              ...prev,
+                              [key]: { status: 'ready' },
+                            }));
+                          }}
+                          onError={() => {
+                            setCameraImageStates((prev) => ({
+                              ...prev,
+                              [key]: {
+                                status: 'error',
+                                message: customUrl ? '自定义摄像头地址无法显示' : '摄像头暂时无法打开',
+                              },
+                            }));
+                          }}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', opacity: isImageReady ? 1 : 0.35, transition: 'opacity 0.2s ease' }}
+                        />
+                      )}
+                      {!isImageReady ? (
+                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14, background: 'rgba(3,8,16,0.48)', color: 'rgba(226,238,255,0.74)', fontSize: 12, lineHeight: 1.45, textAlign: 'center' }}>
+                          等待摄像头画面...
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div style={{ padding: 14, textAlign: 'center', color: 'rgba(226,238,255,0.62)', fontSize: 12, lineHeight: 1.45 }}>
+                      <Camera size={24} style={{ marginBottom: 6, opacity: 0.72 }} />
+                      <div>{cameraMessage}</div>
+                      {note ? <div style={{ marginTop: 6, color: 'rgba(255,220,162,0.82)' }}>{note}</div> : null}
+                    </div>
+                  )}
+                </div>
+                <div style={{ padding: '10px 11px', display: 'grid', gap: 5 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                    <div style={{ minWidth: 0, fontSize: 12, fontWeight: 800, color: '#f7fbff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {printer.name || '未命名打印机'}
+                    </div>
+                    <span style={{ flex: '0 0 auto', fontSize: 10, color: cameraStatusColor }}>
+                      {cameraStatusLabel}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 10, color: 'rgba(203,217,239,0.58)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {printer.ip ? `IP ${printer.ip}` : '需要本地 IP 才能自动打开'}
+                  </div>
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div
       ref={widgetRef}
@@ -841,31 +1406,50 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
         position: 'relative',
         width: miniAutoSize ? 'fit-content' : panelWidth,
         minWidth: miniAutoSize ? 0 : (isCompact ? 360 : 220),
-        minHeight: settingsOpen ? 640 : (ipDialog ? 240 : undefined),
+        minHeight: settingsOpen ? 640 : (cameraOpen ? 420 : (ipDialog ? 240 : undefined)),
         padding: isMini ? '9px 10px' : (isCompact ? '12px 14px' : '18px 18px 14px'),
         borderRadius: 0,
-        background: 'radial-gradient(circle at top left, rgba(104,196,255,0.16), transparent 34%), radial-gradient(circle at top right, rgba(118,255,181,0.14), transparent 28%), linear-gradient(160deg, rgba(10,17,28,0.97) 0%, rgba(14,23,37,0.95) 42%, rgba(8,13,24,0.98) 100%)',
-        boxShadow: '0 18px 48px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.08), inset 0 0 0 1px rgba(255,255,255,0.06)',
+        background: 'linear-gradient(90deg, rgba(126,240,196,0.14) 0 5px, transparent 5px), linear-gradient(160deg, rgba(18,22,29,0.98) 0%, rgba(13,17,24,0.97) 48%, rgba(8,10,16,0.99) 100%)',
+        boxShadow: '0 22px 54px rgba(0,0,0,0.46), inset 0 1px 0 rgba(255,255,255,0.08), inset 0 0 0 1px rgba(255,255,255,0.06)',
         color: '#fff',
         cursor: isLocked ? 'default' : 'move',
         WebkitAppRegion: isLocked ? 'no-drag' : 'drag',
-        overflow: settingsOpen || ipDialog ? 'hidden' : 'visible',
+        overflow: cameraOpen || settingsOpen || ipDialog ? 'hidden' : 'visible',
       }}
     >
-      {isMini ? (
+      {cameraOpen ? renderCameraView() : isMini ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 5, WebkitAppRegion: 'no-drag' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
+            <div
+              title="拖动窗口"
+              style={{
+                WebkitAppRegion: isLocked ? 'no-drag' : 'drag',
+                width: 38,
+                height: 24,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: 8,
+                color: 'rgba(226,238,255,0.48)',
+                background: 'rgba(255,255,255,0.045)',
+                border: '1px solid rgba(255,255,255,0.06)',
+                flex: '0 0 auto',
+              }}
+            >
+              <GripHorizontal size={14} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 5, WebkitAppRegion: 'no-drag' }}>
             <button type="button" onClick={() => setViewMode('compact')} title="返回紧凑模式" style={{ ...interactive, width: 24, height: 24, borderRadius: 8, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
               <Maximize2 size={12} />
             </button>
+            {renderCameraButton(24)}
             {renderTopButton(24)}
-            <button type="button" onClick={() => setSettingsOpen(true)} title="通知与透明度" style={{ ...interactive, width: 24, height: 24, borderRadius: 8, color: notificationConfig.enabled ? '#8df0c0' : 'rgba(246,250,255,0.88)', background: notificationConfig.enabled ? 'rgba(86,226,168,0.14)' : 'rgba(255,255,255,0.08)', border: notificationConfig.enabled ? '1px solid rgba(86,226,168,0.24)' : '1px solid rgba(255,255,255,0.1)' }}>
-              <Settings size={12} />
-            </button>
+            {renderSettingsButton(24)}
+            </div>
           </div>
 
           {printers.length === 0 ? (
-            <div style={{ padding: '10px 9px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 12, background: 'rgba(255,255,255,0.05)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ padding: '10px 9px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 12, background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
               正在同步设备...
             </div>
           ) : (
@@ -877,34 +1461,42 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
         </div>
       ) : isCompact ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '42px 1fr auto', alignItems: 'center', gap: 10 }}>
-            <div style={{ width: 42, height: 42, borderRadius: 14, background: 'linear-gradient(135deg, rgba(126,240,196,0.28), rgba(139,195,255,0.2))', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#dff8ff', fontSize: 12, fontWeight: 800, letterSpacing: '0.12em' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '42px 1fr', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 42, height: 42, borderRadius: 8, background: 'linear-gradient(135deg, rgba(126,240,196,0.28), rgba(255,209,102,0.18))', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#dff8ff', fontSize: 12, fontWeight: 800, letterSpacing: 0 }}>
               BM
             </div>
             <div style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: '#f7fbff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {printers.length > 0 ? `${printers.length} 台打印机 · ${onlineCount} 台在线` : 'Bambu Monitor'}
-                </div>
-                <div style={{ flex: '0 0 auto', fontSize: 11, color: printingCount > 0 ? '#80f6b8' : 'rgba(203,217,239,0.62)' }}>
-                  {printingCount > 0 ? `${printingCount} 台打印中` : '全部总览'}
-                </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                {printers.length > 0 ? (
+                  <>
+                    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, padding: '3px 7px', borderRadius: 8, background: 'rgba(255,255,255,0.075)', border: '1px solid rgba(255,255,255,0.08)', color: '#f7fbff', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                      总设备 <strong style={{ fontSize: 13 }}>{printers.length}</strong>
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, padding: '3px 7px', borderRadius: 8, background: 'rgba(126,240,196,0.1)', border: '1px solid rgba(126,240,196,0.14)', color: '#92f4c5', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                      在线 <strong style={{ fontSize: 13 }}>{onlineCount}</strong>
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, padding: '3px 7px', borderRadius: 8, background: printingCount > 0 ? 'rgba(126,240,196,0.1)' : 'rgba(255,255,255,0.055)', border: printingCount > 0 ? '1px solid rgba(126,240,196,0.14)' : '1px solid rgba(255,255,255,0.07)', color: printingCount > 0 ? '#80f6b8' : 'rgba(203,217,239,0.62)', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                      打印中 <strong style={{ fontSize: 13 }}>{printingCount}</strong>
+                    </span>
+                  </>
+                ) : (
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f7fbff' }}>Bambu Monitor</div>
+                )}
               </div>
               <div style={{ marginTop: 7 }}>
                 <ProgressBar progress={compactProgress} status={printingCount > 0 ? 'printing' : 'idle'} compact />
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 7, WebkitAppRegion: 'no-drag' }}>
+            <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', gap: 7, WebkitAppRegion: 'no-drag' }}>
               <button type="button" onClick={() => setViewMode('full')} title="展开监控面板" style={{ ...interactive, width: 30, height: 30, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
                 <Maximize2 size={14} />
               </button>
               <button type="button" onClick={() => setViewMode('mini')} title="切换为超迷你模式" style={{ ...interactive, width: 30, height: 30, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
                 <Minimize2 size={14} />
               </button>
+              {renderCameraButton(30)}
               {renderTopButton(30)}
-              <button type="button" onClick={() => setSettingsOpen(true)} title="通知设置" style={{ ...interactive, width: 30, height: 30, borderRadius: 10, color: notificationConfig.enabled ? '#8df0c0' : 'rgba(246,250,255,0.88)', background: notificationConfig.enabled ? 'rgba(86,226,168,0.14)' : 'rgba(255,255,255,0.08)', border: notificationConfig.enabled ? '1px solid rgba(86,226,168,0.24)' : '1px solid rgba(255,255,255,0.1)' }}>
-                <Bell size={14} />
-              </button>
+              {renderSettingsButton(30)}
               <button
                 type="button"
                 onClick={lockMousePassthrough}
@@ -920,7 +1512,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
           {renderCloudNotice(true)}
 
           {printers.length === 0 ? (
-            <div style={{ padding: '14px 12px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 12, background: 'rgba(255,255,255,0.05)', borderRadius: 14, border: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ padding: '14px 12px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 12, background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
               正在同步设备...
             </div>
           ) : (
@@ -935,7 +1527,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                     key={printer.dev_id}
                     style={{
                       padding: '10px 11px',
-                      borderRadius: 15,
+                      borderRadius: 8,
                       background: 'linear-gradient(180deg, rgba(255,255,255,0.075), rgba(255,255,255,0.045))',
                       border: '1px solid rgba(255,255,255,0.08)',
                       boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)',
@@ -969,23 +1561,25 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
         </div>
       ) : (
         <>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 16 }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 10, lineHeight: 1.2, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'rgba(185,205,235,0.64)', marginBottom: 7 }}>
-                Bambu Monitor
+          <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 10, lineHeight: 1.2, letterSpacing: 0, textTransform: 'uppercase', color: 'rgba(202,213,228,0.58)', marginBottom: 7, fontWeight: 800 }}>
+                  Bambu Monitor
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 850, color: '#f7fbff', lineHeight: 1.18 }}>
+                  {printers.length > 0 ? '打印控制台' : '正在准备打印机数据'}
+                </div>
+                <div style={{ marginTop: 5, fontSize: 11, color: 'rgba(203,217,239,0.62)', lineHeight: 1.45 }}>
+                  {cloudOverviewCount > 0 ? '本地实时与云端状态兜底' : (isHorizontal ? '横向总览模式' : '纵向实时监控模式')}
+                </div>
               </div>
-              <div style={{ fontSize: 16, fontWeight: 600, color: '#f7fbff' }}>
-                {printers.length > 0 ? `${printers.length} 台打印机 · ${onlineCount} 台在线` : '正在准备打印机数据'}
-              </div>
-              <div style={{ marginTop: 5, fontSize: 11, color: 'rgba(203,217,239,0.58)' }}>
-                {cloudOverviewCount > 0 ? '云端概览 + 本地实时混合模式' : (isHorizontal ? '横向总览模式' : '纵向实时监控模式')}
-              </div>
-            </div>
 
-            <div style={{ display: 'flex', gap: 8, WebkitAppRegion: 'no-drag' }}>
+              <div style={{ display: 'flex', gap: 8, WebkitAppRegion: 'no-drag' }}>
               <button type="button" onClick={() => setViewMode('compact')} title="切换为紧凑模式" style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
                 <Minimize2 size={16} />
               </button>
+              {renderCameraButton(34)}
               {renderTopButton(34)}
               <button
                 type="button"
@@ -995,14 +1589,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
               >
                 {isHorizontal ? <Rows3 size={16} /> : <LayoutGrid size={16} />}
               </button>
-              <button
-                type="button"
-                onClick={() => setSettingsOpen(true)}
-                title="通知与集成设置"
-                style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: notificationConfig.enabled ? '#8df0c0' : 'rgba(246,250,255,0.88)', background: notificationConfig.enabled ? 'rgba(86,226,168,0.14)' : 'rgba(255,255,255,0.08)', border: notificationConfig.enabled ? '1px solid rgba(86,226,168,0.24)' : '1px solid rgba(255,255,255,0.1)' }}
-              >
-                <Bell size={16} />
-              </button>
+              {renderSettingsButton(34)}
               <button
                 type="button"
                 onClick={lockMousePassthrough}
@@ -1020,13 +1607,21 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
               >
                 <Power size={16} />
               </button>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
+              <SummaryPill label="总设备" value={printers.length || 0} tone="cloud" />
+              <SummaryPill label="在线" value={onlineCount} tone="live" />
+              <SummaryPill label="打印中" value={printingCount} tone={printingCount > 0 ? 'live' : 'neutral'} />
+              <SummaryPill label="需关注" value={attentionCount} tone={attentionCount > 0 ? 'warn' : 'neutral'} />
             </div>
           </div>
 
           {renderCloudNotice()}
 
           {printers.length === 0 ? (
-            <div style={{ padding: '24px 18px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 13, background: 'rgba(255,255,255,0.05)', borderRadius: 16, border: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ padding: '24px 18px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 13, background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
               正在同步云端设备并等待本地遥测...
             </div>
           ) : (
@@ -1044,40 +1639,43 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                       flex: isHorizontal ? '0 0 212px' : '1 1 auto',
                       display: 'flex',
                       flexDirection: 'column',
-                      gap: 10,
-                      padding: '14px',
-                      borderRadius: 16,
-                      background: 'linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.04))',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.05)',
+                      gap: 12,
+                      padding: '12px',
+                      borderRadius: 8,
+                      background: 'linear-gradient(180deg, rgba(255,255,255,0.062), rgba(255,255,255,0.032))',
+                      border: `1px solid ${progressMeta.border}`,
+                      boxShadow: `inset 0 1px 0 rgba(255,255,255,0.055), 0 10px 24px rgba(0,0,0,0.18), 0 0 20px ${progressMeta.glow}`,
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: '#f7fbff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {printer.name || '未命名打印机'}
-                        </div>
-                        <div style={{ marginTop: 4, fontSize: 11, color: 'rgba(200,214,234,0.58)' }}>
-                          {printer.ip ? `IP ${printer.ip}` : (isCloudOverview(printer) ? '云端概览 · 连实时需填写可访问 IP' : '等待填写可访问 IP')}
+                      <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <PrinterAvatar printer={printer} palette={progressMeta} />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 800, color: '#f7fbff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {printer.name || '未命名打印机'}
+                          </div>
+                          <div style={{ marginTop: 4, fontSize: 11, color: 'rgba(200,214,234,0.62)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {printer.ip ? `IP ${printer.ip}` : (isCloudOverview(printer) ? '未识别本地 IP · 填写后可实时监控' : '等待填写可访问 IP')}
+                          </div>
                         </div>
                       </div>
                       {renderAction(printer, isHorizontal)}
                     </div>
 
                     <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 7, fontSize: 11, color: 'rgba(226,235,248,0.72)' }}>
-                        <span style={{ maxWidth: isHorizontal ? 118 : 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'end', gap: 10, marginBottom: 8 }}>
+                        <span style={{ minWidth: 0, maxWidth: isHorizontal ? 118 : 240, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 11, color: 'rgba(226,235,248,0.72)' }}>
                           {meta.left}
                         </span>
                         <span
                           style={{
-                            padding: '4px 8px',
-                            borderRadius: 999,
+                            minWidth: 52,
+                            textAlign: 'right',
                             color: progressMeta.text,
-                            background: progressMeta.badge,
-                            border: `1px solid ${progressMeta.border}`,
-                            fontWeight: 700,
-                            letterSpacing: '0.02em',
+                            fontSize: isCloudOverview(printer) ? 12 : 20,
+                            lineHeight: 1,
+                            fontWeight: 900,
+                            letterSpacing: 0,
                           }}
                         >
                           {isCloudOverview(printer) ? statusText(printer).replace('云端：', '') : `${progress}%`}
@@ -1086,15 +1684,15 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                       <ProgressBar progress={progress} status={printer.status} />
                     </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: isHorizontal ? '1fr' : '1fr auto', gap: '6px 10px', alignItems: 'center' }}>
-                      <div style={{ fontSize: 11, color: 'rgba(226,235,248,0.72)' }}>{meta.right}</div>
-                      <div style={{ fontSize: 11, color: 'rgba(172,191,216,0.64)', justifySelf: isHorizontal ? 'start' : 'end' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: isHorizontal ? '1fr' : '1fr auto', gap: '6px 10px', alignItems: 'center', padding: '8px 0 0', borderTop: '1px solid rgba(255,255,255,0.065)' }}>
+                      <div style={{ minWidth: 0, fontSize: 11, color: 'rgba(226,235,248,0.72)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{meta.right}</div>
+                      <div style={{ fontSize: 11, color: 'rgba(172,191,216,0.7)', justifySelf: isHorizontal ? 'start' : 'end', whiteSpace: 'nowrap' }}>
                         {temperatureText(printer)}
                       </div>
                     </div>
 
                     {ams.text ? (
-                      <div style={{ padding: '9px 10px', borderRadius: 12, background: 'rgba(118,143,179,0.12)', color: 'rgba(229,239,255,0.78)', fontSize: 11, lineHeight: 1.5 }}>
+                      <div style={{ padding: '8px 9px', borderRadius: 8, background: 'rgba(118,143,179,0.11)', color: 'rgba(229,239,255,0.78)', fontSize: 11, lineHeight: 1.5 }}>
                         {ams.text}
                       </div>
                     ) : null}
@@ -1102,7 +1700,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                     {ams.trays.length > 0 ? (
                       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         {ams.trays.map((tray) => (
-                          <div key={`${printer.dev_id}-${tray.id}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderRadius: 10, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.06)', fontSize: 10, color: 'rgba(236,243,255,0.8)' }}>
+                          <div key={`${printer.dev_id}-${tray.id}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.06)', fontSize: 10, color: 'rgba(236,243,255,0.8)' }}>
                             <span style={{ width: 10, height: 10, borderRadius: '50%', background: tray.color, border: '1px solid rgba(255,255,255,0.24)' }} />
                             <span>{tray.remain === null ? '--' : `${tray.remain}%`}</span>
                           </div>
@@ -1111,7 +1709,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                     ) : null}
 
                     {printer.errorMsg ? (
-                      <div style={{ fontSize: 11, color: '#ffb1b1', background: 'rgba(255,107,107,0.1)', border: '1px solid rgba(255,107,107,0.16)', borderRadius: 12, padding: '8px 10px', lineHeight: 1.5 }}>
+                      <div style={{ fontSize: 11, color: '#ffb1b1', background: 'rgba(255,107,107,0.1)', border: '1px solid rgba(255,107,107,0.16)', borderRadius: 8, padding: '8px 10px', lineHeight: 1.5 }}>
                         {printer.errorMsg}
                       </div>
                     ) : null}
@@ -1128,16 +1726,16 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
       )}
 
       {settingsOpen ? (
-        <div style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.62)', backdropFilter: 'blur(14px)', borderRadius: 0, WebkitAppRegion: 'no-drag', overflow: 'hidden' }}>
-          <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: 14, padding: 18, borderRadius: 18, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(10,16,27,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 20px 52px rgba(0,0,0,0.38)' }}>
+        <div style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.62)', backdropFilter: 'blur(14px)', borderRadius: 0, WebkitAppRegion: 'no-drag', overflowY: 'auto' }}>
+          <div style={{ minHeight: '100%', display: 'flex', flexDirection: 'column', gap: 14, padding: 18, borderRadius: 8, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(10,16,27,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 20px 52px rgba(0,0,0,0.38)' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 700, color: '#f7fbff' }}>
                   <Settings size={16} />
-                  通知与集成
+                  设置
                 </div>
                 <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(203,217,239,0.66)', lineHeight: 1.5 }}>
-                  打印完成、异常、断开和恢复时推送到 OpenClaw 或 Hermes。
+                  窗口、通知、开机启动和摄像头墙都在这里调整。
                 </div>
               </div>
               <button
@@ -1149,7 +1747,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
               </button>
             </div>
 
-            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '11px 12px', borderRadius: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
+            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '11px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
               <span>启用外部通知</span>
               <input
                 type="checkbox"
@@ -1171,7 +1769,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
               />
             </div>
 
-            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', borderRadius: 12, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
+            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
               <span>窗口保持最前</span>
               <input
                 type="checkbox"
@@ -1183,9 +1781,58 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
 
             {renderOpacityControl()}
 
+            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
+              <span>开机自动启动</span>
+              <input
+                type="checkbox"
+                checked={startupEnabled}
+                disabled={startupBusy}
+                onChange={(event) => toggleStartup(event.target.checked)}
+                style={{ width: 18, height: 18 }}
+              />
+            </label>
+
+            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
+              <span>连接后自动打开摄像头墙</span>
+              <input
+                type="checkbox"
+                checked={Boolean(cameraConfig.autoOpen)}
+                onChange={(event) => {
+                  updateCameraConfig({ autoOpen: event.target.checked });
+                  if (event.target.checked) setCameraOpen(true);
+                }}
+                style={{ width: 18, height: 18 }}
+              />
+            </label>
+
+            {printers.length > 0 ? (
+              <div style={{ display: 'grid', gap: 8, padding: 12, borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'rgba(235,243,255,0.9)', fontSize: 13, fontWeight: 700 }}>
+                  <Camera size={14} />
+                  摄像头地址
+                </div>
+                <div style={{ fontSize: 11, color: 'rgba(203,217,239,0.6)', lineHeight: 1.5 }}>
+                  留空会按机型自动尝试 RTSPS 或 6000 JPEG 流；外部 MJPEG/快照 URL 只作为兜底。
+                </div>
+                {printers.map((printer) => {
+                  const key = getPrinterCameraKey(printer);
+                  return (
+                    <input
+                      key={`camera-url-${key}`}
+                      type="text"
+                      value={getCustomCameraUrl(cameraConfig, printer)}
+                      onChange={(event) => updateCameraUrl(printer, event.target.value)}
+                      placeholder={`${printer.name || '打印机'} 自定义摄像头 URL（可选）`}
+                      style={{ width: '100%', padding: '9px 10px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.11)', background: 'rgba(255,255,255,0.06)', color: '#f7fbff', outline: 'none', fontSize: 11 }}
+                    />
+                  );
+                })}
+              </div>
+            ) : null}
+
             <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', paddingRight: 2 }}>
               {notificationConfig.targets.map((target) => (
-                <div key={target.id} style={{ padding: 12, borderRadius: 14, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                <div key={target.id} style={{ padding: 12, borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 10 }}>
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 700, color: '#f7fbff' }}>{target.name}</div>
@@ -1250,6 +1897,12 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
               </div>
             ) : null}
 
+            {startupFeedback || cameraFeedback ? (
+              <div style={{ fontSize: 12, color: (startupFeedback || cameraFeedback).includes('失败') ? '#ffb1b1' : '#95f0bf', lineHeight: 1.5 }}>
+                {startupFeedback || cameraFeedback}
+              </div>
+            ) : null}
+
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
               <button
                 type="button"
@@ -1275,7 +1928,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
 
       {ipDialog ? (
         <div style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.58)', backdropFilter: 'blur(12px)', borderRadius: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', WebkitAppRegion: 'no-drag' }}>
-          <form onSubmit={submitIpDialog} style={{ width: '100%', maxWidth: 320, padding: 18, borderRadius: 16, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(11,18,30,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 18px 42px rgba(0,0,0,0.38)' }}>
+          <form onSubmit={submitIpDialog} style={{ width: '100%', maxWidth: 320, padding: 18, borderRadius: 8, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(11,18,30,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 18px 42px rgba(0,0,0,0.38)' }}>
             <div style={{ fontSize: 15, fontWeight: 600, color: '#f7fbff' }}>设置打印机 IP</div>
             <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(203,217,239,0.68)', lineHeight: 1.5 }}>
               {ipDialog.name || '当前设备'}

@@ -6,55 +6,90 @@ import appIconUrl from './assets/app-icon.svg';
 import { bambuClient, scanPrinters } from './services/bambu';
 import { electronAuth, electronWindow, isElectronEnvironment } from './services/electron';
 import { dispatchPrinterNotification, getPrinterNotificationEvent } from './services/notifications';
-
-const normalizeSerial = (value) => String(value || '')
-  .trim()
-  .replace(/^uuid:/i, '')
-  .replace(/::.*$/, '')
-  .replace(/[^A-Za-z0-9_-]/g, '')
-  .toUpperCase();
-
-const normalizeName = (value) => String(value || '').trim().toLowerCase();
+import { buildDeviceSyncSnapshot, mergePrinterState, normalizeName } from './utils/printerSync';
 
 const isTokenInvalidError = (errorText) => (
   /expired|invalid|unauthorized|forbidden|401|token/i.test(String(errorText || ''))
 );
 
-const mapCloudPrintStatus = (printStatus, hasIp, online) => {
-  const statusText = String(printStatus || '').toUpperCase();
+const AGREEMENT_KEY = 'bambu_terms_agreed';
 
-  if (!hasIp && online === false) return 'cloud_offline';
-  if (!statusText) return hasIp ? 'connecting' : 'cloud_overview';
-  if (statusText.includes('RUN') || statusText.includes('PRINT')) return 'printing';
-  if (statusText.includes('PAUSE')) return 'paused';
-  if (statusText.includes('PREPARE')) return 'preparing';
-  if (statusText.includes('FINISH')) return 'finished';
-  if (statusText.includes('IDLE')) return 'idle';
-
-  return hasIp ? 'connecting' : 'cloud_overview';
-};
-
-const mergeTelemetryNumber = (nextValue, previousValue, fallback = 0) => {
-  if (nextValue !== undefined && nextValue !== null && Number.isFinite(Number(nextValue))) {
-    return Number(nextValue);
-  }
-  if (previousValue !== undefined && previousValue !== null && Number.isFinite(Number(previousValue))) {
-    return Number(previousValue);
-  }
-  return fallback;
-};
-
-const mergeTemperature = (previous = {}, next = {}) => ({
-  nozzle: mergeTelemetryNumber(next.nozzle, previous.nozzle),
-  bed: mergeTelemetryNumber(next.bed, previous.bed),
-  chamber: mergeTelemetryNumber(next.chamber, previous.chamber),
-});
-
-const mergePrinterState = (previous = {}, next = {}) => ({
-  ...previous,
-  ...next,
-  temperature: mergeTemperature(previous.temperature, next.temperature),
-});
+const PREVIEW_PRINTERS = [
+  {
+    dev_id: 'PREVIEW_A1_MINI',
+    cloudId: 'cloud-a1-mini',
+    name: 'A1 mini',
+    model: 'A1 mini',
+    modelCode: 'N2S',
+    ip: '192.168.1.101',
+    accessCode: '00000000',
+    status: 'printing',
+    statusSource: 'local',
+    cloudOnline: true,
+    progress: 68,
+    timeLeft: '2h 18m',
+    temperature: { nozzle: 219, bed: 61, chamber: 0 },
+    fan: 72,
+    speed: 100,
+    layer: '132/300',
+    filename: 'RX178马克兔440%精细分件V2-背包.3mf',
+    errorMsg: '',
+    ams: {
+      activeAmsIndex: 0,
+      units: [{
+        index: 0,
+        humidityRaw: 43,
+        activeTray: { remain: 58, trayWeight: 850 },
+        trays: [
+          { id: 0, color: '55E6B2FF', remain: 82 },
+          { id: 1, color: '74B8FFFF', remain: 58 },
+          { id: 2, color: 'FFD166FF', remain: 34 },
+          { id: 3, color: 'FF827DFF', remain: 16 },
+        ],
+      }],
+    },
+  },
+  {
+    dev_id: 'PREVIEW_H2D',
+    cloudId: 'cloud-h2d',
+    name: 'H2D',
+    model: 'H2D',
+    modelCode: 'H2D',
+    ip: '192.168.1.102',
+    accessCode: '00000000',
+    status: 'paused',
+    statusSource: 'local',
+    cloudOnline: true,
+    progress: 44,
+    timeLeft: '3h 35m',
+    temperature: { nozzle: 210, bed: 55, chamber: 35 },
+    fan: 46,
+    speed: 70,
+    layer: '88/260',
+    filename: '0.2mm 层高，2 层墙，15% 填充.3mf',
+    errorMsg: '',
+  },
+  {
+    dev_id: 'PREVIEW_P1S',
+    cloudId: 'cloud-p1s',
+    name: 'P1S',
+    model: 'P1S',
+    modelCode: 'P1S',
+    ip: null,
+    accessCode: '',
+    status: 'cloud_overview',
+    statusSource: 'cloud',
+    cloudOnline: true,
+    progress: 22,
+    timeLeft: '--',
+    temperature: { nozzle: 0, bed: 0, chamber: 0 },
+    fan: 0,
+    speed: 100,
+    layer: '',
+    filename: '云端状态同步中',
+    errorMsg: '',
+  },
+];
 
 function TitleBar({ isElectron }) {
   if (!isElectron) return null;
@@ -84,7 +119,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [countdown, setCountdown] = useState(0);
-  const [agreed, setAgreed] = useState(false);
+  const [agreed, setAgreed] = useState(() => localStorage.getItem(AGREEMENT_KEY) === 'true');
   const autoLoginAttemptedRef = useRef(false);
 
   useEffect(() => {
@@ -106,6 +141,10 @@ function ConnectionScreen({ onConnect, isElectron }) {
 
     return () => clearInterval(timer);
   }, [countdown]);
+
+  useEffect(() => {
+    localStorage.setItem(AGREEMENT_KEY, String(agreed));
+  }, [agreed]);
 
   const handleSendCode = async () => {
     if (!isElectron) {
@@ -138,6 +177,66 @@ function ConnectionScreen({ onConnect, isElectron }) {
     }
   };
 
+  const readCachedIps = () => {
+    try {
+      return JSON.parse(localStorage.getItem('cached_printer_ips') || '{}');
+    } catch {
+      return {};
+    }
+  };
+
+  const buildDeviceSync = (cloudDevices, scannedPrinters = []) => {
+    const snapshot = buildDeviceSyncSnapshot({
+      cloudDevices,
+      scannedPrinters,
+      cachedIps: readCachedIps(),
+    });
+
+    localStorage.setItem('cached_printer_ips', JSON.stringify(snapshot.cachedIps));
+
+    return {
+      devicesWithIp: snapshot.devicesWithIp,
+      initialPrinters: snapshot.initialPrinters,
+    };
+  };
+
+  const connectReachableDevices = (devicesWithIp) => {
+    const existingById = new Map(bambuClient.getAllPrinters().map((printer) => [printer.dev_id, printer]));
+
+    devicesWithIp
+      .filter((device) => device.ip)
+      .forEach((device) => {
+        const existing = existingById.get(device.mqttSerial);
+        if (existing?.ip === device.ip && bambuClient.isConnected(device.mqttSerial)) return;
+
+        bambuClient.connectLocal(
+          device.ip,
+          device.accessCode,
+          device.mqttSerial,
+          (updatedPrinter) => updatedPrinter,
+          device.name,
+        ).catch((err) => {
+          console.error(`Failed to connect ${device.name}:`, err);
+        });
+      });
+  };
+
+  const refreshLanDevicesInBackground = async (cloudDevices) => {
+    let scannedPrinters = [];
+    try {
+      scannedPrinters = await scanPrinters();
+    } catch (scanErr) {
+      console.error('LAN scan failed:', scanErr);
+      return;
+    }
+
+    const { devicesWithIp, initialPrinters } = buildDeviceSync(cloudDevices, scannedPrinters);
+    if (devicesWithIp.some((device) => device.ip)) {
+      onConnect(initialPrinters);
+      connectReachableDevices(devicesWithIp);
+    }
+  };
+
   const fetchDeviceList = async (token, options = {}) => {
     setLoading(true);
 
@@ -164,86 +263,20 @@ function ConnectionScreen({ onConnect, isElectron }) {
         return;
       }
 
-      setSuccessMsg('正在同步云端设备，并扫描局域网打印机...');
-
-      let scannedPrinters = [];
-      try {
-        scannedPrinters = await scanPrinters();
-      } catch (scanErr) {
-        console.error('LAN scan failed:', scanErr);
-      }
-
-      const cachedIps = JSON.parse(localStorage.getItem('cached_printer_ips') || '{}');
-      const scannedBySerial = new Map();
-      const scannedByName = new Map();
-
-      scannedPrinters.forEach((printer) => {
-        const serialKey = normalizeSerial(printer.serial);
-        const nameKey = normalizeName(printer.name);
-        if (serialKey) scannedBySerial.set(serialKey, printer);
-        if (nameKey && !scannedByName.has(nameKey)) scannedByName.set(nameKey, printer);
-      });
-
-      const devicesWithIp = cloudDevices.map((device) => {
-        const serialKey = normalizeSerial(device.id);
-        const nameKey = normalizeName(device.name);
-        const scanned = scannedBySerial.get(serialKey) || scannedByName.get(nameKey);
-        const scannedSerial = normalizeSerial(scanned?.serial);
-        const mqttSerial = scannedSerial || serialKey || String(device.id);
-        let ip = scanned?.ip || cachedIps[device.id] || null;
-
-        if (ip) cachedIps[device.id] = ip;
-
-        return {
-          ...device,
-          mqttSerial,
-          ip,
-        };
-      });
-
-      localStorage.setItem('cached_printer_ips', JSON.stringify(cachedIps));
-
-      const initialPrinters = devicesWithIp.map((device) => ({
-        dev_id: device.mqttSerial,
-        cloudId: device.id,
-        name: device.name,
-        ip: device.ip,
-        accessCode: device.accessCode,
-        status: mapCloudPrintStatus(device.printStatus, Boolean(device.ip), device.online),
-        statusSource: device.ip ? 'local' : 'cloud',
-        cloudOnline: device.online,
-        progress: 0,
-        timeLeft: '--',
-        temperature: { nozzle: 0, bed: 0, chamber: 0 },
-        fan: 0,
-        speed: 100,
-        layer: '',
-        filename: '',
-        errorMsg: '',
-      }));
-
+      const { devicesWithIp, initialPrinters } = buildDeviceSync(cloudDevices);
       const reachableDevices = devicesWithIp.filter((device) => device.ip);
+
       setSuccessMsg(
         reachableDevices.length > 0
-          ? `已找到 ${cloudDevices.length} 台设备，正在连接 ${reachableDevices.length} 台局域网可达设备...`
-          : '已进入云端概览模式：可查看云端在线/打印状态；填写可访问 IP 后切换完整实时监控。',
+          ? `已读取 ${cloudDevices.length} 台设备，正在使用缓存 IP 快速连接 ${reachableDevices.length} 台...`
+          : `已读取 ${cloudDevices.length} 台云端设备，先进入概览，后台继续扫描局域网...`,
       );
 
-      reachableDevices.forEach((device) => {
-        bambuClient.connectLocal(
-          device.ip,
-          device.accessCode,
-          device.mqttSerial,
-          (updatedPrinter) => updatedPrinter,
-          device.name,
-        ).catch((err) => {
-          console.error(`Failed to connect ${device.name}:`, err);
-        });
-      });
-
+      connectReachableDevices(devicesWithIp);
       setLoading(false);
       electronWindow.resize({ width: 450, height: 200 });
       onConnect(initialPrinters);
+      refreshLanDevicesInBackground(cloudDevices);
     } catch (err) {
       console.error('Fetch device list error:', err);
       const errorText = err.message || '获取设备失败';
@@ -355,10 +388,11 @@ function ConnectionScreen({ onConnect, isElectron }) {
           </div>
           <div className="login-visual-copy">
             <div className="login-kicker">Bambu Monitor</div>
-            <h1>桌面打印机监控</h1>
-            <p>登录后同步云端设备，自动扫描局域网，常驻桌面查看打印进度、异常和完成通知。</p>
+            <h1>BambuMonitor</h1>
+            <p>一个常驻桌面的打印状态控制台：同步云端设备，本地实时连接，快速看进度、温度、AMS 和异常提醒。</p>
           </div>
           <div className="login-status-card">
+            <div className="status-card-title">实时概览</div>
             <div className="status-row">
               <span className="status-dot mint" />
               <span>A1 mini</span>
@@ -374,6 +408,11 @@ function ConnectionScreen({ onConnect, isElectron }) {
               <span>P1SC</span>
               <strong>异常</strong>
             </div>
+            <div className="login-mini-metrics">
+              <span>局域网实时</span>
+              <span>云端兜底</span>
+              <span>通知联动</span>
+            </div>
           </div>
         </section>
 
@@ -383,8 +422,8 @@ function ConnectionScreen({ onConnect, isElectron }) {
               <ShieldCheck size={15} />
               Bambu Lab / MakerWorld
             </div>
-            <h2>登录账号</h2>
-            <p>用于同步绑定设备，局域网连接仍在本机完成。</p>
+            <h2>同步你的打印机</h2>
+            <p>账号只用于读取绑定设备；实时遥测仍优先走本机可访问的局域网连接。</p>
           </div>
 
           {!isElectron ? (
@@ -500,8 +539,13 @@ function ConnectionScreen({ onConnect, isElectron }) {
 
 function App() {
   const [isElectron] = useState(() => isElectronEnvironment());
-  const [isConnected, setIsConnected] = useState(false);
-  const [printers, setPrinters] = useState([]);
+  const [isPreviewMode] = useState(() => (
+    !isElectronEnvironment()
+    && typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).get('preview') === 'dashboard'
+  ));
+  const [isConnected, setIsConnected] = useState(() => isPreviewMode);
+  const [printers, setPrinters] = useState(() => (isPreviewMode ? PREVIEW_PRINTERS : []));
   const lastPrinterStatusRef = useRef(new Map());
 
   useEffect(() => {
@@ -603,6 +647,9 @@ function App() {
 
     const cachedIps = JSON.parse(localStorage.getItem('cached_printer_ips') || '{}');
     cachedIps[printer.cloudId || printer.dev_id] = normalizedIp;
+    cachedIps[printer.dev_id] = normalizedIp;
+    const nameKey = normalizeName(printer.name);
+    if (nameKey) cachedIps[nameKey] = normalizedIp;
     localStorage.setItem('cached_printer_ips', JSON.stringify(cachedIps));
 
     setPrinters((prev) => {
@@ -660,7 +707,7 @@ function App() {
   return (
     <>
       <PrinterWidget printers={printers} onUpdateIp={handleUpdateIp} />
-      {!isElectron ? <MobileDashboard printers={printers} /> : null}
+      {!isElectron && !isPreviewMode ? <MobileDashboard printers={printers} /> : null}
     </>
   );
 }

@@ -1,7 +1,14 @@
 ﻿const { app, BrowserWindow, ipcMain, screen, globalShortcut, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const crypto = require('crypto');
+const http = require('http');
+const { spawn } = require('child_process');
 const mqtt = require('mqtt');
+const {
+  ChamberImageStream,
+  buildBambuRtspUrl,
+  isChamberImageCamera,
+} = require('./camera-stream.cjs');
 
 let mainWindow;
 let tray = null;
@@ -11,6 +18,11 @@ let windowOpacity = 1;
 const OPACITY_PRESETS = [1, 0.95, 0.9, 0.85, 0.8];
 
 const mqttConnections = new Map();
+const cameraSources = new Map();
+const cameraProcesses = new Set();
+const chamberStreams = new Map();
+let cameraServer = null;
+let cameraServerPort = 0;
 
 function buildNotificationHeaders(target, body) {
   const headers = {
@@ -62,6 +74,377 @@ function safelyCloseSocket(socket) {
   }
 }
 
+function getLoginItemOptions(openAtLogin) {
+  if (app.isPackaged) {
+    return { openAtLogin };
+  }
+
+  return {
+    openAtLogin,
+    path: process.execPath,
+    args: [app.getAppPath()],
+  };
+}
+
+function getStartupEnabled() {
+  try {
+    return Boolean(app.getLoginItemSettings(getLoginItemOptions(true)).openAtLogin);
+  } catch (err) {
+    console.warn('Unable to read startup setting:', err.message);
+    return false;
+  }
+}
+
+function setStartupEnabled(enabled) {
+  app.setLoginItemSettings(getLoginItemOptions(Boolean(enabled)));
+  return getStartupEnabled();
+}
+
+function stopCameraProcesses() {
+  for (const child of cameraProcesses) {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // Ignore already-stopped ffmpeg processes.
+    }
+  }
+  cameraProcesses.clear();
+}
+
+function stopChamberStreams() {
+  for (const entry of chamberStreams.values()) {
+    try {
+      entry.stream.stop();
+    } catch {
+      // Ignore cleanup races.
+    }
+  }
+  chamberStreams.clear();
+}
+
+function getChamberStream(source) {
+  const key = `${source.id}|${source.ip}|${source.accessCode}`;
+  let entry = chamberStreams.get(source.id);
+
+  if (entry && entry.key !== key) {
+    try {
+      entry.stream.stop();
+    } catch {
+      // Ignore cleanup races.
+    }
+    chamberStreams.delete(source.id);
+    entry = null;
+  }
+
+  if (!entry) {
+    const stream = new ChamberImageStream({
+      host: source.ip,
+      accessCode: source.accessCode,
+    });
+    stream.on('error', (error) => {
+      console.warn(`[Camera ${source.id}] chamber-image error: ${error?.message || error}`);
+    });
+    stream.on('warn', (warning) => {
+      console.warn(`[Camera ${source.id}] chamber-image warning: ${warning}`);
+    });
+    stream.start();
+    entry = { key, stream, clients: 0, graceTimer: null };
+    chamberStreams.set(source.id, entry);
+  }
+
+  return entry;
+}
+
+function writeMjpegFrame(res, boundary, jpeg) {
+  res.write(`--${boundary}\r\n`);
+  res.write('Content-Type: image/jpeg\r\n');
+  res.write(`Content-Length: ${jpeg.length}\r\n\r\n`);
+  res.write(jpeg);
+  res.write('\r\n');
+}
+
+function handleChamberImageRequest(source, req, res) {
+  if (!source.ip || !source.accessCode) {
+    res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('missing printer IP or access code');
+    return;
+  }
+
+  const boundary = 'bambuframe';
+  const entry = getChamberStream(source);
+  entry.clients += 1;
+  if (entry.graceTimer) {
+    clearTimeout(entry.graceTimer);
+    entry.graceTimer = null;
+  }
+
+  res.writeHead(200, {
+    'content-type': `multipart/x-mixed-replace; boundary=${boundary}`,
+    'cache-control': 'no-store, no-cache, must-revalidate, private',
+    pragma: 'no-cache',
+    connection: 'close',
+    'access-control-allow-origin': '*',
+  });
+
+  const onFrame = (jpeg) => {
+    if (!res.destroyed && !res.writableEnded) writeMjpegFrame(res, boundary, jpeg);
+  };
+
+  if (entry.stream.lastFrame) onFrame(entry.stream.lastFrame);
+  entry.stream.on('frame', onFrame);
+
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    entry.stream.removeListener('frame', onFrame);
+    entry.clients -= 1;
+    if (entry.clients <= 0 && !entry.graceTimer) {
+      entry.graceTimer = setTimeout(() => {
+        entry.graceTimer = null;
+        if (entry.clients <= 0) {
+          try {
+            entry.stream.stop();
+          } catch {
+            // Ignore cleanup races.
+          }
+          chamberStreams.delete(source.id);
+        }
+      }, 20000);
+    }
+  };
+
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+}
+
+function handleChamberFrameRequest(source, _req, res) {
+  if (!source.ip || !source.accessCode) {
+    res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('missing printer IP or access code');
+    return;
+  }
+
+  const entry = getChamberStream(source);
+  const sendFrame = (jpeg) => {
+    if (res.destroyed || res.writableEnded) return;
+    res.writeHead(200, {
+      'content-type': 'image/jpeg',
+      'content-length': jpeg.length,
+      'cache-control': 'no-store, no-cache, must-revalidate, private',
+      pragma: 'no-cache',
+      'access-control-allow-origin': '*',
+    });
+    res.end(jpeg);
+  };
+
+  if (entry.stream.lastFrame) {
+    sendFrame(entry.stream.lastFrame);
+    return;
+  }
+
+  const cleanup = () => {
+    clearTimeout(timeout);
+    entry.stream.removeListener('frame', onFrame);
+  };
+  const onFrame = (jpeg) => {
+    cleanup();
+    sendFrame(jpeg);
+  };
+  const timeout = setTimeout(() => {
+    cleanup();
+    if (!res.destroyed && !res.writableEnded) {
+      res.writeHead(504, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      res.end('timed out waiting for camera frame');
+    }
+  }, 4000);
+
+  entry.stream.once('frame', onFrame);
+  res.on('close', cleanup);
+}
+
+function handleRtspCameraRequest(source, req, res) {
+  if (!source?.url) {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('camera source not registered');
+    return;
+  }
+
+
+  const args = [
+    '-hide_banner',
+    '-loglevel', 'warning',
+    '-rtsp_transport', 'tcp',
+    '-i', source.url,
+    '-an',
+    '-vf', 'fps=4,scale=640:-1',
+    '-q:v', '6',
+    '-f', 'mpjpeg',
+    '-boundary_tag', 'ffmpeg',
+    'pipe:1',
+  ];
+
+  let responded = false;
+  const child = spawn('ffmpeg', args, { windowsHide: true });
+  cameraProcesses.add(child);
+
+  const cleanup = () => {
+    if (cameraProcesses.has(child)) cameraProcesses.delete(child);
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // Ignore process cleanup races.
+    }
+  };
+
+  child.on('error', (err) => {
+    cleanup();
+    if (!responded) {
+      responded = true;
+      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(err.code === 'ENOENT' ? 'ffmpeg is not installed or not in PATH' : err.message);
+    }
+  });
+
+  child.stderr.on('data', (chunk) => {
+    console.warn(`[Camera ${source.id}] ${chunk.toString().trim()}`);
+  });
+
+  child.stdout.once('data', (chunk) => {
+    if (res.destroyed) {
+      cleanup();
+      return;
+    }
+
+    responded = true;
+    res.writeHead(200, {
+      'content-type': 'multipart/x-mixed-replace;boundary=ffmpeg',
+      'cache-control': 'no-store, no-cache, must-revalidate, private',
+      pragma: 'no-cache',
+      connection: 'close',
+      'access-control-allow-origin': '*',
+    });
+    res.write(chunk);
+    child.stdout.pipe(res);
+  });
+
+  child.on('close', () => {
+    cameraProcesses.delete(child);
+    if (!responded && !res.destroyed) {
+      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('camera stream closed before video data was received');
+      return;
+    }
+    if (!res.destroyed) res.end();
+  });
+
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+}
+
+function handleCameraRequest(req, res) {
+  const requestUrl = new URL(req.url, 'http://127.0.0.1');
+  const parts = requestUrl.pathname.split('/').filter(Boolean);
+
+  if (req.method === 'GET' && requestUrl.pathname === '/camera-debug') {
+    const now = Date.now();
+    const sources = Array.from(cameraSources.values()).map((source) => {
+      const entry = chamberStreams.get(source.id);
+      const stream = entry?.stream;
+      return {
+        id: source.id,
+        name: source.name,
+        ip: source.ip,
+        mode: source.mode || 'rtsps',
+        hasFrame: Boolean(stream?.lastFrame),
+        frameCount: stream?.frameCount || 0,
+        lastFrameAgeMs: stream?.lastFrameAt ? now - stream.lastFrameAt : null,
+        clients: entry?.clients || 0,
+      };
+    });
+
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'access-control-allow-origin': '*',
+    });
+    res.end(JSON.stringify({ sources }, null, 2));
+    return;
+  }
+
+  if (req.method !== 'GET' || parts[0] !== 'camera' || !parts[1]) {
+    if (req.method === 'GET' && parts[0] === 'camera-frame' && parts[1]) {
+      const frameSource = cameraSources.get(decodeURIComponent(parts[1]));
+      if (!frameSource) {
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('camera source not registered');
+        return;
+      }
+      if (frameSource.mode !== 'chamber-image') {
+        res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('snapshot frames are only available for chamber-image cameras');
+        return;
+      }
+      handleChamberFrameRequest(frameSource, req, res);
+      return;
+    }
+
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('not found');
+    return;
+  }
+
+  const source = cameraSources.get(decodeURIComponent(parts[1]));
+  if (!source) {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('camera source not registered');
+    return;
+  }
+
+  if (source.mode === 'chamber-image') {
+    handleChamberImageRequest(source, req, res);
+    return;
+  }
+
+  handleRtspCameraRequest(source, req, res);
+}
+
+async function ensureCameraServer() {
+  if (cameraServer && cameraServerPort) return cameraServerPort;
+
+  cameraServer = http.createServer(handleCameraRequest);
+  cameraServer.on('clientError', (_err, socket) => {
+    socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+  });
+
+  return new Promise((resolve, reject) => {
+    cameraServer.once('error', reject);
+    cameraServer.listen(0, '127.0.0.1', () => {
+      const address = cameraServer.address();
+      cameraServerPort = Number(address?.port || 0);
+      cameraServer.off('error', reject);
+      resolve(cameraServerPort);
+    });
+  });
+}
+
+function closeCameraServer() {
+  stopCameraProcesses();
+  stopChamberStreams();
+  cameraSources.clear();
+
+  if (cameraServer) {
+    try {
+      cameraServer.close();
+    } catch {
+      // Ignore shutdown races.
+    }
+  }
+
+  cameraServer = null;
+  cameraServerPort = 0;
+}
+
 function getIconPath() {
   const isDev = !app.isPackaged;
   if (isDev) {
@@ -82,6 +465,7 @@ function updateTrayMenu() {
           mainWindow.hide();
         } else {
           mainWindow.show();
+          bringWindowToFront();
         }
       },
     },
@@ -109,6 +493,15 @@ function updateTrayMenu() {
         },
       })),
     },
+    {
+      label: '开机自启动',
+      type: 'checkbox',
+      checked: getStartupEnabled(),
+      click: (menuItem) => {
+        setStartupEnabled(menuItem.checked);
+        updateTrayMenu();
+      },
+    },
     { type: 'separator' },
     { label: '退出', click: () => app.quit() },
   ]);
@@ -129,10 +522,51 @@ function setWindowOpacity(opacity) {
   updateTrayMenu();
 }
 
+function bringWindowToFront({ focus = true } = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+  }
+
+  if (isAlwaysOnTop) {
+    try {
+      mainWindow.setAlwaysOnTop(false);
+      mainWindow.setAlwaysOnTop(true, process.platform === 'win32' ? 'screen-saver' : 'floating');
+    } catch {
+      mainWindow.setAlwaysOnTop(true);
+    }
+  }
+
+  try {
+    mainWindow.moveTop();
+  } catch {
+    // Some platforms do not expose moveTop for every window state.
+  }
+
+  if (focus) {
+    try {
+      mainWindow.focus();
+    } catch {
+      // Ignore OS focus-stealing prevention.
+    }
+  }
+}
+
 function setAlwaysOnTop(flag) {
   isAlwaysOnTop = !!flag;
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setAlwaysOnTop(isAlwaysOnTop);
+    try {
+      mainWindow.setAlwaysOnTop(isAlwaysOnTop, process.platform === 'win32' ? 'screen-saver' : 'floating');
+    } catch {
+      mainWindow.setAlwaysOnTop(isAlwaysOnTop);
+    }
+    if (isAlwaysOnTop) {
+      bringWindowToFront();
+    }
     if (mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.send('always-on-top-changed', isAlwaysOnTop);
     }
@@ -184,6 +618,7 @@ function createWindow() {
 
   mainWindow.loadURL(startUrl);
   setWindowOpacity(windowOpacity);
+  setAlwaysOnTop(isAlwaysOnTop);
 
   if (mainWindow.removeMenu) {
     mainWindow.removeMenu();
@@ -226,6 +661,7 @@ function createWindow() {
         mainWindow.hide();
       } else {
         mainWindow.show();
+        bringWindowToFront();
       }
       updateTrayMenu();
     });
@@ -263,6 +699,7 @@ app.on('will-quit', () => {
     }
   }
   mqttConnections.clear();
+  closeCameraServer();
 });
 
 app.on('activate', () => {
@@ -287,9 +724,19 @@ ipcMain.on('resize-me', (event, bounds) => {
   if (!win) return;
 
   const currentSize = win.getContentSize();
-  const newHeight = bounds.height || currentSize[1];
-  const newWidth = bounds.width || currentSize[0];
+  const display = screen.getDisplayMatching(win.getBounds());
+  const workArea = display?.workAreaSize || screen.getPrimaryDisplay().workAreaSize;
+  const minWidth = Math.max(96, Number(bounds.minWidth) || 1);
+  const minHeight = Math.max(56, Number(bounds.minHeight) || 1);
+  const maxWidth = Math.max(minWidth, workArea.width - 24);
+  const maxHeight = Math.max(minHeight, workArea.height - 24);
+  const newHeight = Math.min(maxHeight, Math.max(minHeight, Number(bounds.height) || currentSize[1]));
+  const newWidth = Math.min(maxWidth, Math.max(minWidth, Number(bounds.width) || currentSize[0]));
+
   win.setContentSize(newWidth, newHeight, true);
+  if (isAlwaysOnTop) {
+    bringWindowToFront({ focus: false });
+  }
 });
 
 ipcMain.on('window-minimize', (event) => {
@@ -303,6 +750,69 @@ ipcMain.on('window-close', () => {
 
 ipcMain.on('app-quit', () => {
   app.quit();
+});
+
+ipcMain.handle('startup-get', async () => ({
+  success: true,
+  enabled: getStartupEnabled(),
+}));
+
+ipcMain.handle('startup-set', async (_event, { enabled }) => {
+  try {
+    return {
+      success: true,
+      enabled: setStartupEnabled(enabled),
+    };
+  } catch (err) {
+    return { success: false, error: err.message || '设置开机启动失败' };
+  }
+});
+
+ipcMain.handle('camera-start', async (_event, payload = {}) => {
+  try {
+    const id = String(payload.serialNumber || payload.cloudId || payload.id || payload.ip || '').trim();
+    const mode = isChamberImageCamera(payload) ? 'chamber-image' : 'rtsps';
+    const streamUrl = mode === 'rtsps' ? buildBambuRtspUrl(payload) : '';
+
+    if (!id || !payload.ip || !payload.accessCode || (mode === 'rtsps' && !streamUrl)) {
+      return { success: false, error: '缺少打印机 IP 或访问码，无法打开摄像头' };
+    }
+
+    const port = await ensureCameraServer();
+    cameraSources.set(id, {
+      id,
+      name: payload.name || id,
+      model: payload.model || '',
+      modelCode: payload.modelCode || '',
+      ip: payload.ip,
+      accessCode: payload.accessCode,
+      mode,
+      url: streamUrl,
+    });
+
+    return {
+      success: true,
+      url: `http://127.0.0.1:${port}/camera/${encodeURIComponent(id)}?v=${Date.now()}`,
+      snapshotUrl: mode === 'chamber-image'
+        ? `http://127.0.0.1:${port}/camera-frame/${encodeURIComponent(id)}?v=${Date.now()}`
+        : '',
+      mode: mode === 'chamber-image' ? 'chamber-image-mjpeg' : 'rtsps-mjpeg',
+    };
+  } catch (err) {
+    return { success: false, error: err.message || '打开摄像头失败' };
+  }
+});
+
+ipcMain.handle('camera-stop', async (_event, { serialNumber, id } = {}) => {
+  const key = String(serialNumber || id || '').trim();
+  if (key) cameraSources.delete(key);
+  return { success: true };
+});
+
+ipcMain.handle('camera-stop-all', async () => {
+  cameraSources.clear();
+  stopCameraProcesses();
+  return { success: true };
 });
 
 ipcMain.handle('scan-printers', async () => {

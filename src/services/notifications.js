@@ -93,11 +93,10 @@ export function buildIntegrationSnippet(target = {}) {
   const sampleSecret = target.secret || 'change-this-secret-or-leave-empty';
 
   return `// Bambu Monitor -> ${targetName} webhook connector
-// 保存为 bambu-monitor-webhook.cjs
+// 保存为: bambu-monitor-webhook.cjs
 // 运行: node bambu-monitor-webhook.cjs
 // 然后在 Bambu Monitor 里填写: http://你的电脑IP:8787/bambu-monitor/webhook
-// 如果填写了 HMAC Secret，请让这里的 ${envName} 与 Bambu Monitor 里的 Secret 一致。
-
+// 如果填写了 HMAC Secret，请让这里的 ${envName} 和 Bambu Monitor 里的 Secret 一致。
 const http = require('http');
 const crypto = require('crypto');
 

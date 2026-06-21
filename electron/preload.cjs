@@ -36,6 +36,15 @@ contextBridge.exposeInMainWorld('bambuApi', {
   notifications: {
     send: (payload) => ipcRenderer.invoke('notification-send', payload),
   },
+  app: {
+    getStartupEnabled: () => ipcRenderer.invoke('startup-get'),
+    setStartupEnabled: (payload) => ipcRenderer.invoke('startup-set', payload),
+  },
+  camera: {
+    start: (payload) => ipcRenderer.invoke('camera-start', payload),
+    stop: (payload) => ipcRenderer.invoke('camera-stop', payload),
+    stopAll: () => ipcRenderer.invoke('camera-stop-all'),
+  },
   window: {
     minimize: () => ipcRenderer.send('window-minimize'),
     close: () => ipcRenderer.send('window-close'),

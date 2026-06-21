@@ -1,14 +1,15 @@
 :root {
   color-scheme: dark;
-  --login-bg: #0b111b;
-  --login-panel: #111923;
-  --login-panel-2: #172231;
-  --login-line: rgba(255, 255, 255, 0.1);
-  --login-text: #f5f8fc;
-  --login-muted: #91a0b4;
-  --login-accent: #66e0ad;
-  --login-blue: #6bb8ff;
-  --login-danger: #ff7d7d;
+  --login-bg: #0b0d11;
+  --login-panel: #11151c;
+  --login-panel-2: #181e27;
+  --login-line: rgba(255, 255, 255, 0.11);
+  --login-text: #f6f8fb;
+  --login-muted: #9aa8ba;
+  --login-accent: #63e6b2;
+  --login-blue: #74b8ff;
+  --login-warning: #ffd166;
+  --login-danger: #ff827d;
 }
 
 * {
@@ -24,9 +25,9 @@ body {
   height: 100vh;
   overflow: hidden;
   background:
-    radial-gradient(circle at 18% 10%, rgba(48, 226, 188, 0.12), transparent 30%),
-    radial-gradient(circle at 82% 0%, rgba(107, 184, 255, 0.12), transparent 34%),
-    linear-gradient(145deg, #0d1520 0%, #08101a 100%),
+    linear-gradient(115deg, rgba(99, 230, 178, 0.12) 0%, transparent 34%),
+    linear-gradient(245deg, rgba(255, 209, 102, 0.08) 0%, transparent 32%),
+    linear-gradient(145deg, #101217 0%, #07090d 100%),
     var(--login-bg);
   color: var(--login-text);
 }
@@ -105,9 +106,10 @@ input {
   justify-content: center;
   padding: 0;
   background:
-    radial-gradient(circle at 16% 10%, rgba(48, 226, 188, 0.16), transparent 28%),
-    radial-gradient(circle at 86% 0%, rgba(107, 184, 255, 0.16), transparent 34%),
-    linear-gradient(145deg, #111c29 0%, #08101a 100%);
+    linear-gradient(115deg, rgba(99, 230, 178, 0.16) 0%, transparent 34%),
+    linear-gradient(245deg, rgba(255, 209, 102, 0.1) 0%, transparent 32%),
+    linear-gradient(0deg, rgba(116, 184, 255, 0.08) 0%, transparent 42%),
+    linear-gradient(145deg, #11151b 0%, #080a0f 100%);
 }
 
 .login-shell {
@@ -115,10 +117,10 @@ input {
   height: 100vh;
   min-height: 0;
   display: grid;
-  grid-template-columns: 0.98fr 1.02fr;
+  grid-template-columns: minmax(360px, 0.96fr) minmax(390px, 1.04fr);
   overflow: hidden;
   border-radius: 0;
-  background: linear-gradient(145deg, #101821, #151f2c);
+  background: linear-gradient(145deg, #10141b, #171c24);
   border: 0;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
@@ -128,30 +130,38 @@ input {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 38px;
+  padding: 42px;
   background:
-    linear-gradient(160deg, rgba(24, 38, 54, 0.96), rgba(12, 19, 30, 0.98)),
-    #101821;
+    linear-gradient(160deg, rgba(22, 27, 36, 0.98), rgba(9, 12, 18, 0.98)),
+    #10141b;
   border-right: 1px solid var(--login-line);
 }
 
+.login-visual::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: linear-gradient(180deg, var(--login-accent), var(--login-blue) 54%, var(--login-warning));
+}
+
 .login-icon-frame {
-  width: 118px;
-  height: 118px;
+  width: 112px;
+  height: 112px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 30px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 18px 42px rgba(0, 0, 0, 0.28);
+  border-radius: 8px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.035));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 24px 52px rgba(0, 0, 0, 0.34);
 }
 
 .login-app-icon {
-  width: 96px;
-  height: 96px;
+  width: 88px;
+  height: 88px;
   object-fit: contain;
-  border-radius: 24px;
+  border-radius: 8px;
 }
 
 .login-visual-copy {
@@ -164,14 +174,14 @@ input {
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.12em;
+  letter-spacing: 0;
 }
 
 .login-visual-copy h1 {
   color: #f8fbff;
-  font-size: 30px;
-  line-height: 1.16;
-  font-weight: 800;
+  font-size: 34px;
+  line-height: 1.08;
+  font-weight: 850;
 }
 
 .login-visual-copy p {
@@ -185,10 +195,17 @@ input {
   margin-top: 32px;
   display: grid;
   gap: 9px;
-  padding: 14px;
-  border-radius: 16px;
-  background: rgba(3, 9, 17, 0.32);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 16px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.status-card-title {
+  color: rgba(247, 251, 255, 0.92);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .status-row {
@@ -228,9 +245,33 @@ input {
   background: var(--login-danger);
 }
 
+.login-mini-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 5px;
+}
+
+.login-mini-metrics span {
+  min-width: 0;
+  padding: 8px 6px;
+  border-radius: 8px;
+  color: rgba(236, 244, 255, 0.78);
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
 .login-card {
-  padding: 42px 42px 34px;
-  background: linear-gradient(180deg, rgba(20, 30, 43, 0.98), rgba(12, 18, 29, 0.98));
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 46px;
+  background:
+    linear-gradient(180deg, rgba(24, 28, 36, 0.98), rgba(10, 12, 18, 0.98)),
+    var(--login-panel);
 }
 
 .login-header {
@@ -243,7 +284,7 @@ input {
   gap: 7px;
   min-height: 30px;
   padding: 0 11px;
-  border-radius: 999px;
+  border-radius: 8px;
   color: #cfe6ff;
   background: rgba(107, 184, 255, 0.12);
   border: 1px solid rgba(107, 184, 255, 0.2);
@@ -271,7 +312,7 @@ input {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   padding: 4px;
-  border-radius: 14px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.055);
   border: 1px solid rgba(255, 255, 255, 0.08);
   margin-bottom: 20px;
@@ -284,7 +325,7 @@ input {
   justify-content: center;
   gap: 7px;
   border: 0;
-  border-radius: 11px;
+  border-radius: 6px;
   background: transparent;
   color: rgba(218, 229, 244, 0.72);
   cursor: pointer;
@@ -313,7 +354,7 @@ input {
   width: 100%;
   height: 44px;
   border: 1px solid rgba(255, 255, 255, 0.11);
-  border-radius: 12px;
+  border-radius: 8px;
   outline: none;
   padding: 0 13px;
   background: rgba(255, 255, 255, 0.06);
@@ -351,7 +392,7 @@ input {
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 9px;
+  border-radius: 6px;
   color: rgba(236, 244, 255, 0.78);
   background: rgba(255, 255, 255, 0.07);
   cursor: pointer;
@@ -391,7 +432,7 @@ input {
   width: 100%;
   height: 44px;
   border: 0;
-  border-radius: 12px;
+  border-radius: 8px;
   color: rgba(255, 255, 255, 0.72);
   background: rgba(255, 255, 255, 0.13);
   cursor: pointer;
@@ -417,7 +458,7 @@ input {
 .feedback-msg {
   margin-bottom: 12px;
   padding: 10px 12px;
-  border-radius: 12px;
+  border-radius: 8px;
   font-size: 12px;
   line-height: 1.5;
 }
@@ -449,5 +490,6 @@ input {
 
   .login-card {
     padding: 36px 28px 30px;
+    justify-content: flex-start;
   }
 }

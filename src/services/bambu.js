@@ -22,6 +22,7 @@ export class BambuClient {
         // Local state for printers (data comes from main process via IPC)
         this.printers = new Map();
         this.callbacks = new Map();
+        this.globalUpdateCallback = null;
         this.ipcListenerSetup = false;
         this.countdownTimer = null;
     }
@@ -30,9 +31,13 @@ export class BambuClient {
         const printer = this.printers.get(serialNumber);
         if (!printer) return;
 
+        const snapshot = { ...printer };
         const callback = this.callbacks.get(serialNumber);
         if (callback) {
-            callback({ ...printer });
+            callback(snapshot);
+        }
+        if (this.globalUpdateCallback) {
+            this.globalUpdateCallback(snapshot);
         }
     }
 
@@ -361,6 +366,7 @@ export class BambuClient {
             await electronMqtt.disconnectAll();
             this.printers.clear();
             this.callbacks.clear();
+            this.globalUpdateCallback = null;
             this.stopCountdownTimer();
         }
     }
@@ -399,10 +405,8 @@ export class BambuClient {
 
     // Set callbacks for all printers at once (for view switch)
     setGlobalUpdateCallback(callback) {
-        for (const serialNumber of this.printers.keys()) {
-            this.callbacks.set(serialNumber, (printer) => callback(printer));
-        }
-        // Call callback with all current printers
+        this.globalUpdateCallback = callback;
+
         for (const printer of this.printers.values()) {
             if (callback) {
                 callback({ ...printer });

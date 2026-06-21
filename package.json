@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && ELECTRON_START_URL=http://localhost:5173 electron .\"",
-    "electron:build": "npm run build && electron-builder"
+    "electron:build": "npm run build && electron-builder",
+    "test": "node --test src/utils/printerSync.test.js src/utils/cameraFrame.test.js src/utils/cameraStartup.test.js src/services/camera.test.js electron/camera-stream.test.cjs"
   },
   "build": {
     "appId": "com.bambumonitor.app",
@@ -32,7 +33,8 @@
     "files": [
       "dist/**/*",
       "electron/main.cjs",
-      "electron/preload.cjs"
+      "electron/preload.cjs",
+      "electron/camera-stream.cjs"
     ],
     "extraResources": [],
     "directories": {
