@@ -4,11 +4,14 @@ const crypto = require('crypto');
 const http = require('http');
 const { spawn } = require('child_process');
 const mqtt = require('mqtt');
+const { installSafeConsole } = require('./safe-console.cjs');
 const {
   ChamberImageStream,
   buildBambuRtspUrl,
   isChamberImageCamera,
 } = require('./camera-stream.cjs');
+
+installSafeConsole();
 
 let mainWindow;
 let tray = null;
@@ -23,6 +26,20 @@ const cameraProcesses = new Set();
 const chamberStreams = new Map();
 let cameraServer = null;
 let cameraServerPort = 0;
+const MQTT_RECONNECT_PERIOD_MS = 5000;
+const MQTT_RECONNECT_GRACE_MS = 45000;
+
+function sendRendererEvent(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
+function clearMqttDisconnectTimer(entry) {
+  if (!entry?.disconnectTimer) return;
+  clearTimeout(entry.disconnectTimer);
+  entry.disconnectTimer = null;
+}
 
 function buildNotificationHeaders(target, body) {
   const headers = {
@@ -694,6 +711,8 @@ app.on('will-quit', () => {
   global.listenSocket = null;
   global.searchSocket = null;
   for (const [, conn] of mqttConnections) {
+    conn.intentional = true;
+    clearMqttDisconnectTimer(conn);
     if (conn.client) {
       conn.client.end();
     }
@@ -1216,6 +1235,8 @@ ipcMain.handle('mqtt-connect', async (_event, { ip, accessCode, serialNumber }) 
   try {
     if (mqttConnections.has(serialNumber)) {
       const existing = mqttConnections.get(serialNumber);
+      existing.intentional = true;
+      clearMqttDisconnectTimer(existing);
       if (existing.client) {
         existing.client.end();
       }
@@ -1230,28 +1251,47 @@ ipcMain.handle('mqtt-connect', async (_event, { ip, accessCode, serialNumber }) 
       password: accessCode,
       rejectUnauthorized: false,
       connectTimeout: 15000,
-      reconnectPeriod: 0,
+      reconnectPeriod: MQTT_RECONNECT_PERIOD_MS,
+      resubscribe: true,
     });
+    const entry = {
+      client,
+      ip,
+      accessCode,
+      intentional: false,
+      connected: false,
+      disconnectTimer: null,
+    };
+    mqttConnections.set(serialNumber, entry);
 
     try {
       const result = await new Promise((resolve, reject) => {
+        let settled = false;
         const timeout = setTimeout(() => {
-          client.end();
+          entry.intentional = true;
+          client.end(true);
+          mqttConnections.delete(serialNumber);
+          settled = true;
           reject(new Error('MQTT连接超时'));
         }, 15000);
 
         client.on('connect', () => {
           clearTimeout(timeout);
+          clearMqttDisconnectTimer(entry);
+          entry.connected = true;
           console.log(`[Main] MQTT Connected: ${serialNumber}`);
+          sendRendererEvent('mqtt-connected', { serialNumber });
 
           const topic = `device/${serialNumber}/report`;
           client.subscribe(topic, (err) => {
             if (err) {
               console.error('[Main] Subscribe error:', err);
-              reject(err);
+              if (!settled) {
+                settled = true;
+                reject(err);
+              }
             } else {
               console.log(`[Main] Subscribed to ${topic}`);
-              mqttConnections.set(serialNumber, { client, ip, accessCode });
               try {
                 const requestTopic = `device/${serialNumber}/request`;
                 const pushAllPayload = JSON.stringify({
@@ -1264,7 +1304,10 @@ ipcMain.handle('mqtt-connect', async (_event, { ip, accessCode, serialNumber }) 
               } catch (publishErr) {
                 console.warn(`[Main] pushall request failed (${serialNumber}):`, publishErr.message);
               }
-              resolve({ success: true, serialNumber });
+              if (!settled) {
+                settled = true;
+                resolve({ success: true, serialNumber });
+              }
             }
           });
         });
@@ -1280,17 +1323,41 @@ ipcMain.handle('mqtt-connect', async (_event, { ip, accessCode, serialNumber }) 
           }
         });
 
+        client.on('reconnect', () => {
+          console.log(`[Main] MQTT Reconnecting: ${serialNumber}`);
+          sendRendererEvent('mqtt-reconnecting', { serialNumber });
+        });
+
+        client.on('offline', () => {
+          console.log(`[Main] MQTT Offline: ${serialNumber}`);
+          entry.connected = false;
+          sendRendererEvent('mqtt-reconnecting', { serialNumber });
+        });
+
         client.on('error', (err) => {
-          clearTimeout(timeout);
           console.error(`[Main] MQTT Error (${serialNumber}):`, err.message);
-          reject(err);
+          if (!settled) {
+            clearTimeout(timeout);
+            settled = true;
+            reject(err);
+          }
         });
 
         client.on('close', () => {
           console.log(`[Main] MQTT Connection closed: ${serialNumber}`);
-          mqttConnections.delete(serialNumber);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('mqtt-disconnected', { serialNumber });
+          entry.connected = false;
+          if (entry.intentional) return;
+
+          sendRendererEvent('mqtt-reconnecting', { serialNumber });
+          if (!entry.disconnectTimer) {
+            entry.disconnectTimer = setTimeout(() => {
+              entry.disconnectTimer = null;
+              if (entry.connected || entry.intentional) return;
+              sendRendererEvent('mqtt-disconnected', { serialNumber });
+            }, MQTT_RECONNECT_GRACE_MS);
+            if (entry.disconnectTimer.unref) {
+              entry.disconnectTimer.unref();
+            }
           }
         });
       });
@@ -1298,7 +1365,10 @@ ipcMain.handle('mqtt-connect', async (_event, { ip, accessCode, serialNumber }) 
       return result;
     } catch (promiseErr) {
       console.error('[Main] MQTT Promise error:', promiseErr.message);
-      client.end();
+      entry.intentional = true;
+      clearMqttDisconnectTimer(entry);
+      client.end(true);
+      mqttConnections.delete(serialNumber);
       return { success: false, error: promiseErr.message };
     }
   } catch (err) {
@@ -1310,6 +1380,8 @@ ipcMain.handle('mqtt-connect', async (_event, { ip, accessCode, serialNumber }) 
 ipcMain.handle('mqtt-disconnect', async (_event, { serialNumber }) => {
   if (mqttConnections.has(serialNumber)) {
     const conn = mqttConnections.get(serialNumber);
+    conn.intentional = true;
+    clearMqttDisconnectTimer(conn);
     if (conn.client) {
       conn.client.end();
     }
@@ -1320,6 +1392,8 @@ ipcMain.handle('mqtt-disconnect', async (_event, { serialNumber }) => {
 
 ipcMain.handle('mqtt-disconnect-all', async () => {
   for (const [, conn] of mqttConnections) {
+    conn.intentional = true;
+    clearMqttDisconnectTimer(conn);
     if (conn.client) {
       conn.client.end();
     }

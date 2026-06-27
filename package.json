@@ -2,6 +2,7 @@
   "name": "bambu_monitor",
   "private": true,
   "version": "1.0.7",
+  "license": "AGPL-3.0-or-later",
   "description": "Bambu Lab / 拓竹桌面打印机悬浮监控工具",
   "author": "Antigravity",
   "main": "electron/main.cjs",
@@ -13,7 +14,7 @@
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && ELECTRON_START_URL=http://localhost:5173 electron .\"",
     "electron:build": "npm run build && electron-builder",
-    "test": "node --test src/utils/printerSync.test.js src/utils/cameraFrame.test.js src/utils/cameraStartup.test.js src/services/camera.test.js electron/camera-stream.test.cjs"
+    "test": "node --test src/utils/printerSync.test.js src/utils/cameraFrame.test.js src/utils/cameraStartup.test.js src/utils/mqttConnectionState.test.js src/utils/cameraZoom.test.js src/services/camera.test.js electron/camera-stream.test.cjs electron/safe-console.test.cjs"
   },
   "build": {
     "appId": "com.bambumonitor.app",
@@ -34,7 +35,8 @@
       "dist/**/*",
       "electron/main.cjs",
       "electron/preload.cjs",
-      "electron/camera-stream.cjs"
+      "electron/camera-stream.cjs",
+      "electron/safe-console.cjs"
     ],
     "extraResources": [],
     "directories": {

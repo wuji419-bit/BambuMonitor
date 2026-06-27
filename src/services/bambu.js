@@ -1,6 +1,12 @@
 // Bambu Lab Local LAN Connection
 // MQTT connections now run in main process via IPC for TLS stability in packaged apps
 import { electronDevices, electronEvents, electronMqtt, isElectronEnvironment } from './electron';
+import {
+    applyMqttConnectedState,
+    applyMqttDisconnectedState,
+    applyMqttReconnectingState,
+    isReusableMqttConnectionStatus,
+} from '../utils/mqttConnectionState';
 
 // Scan for printers on local network using SSDP
 // This runs in Electron main process via IPC
@@ -71,12 +77,29 @@ export class BambuClient {
             this.handleMessage(serialNumber, payload);
         });
 
+        electronEvents.onMqttConnected(({ serialNumber }) => {
+            const printer = this.printers.get(serialNumber);
+            if (printer) {
+                Object.assign(printer, applyMqttConnectedState(printer));
+                this.emitUpdate(serialNumber);
+            }
+        });
+
+        electronEvents.onMqttReconnecting(({ serialNumber }) => {
+            console.log(`[Renderer] MQTT reconnecting: ${serialNumber}`);
+            const printer = this.printers.get(serialNumber);
+            if (printer) {
+                Object.assign(printer, applyMqttReconnectingState(printer));
+                this.emitUpdate(serialNumber);
+            }
+        });
+
         // Listen for disconnection events
         electronEvents.onMqttDisconnected(({ serialNumber }) => {
             console.log(`[Renderer] MQTT disconnected: ${serialNumber}`);
             const printer = this.printers.get(serialNumber);
             if (printer) {
-                printer.status = 'disconnected';
+                Object.assign(printer, applyMqttDisconnectedState(printer));
                 this.emitUpdate(serialNumber);
             }
         });
@@ -373,7 +396,7 @@ export class BambuClient {
 
     isConnected(serialNumber) {
         const printer = this.printers.get(serialNumber);
-        return printer ? (printer.status !== 'error' && printer.status !== 'disconnected' && printer.status !== 'connecting') : false;
+        return printer ? isReusableMqttConnectionStatus(printer.status) : false;
     }
 
     getConnectedCount() {

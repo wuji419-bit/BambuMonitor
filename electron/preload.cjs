@@ -60,6 +60,8 @@ contextBridge.exposeInMainWorld('bambuApi', {
     onAlwaysOnTopChanged: subscribe('always-on-top-changed'),
     onWindowOpacityChanged: subscribe('window-opacity-changed'),
     onMqttData: subscribe('mqtt-data'),
+    onMqttConnected: subscribe('mqtt-connected'),
+    onMqttReconnecting: subscribe('mqtt-reconnecting'),
     onMqttDisconnected: subscribe('mqtt-disconnected'),
   },
 });

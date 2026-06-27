@@ -117,6 +117,12 @@ export const electronEvents = {
   onMqttData(callback) {
     return getElectronApi()?.events.onMqttData(callback) || noOp;
   },
+  onMqttConnected(callback) {
+    return getElectronApi()?.events.onMqttConnected(callback) || noOp;
+  },
+  onMqttReconnecting(callback) {
+    return getElectronApi()?.events.onMqttReconnecting(callback) || noOp;
+  },
   onMqttDisconnected(callback) {
     return getElectronApi()?.events.onMqttDisconnected(callback) || noOp;
   },

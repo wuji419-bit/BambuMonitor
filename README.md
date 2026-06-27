@@ -94,4 +94,4 @@ BambuMonitor is a desktop floating monitor for Bambu Lab printers. It signs in w
 
 ## License
 
-MIT
+GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See [LICENSE](./LICENSE).
