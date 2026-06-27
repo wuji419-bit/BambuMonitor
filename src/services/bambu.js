@@ -7,6 +7,7 @@ import {
     applyMqttReconnectingState,
     isReusableMqttConnectionStatus,
 } from '../utils/mqttConnectionState';
+import { getPrintTaskName, mapTelemetryStatus } from '../utils/printTaskStatus';
 
 // Scan for printers on local network using SSDP
 // This runs in Electron main process via IPC
@@ -179,15 +180,7 @@ export class BambuClient {
             }
         }
         if (data.gcode_state) {
-            const stateMap = {
-                'RUNNING': 'printing',
-                'PAUSE': 'paused',
-                'IDLE': 'idle',
-                'FINISH': 'finished',
-                'FAILED': 'error',
-                'PREPARE': 'preparing'
-            };
-            nextStatus = stateMap[data.gcode_state] || data.gcode_state.toLowerCase();
+            nextStatus = mapTelemetryStatus(data, printer);
             printer.status = nextStatus;
         }
 
@@ -215,12 +208,8 @@ export class BambuClient {
             const speedMap = { 1: 50, 2: 100, 3: 125, 4: 166 };
             printer.speed = speedMap[data.spd_lvl] || 100;
         }
-        if (data.gcode_file) {
-            const parts = data.gcode_file.split('/');
-            printer.filename = parts[parts.length - 1] || data.gcode_file;
-        }
-        if (data.subtask_name) {
-            printer.filename = data.subtask_name;
+        if (data.gcode_file || data.subtask_name) {
+            printer.filename = getPrintTaskName(data, printer);
         }
 
         // AMS is not included in every telemetry packet. Keep the last known AMS

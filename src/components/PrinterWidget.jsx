@@ -35,6 +35,7 @@ const statusMap = {
   connecting: ['连接中...', '#8cc8ff', 'rgba(102, 178, 255, 0.14)', 'rgba(102, 178, 255, 0.22)'],
   connected: ['已连接', '#89d8ff', 'rgba(91, 177, 255, 0.12)', 'rgba(91, 177, 255, 0.2)'],
   idle: ['闲置', '#dce6f9', 'rgba(255, 255, 255, 0.09)', 'rgba(255, 255, 255, 0.12)'],
+  drying: ['烘干中', '#ffd08a', 'rgba(255, 190, 92, 0.14)', 'rgba(255, 190, 92, 0.22)'],
   paused: ['已暂停', '#ffd08a', 'rgba(255, 190, 92, 0.14)', 'rgba(255, 190, 92, 0.22)'],
   preparing: ['准备中', '#a5caff', 'rgba(124, 151, 255, 0.14)', 'rgba(124, 151, 255, 0.22)'],
   finished: ['已完成', '#78f0b8', 'rgba(59, 214, 139, 0.14)', 'rgba(59, 214, 139, 0.22)'],
@@ -234,6 +235,16 @@ function progressPalette(status) {
         fill: 'linear-gradient(90deg, #55e4a5 0%, #6cf1cb 45%, #7faeff 100%)',
         glow: 'rgba(83, 235, 183, 0.34)',
         cap: '#ebfffb',
+      };
+    case 'drying':
+      return {
+        text: '#fff0c7',
+        badge: 'rgba(255, 190, 92, 0.14)',
+        border: 'rgba(255, 199, 112, 0.24)',
+        track: 'linear-gradient(180deg, rgba(38, 28, 12, 0.96), rgba(24, 17, 8, 0.98))',
+        fill: 'linear-gradient(90deg, #f2b34f 0%, #ffd66d 52%, #fff0a8 100%)',
+        glow: 'rgba(255, 197, 92, 0.3)',
+        cap: '#fff7dc',
       };
     case 'finished':
       return {

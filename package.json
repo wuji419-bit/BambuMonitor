@@ -14,7 +14,7 @@
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && ELECTRON_START_URL=http://localhost:5173 electron .\"",
     "electron:build": "npm run build && electron-builder",
-    "test": "node --test src/utils/printerSync.test.js src/utils/cameraFrame.test.js src/utils/cameraStartup.test.js src/utils/mqttConnectionState.test.js src/utils/cameraZoom.test.js src/services/camera.test.js electron/camera-stream.test.cjs electron/safe-console.test.cjs"
+    "test": "node --test src/utils/printerSync.test.js src/utils/cameraFrame.test.js src/utils/cameraStartup.test.js src/utils/mqttConnectionState.test.js src/utils/cameraZoom.test.js src/utils/printTaskStatus.test.js src/services/camera.test.js electron/camera-stream.test.cjs electron/safe-console.test.cjs"
   },
   "build": {
     "appId": "com.bambumonitor.app",

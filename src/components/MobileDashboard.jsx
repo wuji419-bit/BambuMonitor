@@ -3,6 +3,7 @@ import { AlertTriangle, Clock, Printer } from 'lucide-react';
 
 const STATUS_META = {
   printing: { label: '打印中', color: '#6af0a7' },
+  drying: { label: '烘干中', color: '#fbbf24' },
   idle: { label: '空闲', color: '#94a3b8' },
   paused: { label: '已暂停', color: '#fbbf24' },
   preparing: { label: '准备中', color: '#7dd3fc' },
