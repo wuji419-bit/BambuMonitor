@@ -5,6 +5,7 @@ const http = require('http');
 const { spawn } = require('child_process');
 const mqtt = require('mqtt');
 const { installSafeConsole } = require('./safe-console.cjs');
+const { buildMqttConnectionOptions, extractBambuUsername } = require('./mqtt-options.cjs');
 const {
   ChamberImageStream,
   buildBambuRtspUrl,
@@ -1004,6 +1005,7 @@ const BAMBU_API = {
   EMAIL_CODE: 'https://api.bambulab.cn/v1/user-service/user/sendemail/code',
   SMS_CODE: 'https://api.bambulab.cn/v1/user-service/user/sendsmscode',
   BIND: 'https://api.bambulab.cn/v1/iot-service/api/user/bind',
+  PREFERENCE: 'https://api.bambulab.cn/v1/design-user-service/my/preference',
 };
 
 function getBambuHeaders() {
@@ -1019,6 +1021,26 @@ function getBambuHeaders() {
     Accept: 'application/json',
     'Content-Type': 'application/json',
   };
+}
+
+async function getBambuCloudUsername(accessToken) {
+  const tokenUsername = extractBambuUsername(accessToken);
+  if (tokenUsername) return tokenUsername;
+
+  try {
+    const response = await fetch(BAMBU_API.PREFERENCE, {
+      method: 'GET',
+      headers: {
+        ...getBambuHeaders(),
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+    const data = await response.json();
+    return data?.uid ? `u_${data.uid}` : '';
+  } catch (err) {
+    console.warn('Get Bambu username failed:', err.message);
+    return '';
+  }
 }
 
 function translateError(errorMsg) {
@@ -1163,6 +1185,7 @@ ipcMain.handle('get-device-list', async (_event, { accessToken }) => {
     console.log('Device list response:', JSON.stringify(data, null, 2));
 
     if (data.devices) {
+      const username = await getBambuCloudUsername(accessToken);
       const devices = data.devices.map((d) => ({
         id: d.dev_id,
         name: d.name,
@@ -1173,7 +1196,7 @@ ipcMain.handle('get-device-list', async (_event, { accessToken }) => {
         printStatus: d.print_status,
         nozzle: d.nozzle_diameter,
       }));
-      return { success: true, devices };
+      return { success: true, devices, username };
     }
 
     return { success: false, error: data.error || '获取设备列表失败' };
@@ -1231,8 +1254,11 @@ ipcMain.handle('notification-send', async (_event, { targets = [], payload }) =>
   };
 });
 
-ipcMain.handle('mqtt-connect', async (_event, { ip, accessCode, serialNumber }) => {
+ipcMain.handle('mqtt-connect', async (_event, payload = {}) => {
   try {
+    const connectionConfig = buildMqttConnectionOptions(payload);
+    const { serialNumber, url, mode, options } = connectionConfig;
+
     if (mqttConnections.has(serialNumber)) {
       const existing = mqttConnections.get(serialNumber);
       existing.intentional = true;
@@ -1243,21 +1269,19 @@ ipcMain.handle('mqtt-connect', async (_event, { ip, accessCode, serialNumber }) 
       mqttConnections.delete(serialNumber);
     }
 
-    const url = `mqtts://${ip}:8883`;
-    console.log(`[Main] Connecting MQTT to ${serialNumber}: ${url}`);
+    console.log(`[Main] Connecting ${mode} MQTT to ${serialNumber}: ${url}`);
 
     const client = mqtt.connect(url, {
-      username: 'bblp',
-      password: accessCode,
-      rejectUnauthorized: false,
+      username: options.username,
+      password: options.password,
+      rejectUnauthorized: options.rejectUnauthorized,
       connectTimeout: 15000,
       reconnectPeriod: MQTT_RECONNECT_PERIOD_MS,
       resubscribe: true,
     });
     const entry = {
       client,
-      ip,
-      accessCode,
+      mode,
       intentional: false,
       connected: false,
       disconnectTimer: null,

@@ -24,7 +24,8 @@ test('keeps all cloud devices and restores local IP from normalized device-name 
 
   const a2l01 = snapshot.initialPrinters.find((printer) => printer.name === 'A2L01');
   assert.equal(a2l01.ip, '192.0.2.201');
-  assert.equal(a2l01.statusSource, 'local');
+  assert.equal(a2l01.statusSource, 'cloud');
+  assert.equal(a2l01.connectionMode, 'cloud');
   assert.equal(a2l01.status, 'preparing');
   assert.equal(snapshot.cachedIps.A2L01_SERIAL, '192.0.2.201');
   assert.equal(snapshot.cachedIps.a2l01, '192.0.2.201');

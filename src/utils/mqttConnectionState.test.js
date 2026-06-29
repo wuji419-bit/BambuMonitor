@@ -10,7 +10,7 @@ import {
   MQTT_RECONNECT_PERIOD_MS,
 } from './mqttConnectionState.js';
 
-test('keeps live telemetry while marking a printer as reconnecting', () => {
+test('keeps live telemetry while marking a local printer as reconnecting', () => {
   const printer = {
     dev_id: 'P1SC_SERIAL',
     status: 'printing',
@@ -23,9 +23,12 @@ test('keeps live telemetry while marking a printer as reconnecting', () => {
   const next = applyMqttReconnectingState(printer);
 
   assert.equal(next.status, 'connecting');
+  assert.equal(next.statusSource, 'local');
+  assert.equal(next.connectionMode, 'local');
   assert.equal(next.progress, 42);
   assert.equal(next.timeLeft, '1h 20m');
   assert.deepEqual(next.temperature, { nozzle: 240, bed: 70 });
+  assert.match(next.errorMsg, /本地连接/);
   assert.match(next.errorMsg, /自动重连/);
 });
 
@@ -36,10 +39,11 @@ test('clears reconnect copy when MQTT is connected again', () => {
   });
 
   assert.equal(next.status, 'connected');
+  assert.equal(next.statusSource, 'local');
   assert.equal(next.errorMsg, '');
 });
 
-test('marks a printer disconnected only after reconnect grace expires', () => {
+test('marks a local printer disconnected only after reconnect grace expires', () => {
   const next = applyMqttDisconnectedState({
     status: 'connecting',
     progress: 19,
@@ -47,8 +51,38 @@ test('marks a printer disconnected only after reconnect grace expires', () => {
   });
 
   assert.equal(next.status, 'disconnected');
+  assert.equal(next.statusSource, 'local');
   assert.equal(next.progress, 19);
+  assert.match(next.errorMsg, /本地连接/);
   assert.match(next.errorMsg, /自动重连失败/);
+});
+
+test('keeps cloud source while marking cloud MQTT reconnecting', () => {
+  const next = applyMqttReconnectingState({
+    status: 'printing',
+    statusSource: 'cloud',
+    connectionMode: 'cloud',
+    progress: 55,
+  });
+
+  assert.equal(next.status, 'connecting');
+  assert.equal(next.statusSource, 'cloud');
+  assert.equal(next.connectionMode, 'cloud');
+  assert.equal(next.progress, 55);
+  assert.match(next.errorMsg, /云端状态连接/);
+});
+
+test('keeps cloud source when cloud MQTT disconnects', () => {
+  const next = applyMqttDisconnectedState({
+    status: 'connecting',
+    statusSource: 'cloud',
+    connectionMode: 'cloud',
+  });
+
+  assert.equal(next.status, 'disconnected');
+  assert.equal(next.statusSource, 'cloud');
+  assert.equal(next.connectionMode, 'cloud');
+  assert.match(next.errorMsg, /云端状态连接/);
 });
 
 test('uses a nonzero reconnect period and a longer disconnect grace window', () => {

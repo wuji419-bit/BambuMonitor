@@ -124,6 +124,8 @@ export class BambuClient {
             name: deviceName || `Bambu Printer (${ip})`,
             model: 'Unknown',
             status: 'connecting',
+            statusSource: 'local',
+            connectionMode: 'local',
             progress: 0,
             timeLeft: '--',
             layer: '',
@@ -143,7 +145,7 @@ export class BambuClient {
 
         try {
             console.log(`[Renderer] Requesting MQTT connect: ${serialNumber}`);
-            const result = await electronMqtt.connect({ ip, accessCode, serialNumber });
+            const result = await electronMqtt.connect({ mode: 'local', ip, accessCode, serialNumber });
 
             if (result.success) {
                 // Wait for first telemetry before claiming idle/printing.
@@ -157,6 +159,76 @@ export class BambuClient {
         } catch (err) {
             console.error(`[Renderer] MQTT connect error:`, err);
             printer.status = 'error';
+            printer.errorMsg = err.message;
+            this.emitUpdate(serialNumber);
+            throw err;
+        }
+    }
+
+    async connectCloud({
+        authToken,
+        username = '',
+        region = 'China',
+        serialNumber,
+        onUpdate,
+        deviceName = '',
+        initialPrinter = {},
+    }) {
+        if (!isElectronEnvironment()) {
+            throw new Error('仅支持桌面版');
+        }
+
+        this.setupIpcListeners();
+
+        const current = this.printers.get(serialNumber) || {};
+        const printer = {
+            ...current,
+            ...initialPrinter,
+            dev_id: serialNumber,
+            name: deviceName || initialPrinter.name || current.name || `Bambu Printer (${serialNumber})`,
+            model: initialPrinter.model || current.model || 'Unknown',
+            status: initialPrinter.status || current.status || 'connecting',
+            statusSource: 'cloud',
+            connectionMode: 'cloud',
+            cloudUsername: username || current.cloudUsername || initialPrinter.cloudUsername || '',
+            progress: current.progress ?? initialPrinter.progress ?? 0,
+            timeLeft: current.timeLeft || initialPrinter.timeLeft || '--',
+            layer: current.layer || initialPrinter.layer || '',
+            temperature: current.temperature || initialPrinter.temperature || { nozzle: 0, bed: 0, chamber: 0 },
+            fan: current.fan ?? initialPrinter.fan ?? 0,
+            speed: current.speed ?? initialPrinter.speed ?? 100,
+            filename: current.filename || initialPrinter.filename || '',
+            ams: current.ams || initialPrinter.ams || null,
+            errorMsg: '',
+        };
+
+        this.printers.set(serialNumber, printer);
+        this.callbacks.set(serialNumber, onUpdate);
+        this.ensureCountdownTimer();
+        this.emitUpdate(serialNumber);
+
+        try {
+            console.log(`[Renderer] Requesting cloud MQTT connect: ${serialNumber}`);
+            const result = await electronMqtt.connect({
+                mode: 'cloud',
+                region,
+                authToken,
+                username,
+                serialNumber,
+            });
+
+            if (result.success) {
+                Object.assign(printer, applyMqttConnectedState(printer));
+                this.emitUpdate(serialNumber);
+                return true;
+            }
+
+            throw new Error(result.error || '云端 MQTT 连接失败');
+        } catch (err) {
+            console.error('[Renderer] Cloud MQTT connect error:', err);
+            printer.status = 'error';
+            printer.statusSource = 'cloud';
+            printer.connectionMode = 'cloud';
             printer.errorMsg = err.message;
             this.emitUpdate(serialNumber);
             throw err;

@@ -200,25 +200,25 @@ function ConnectionScreen({ onConnect, isElectron }) {
     };
   };
 
-  const connectReachableDevices = (devicesWithIp) => {
+  const connectCloudDevices = (initialPrinters, token, username = '') => {
     const existingById = new Map(bambuClient.getAllPrinters().map((printer) => [printer.dev_id, printer]));
 
-    devicesWithIp
-      .filter((device) => device.ip)
-      .forEach((device) => {
-        const existing = existingById.get(device.mqttSerial);
-        if (existing?.ip === device.ip && bambuClient.isConnected(device.mqttSerial)) return;
+    initialPrinters.forEach((printer) => {
+      const existing = existingById.get(printer.dev_id);
+      if (existing?.connectionMode === 'cloud' && bambuClient.isConnected(printer.dev_id)) return;
 
-        bambuClient.connectLocal(
-          device.ip,
-          device.accessCode,
-          device.mqttSerial,
-          (updatedPrinter) => updatedPrinter,
-          device.name,
-        ).catch((err) => {
-          console.error(`Failed to connect ${device.name}:`, err);
-        });
+      bambuClient.connectCloud({
+        authToken: token,
+        username,
+        region: 'China',
+        serialNumber: printer.dev_id,
+        onUpdate: (updatedPrinter) => updatedPrinter,
+        deviceName: printer.name,
+        initialPrinter: printer,
+      }).catch((err) => {
+        console.error(`Failed to connect cloud MQTT for ${printer.name}:`, err);
       });
+    });
   };
 
   const refreshLanDevicesInBackground = async (cloudDevices) => {
@@ -233,7 +233,6 @@ function ConnectionScreen({ onConnect, isElectron }) {
     const { devicesWithIp, initialPrinters } = buildDeviceSync(cloudDevices, scannedPrinters);
     if (devicesWithIp.some((device) => device.ip)) {
       onConnect(initialPrinters);
-      connectReachableDevices(devicesWithIp);
     }
   };
 
@@ -272,7 +271,8 @@ function ConnectionScreen({ onConnect, isElectron }) {
           : `已读取 ${cloudDevices.length} 台云端设备，先进入概览，后台继续扫描局域网...`,
       );
 
-      connectReachableDevices(devicesWithIp);
+      setSuccessMsg(`已读取 ${cloudDevices.length} 台云端设备，正在通过云端 MQTT 同步实时状态...`);
+      connectCloudDevices(initialPrinters, token, result.username);
       setLoading(false);
       electronWindow.resize({ width: 450, height: 200 });
       onConnect(initialPrinters);
@@ -645,6 +645,10 @@ function App() {
       throw new Error('未找到对应的打印机');
     }
 
+    const savedToken = localStorage.getItem('bambu_token') || '';
+    const shouldUseCloudStatus = Boolean(savedToken)
+      && (printer.connectionMode === 'cloud' || printer.statusSource === 'cloud');
+
     const cachedIps = JSON.parse(localStorage.getItem('cached_printer_ips') || '{}');
     cachedIps[printer.cloudId || printer.dev_id] = normalizedIp;
     cachedIps[printer.dev_id] = normalizedIp;
@@ -659,7 +663,8 @@ function App() {
       next[index] = {
         ...next[index],
         status: 'connecting',
-        statusSource: 'local',
+        statusSource: shouldUseCloudStatus ? 'cloud' : 'local',
+        connectionMode: shouldUseCloudStatus ? 'cloud' : 'local',
         ip: normalizedIp,
         errorMsg: '',
       };
@@ -667,21 +672,40 @@ function App() {
     });
 
     try {
-      await bambuClient.connectLocal(
-        normalizedIp,
-        printer.accessCode,
-        serial,
-        (updatedPrinter) => {
-          setPrinters((prev) => {
-            const index = prev.findIndex((item) => item.dev_id === updatedPrinter.dev_id);
-            if (index === -1) return [...prev, mergePrinterState({}, updatedPrinter)];
-            const next = [...prev];
-            next[index] = mergePrinterState(next[index], updatedPrinter);
-            return next;
-          });
-        },
-        printer.name,
-      );
+      const onPrinterUpdate = (updatedPrinter) => {
+        setPrinters((prev) => {
+          const index = prev.findIndex((item) => item.dev_id === updatedPrinter.dev_id);
+          if (index === -1) return [...prev, mergePrinterState({}, updatedPrinter)];
+          const next = [...prev];
+          next[index] = mergePrinterState(next[index], updatedPrinter);
+          return next;
+        });
+      };
+
+      if (shouldUseCloudStatus) {
+        await bambuClient.connectCloud({
+          authToken: savedToken,
+          username: printer.cloudUsername || '',
+          region: 'China',
+          serialNumber: serial,
+          onUpdate: onPrinterUpdate,
+          deviceName: printer.name,
+          initialPrinter: {
+            ...printer,
+            ip: normalizedIp,
+            statusSource: 'cloud',
+            connectionMode: 'cloud',
+          },
+        });
+      } else {
+        await bambuClient.connectLocal(
+          normalizedIp,
+          printer.accessCode,
+          serial,
+          onPrinterUpdate,
+          printer.name,
+        );
+      }
     } catch (err) {
       console.error('Manual connect failed:', err);
       setPrinters((prev) => {
@@ -691,6 +715,8 @@ function App() {
         next[index] = {
           ...next[index],
           status: 'error',
+          statusSource: shouldUseCloudStatus ? 'cloud' : 'local',
+          connectionMode: shouldUseCloudStatus ? 'cloud' : 'local',
           ip: normalizedIp,
           errorMsg: err.message || '连接失败',
         };
