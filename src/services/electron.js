@@ -30,6 +30,15 @@ export const electronAuth = {
   getDeviceList(payload) {
     return requireElectronApi().auth.getDeviceList(payload);
   },
+  getSavedSession() {
+    return requireElectronApi().auth.getSavedSession();
+  },
+  saveSession(payload) {
+    return requireElectronApi().auth.saveSession(payload);
+  },
+  clearSavedSession() {
+    return requireElectronApi().auth.clearSavedSession();
+  },
 };
 
 export const electronDevices = {

@@ -236,6 +236,16 @@ function ConnectionScreen({ onConnect, isElectron }) {
     }
   };
 
+  const clearSavedLogin = async () => {
+    localStorage.removeItem('bambu_token');
+    if (!isElectron) return;
+    try {
+      await electronAuth.clearSavedSession();
+    } catch (err) {
+      console.warn('Clear saved session failed:', err);
+    }
+  };
+
   const fetchDeviceList = async (token, options = {}) => {
     setLoading(true);
 
@@ -245,7 +255,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
       if (!result.success) {
         const errorText = result.error || '获取设备列表失败';
         if (isTokenInvalidError(errorText)) {
-          localStorage.removeItem('bambu_token');
+          await clearSavedLogin();
           setSuccessMsg('');
           setErrorMsg(options.autoLogin ? '登录状态已过期，请重新登录' : '登录已过期，请重新登录');
         } else {
@@ -281,7 +291,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
       console.error('Fetch device list error:', err);
       const errorText = err.message || '获取设备失败';
       if (isTokenInvalidError(errorText)) {
-        localStorage.removeItem('bambu_token');
+        await clearSavedLogin();
         setSuccessMsg('');
         setErrorMsg('登录状态已过期，请重新登录');
       } else {
@@ -329,6 +339,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
         setSuccessMsg('登录成功，正在同步设备...');
         localStorage.setItem('bambu_account', account);
         localStorage.setItem('bambu_token', result.accessToken);
+        await electronAuth.saveSession({ account, accessToken: result.accessToken });
         await fetchDeviceList(result.accessToken);
         return;
       }
@@ -367,11 +378,35 @@ function ConnectionScreen({ onConnect, isElectron }) {
     if (autoLoginAttemptedRef.current) return;
     autoLoginAttemptedRef.current = true;
 
-    const savedToken = localStorage.getItem('bambu_token');
-    if (savedToken && isElectron) {
-      setSuccessMsg('检测到已登录会话，正在自动连接...');
-      fetchDeviceList(savedToken, { autoLogin: true });
-    }
+    const restoreLogin = async () => {
+      if (!isElectron) return;
+
+      let savedToken = localStorage.getItem('bambu_token');
+      let savedAccount = localStorage.getItem('bambu_account') || '';
+
+      if (!savedToken) {
+        try {
+          const result = await electronAuth.getSavedSession();
+          const session = result?.session;
+          if (session?.accessToken) {
+            savedToken = session.accessToken;
+            savedAccount = session.account || savedAccount;
+            localStorage.setItem('bambu_token', savedToken);
+            if (savedAccount) localStorage.setItem('bambu_account', savedAccount);
+          }
+        } catch (err) {
+          console.warn('Read saved session failed:', err);
+        }
+      }
+
+      if (savedAccount) setAccount(savedAccount);
+      if (savedToken) {
+        setSuccessMsg('检测到已登录会话，正在自动连接...');
+        fetchDeviceList(savedToken, { autoLogin: true });
+      }
+    };
+
+    restoreLogin();
   }, [isElectron]);
   /* eslint-enable react-hooks/exhaustive-deps */
 

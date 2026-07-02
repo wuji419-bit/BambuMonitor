@@ -5,6 +5,11 @@ const http = require('http');
 const { spawn } = require('child_process');
 const mqtt = require('mqtt');
 const { installSafeConsole } = require('./safe-console.cjs');
+const {
+  clearAuthSession,
+  readAuthSession,
+  writeAuthSession,
+} = require('./auth-session.cjs');
 const { buildMqttConnectionOptions, extractBambuUsername } = require('./mqtt-options.cjs');
 const {
   ChamberImageStream,
@@ -1100,6 +1105,27 @@ ipcMain.handle('cloud-login', async (_event, { account, password }) => {
     console.error('Cloud login error:', err);
     return { success: false, error: translateError(err.message) };
   }
+});
+
+ipcMain.handle('auth-session-get', async () => ({
+  success: true,
+  session: readAuthSession(app.getPath('userData')),
+}));
+
+ipcMain.handle('auth-session-set', async (_event, session) => {
+  try {
+    return {
+      success: true,
+      session: writeAuthSession(app.getPath('userData'), session),
+    };
+  } catch (err) {
+    return { success: false, error: err.message || '保存登录状态失败' };
+  }
+});
+
+ipcMain.handle('auth-session-clear', async () => {
+  clearAuthSession(app.getPath('userData'));
+  return { success: true };
 });
 
 ipcMain.handle('request-verify-code', async (_event, { account }) => {

@@ -13,6 +13,7 @@ import {
 } from '../services/camera';
 import { buildCameraFrameUrl } from '../utils/cameraFrame';
 import { buildCameraZoomState } from '../utils/cameraZoom';
+import { hasCloudStatus, shouldPromptForPrinterIp } from '../utils/printerIpPrompt';
 import {
   buildInitialCameraState,
   cameraStartErrorState,
@@ -76,7 +77,7 @@ const OPACITY_KEY = 'bambu_widget_opacity';
 const MINI_ROTATE_MS = 3000;
 
 function isCloudOverview(printer) {
-  return !printer?.ip && (printer?.statusSource === 'cloud' || ['cloud_overview', 'cloud_offline', 'no_ip'].includes(printer?.status));
+  return !printer?.ip && hasCloudStatus(printer);
 }
 
 function statusText(printer) {
@@ -134,6 +135,16 @@ function amsInfo(printer) {
 }
 
 function infoLine(printer) {
+  if (hasCloudStatus(printer)) {
+    const cloudLabel = statusText(printer).replace('云端：', '').replace('浜戠锛?', '');
+    return {
+      left: cloudLabel && cloudLabel !== '云端概览' && cloudLabel !== '浜戠姒傝'
+        ? `云端状态：${cloudLabel}`
+        : '云端状态已启用',
+      right: printer.ip ? `IP ${printer.ip}` : 'IP 仅用于摄像头/本地直连',
+    };
+  }
+
   if (isCloudOverview(printer)) {
     const cloudLabel = statusText(printer).replace('云端：', '');
     return {
@@ -1050,7 +1061,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
   };
 
   const renderCloudNotice = (compact = false) => {
-    if (cloudOverviewCount === 0) return null;
+    if (cloudOverviewCount >= 0) return null;
     return (
       <div
         style={{
@@ -1277,7 +1288,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
       fontWeight: 600,
     };
 
-    if (isCloudOverview(printer) || printer.status === 'no_ip') {
+    if (shouldPromptForPrinterIp(printer)) {
       return (
         <button
           type="button"
@@ -1834,7 +1845,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                               {printer.name || '未命名打印机'}
                             </div>
                             <div style={{ marginTop: 4, fontSize: 11, color: 'rgba(200,214,234,0.62)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                              {printer.ip ? `IP ${printer.ip}` : (isCloudOverview(printer) ? '未识别本地 IP · 填写后可实时监控' : '等待填写可访问 IP')}
+                              {printer.ip ? `IP ${printer.ip}` : (hasCloudStatus(printer) ? '云端状态已启用 · IP 可选' : '等待填写可访问 IP')}
                             </div>
                           </div>
                         </div>

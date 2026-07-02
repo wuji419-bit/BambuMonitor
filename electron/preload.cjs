@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('bambuApi', {
     requestVerifyCode: (payload) => ipcRenderer.invoke('request-verify-code', payload),
     cloudLoginCode: (payload) => ipcRenderer.invoke('cloud-login-code', payload),
     getDeviceList: (payload) => ipcRenderer.invoke('get-device-list', payload),
+    getSavedSession: () => ipcRenderer.invoke('auth-session-get'),
+    saveSession: (payload) => ipcRenderer.invoke('auth-session-set', payload),
+    clearSavedSession: () => ipcRenderer.invoke('auth-session-clear'),
   },
   devices: {
     scanPrinters: () => ipcRenderer.invoke('scan-printers'),
