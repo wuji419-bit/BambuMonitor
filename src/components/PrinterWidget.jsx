@@ -14,6 +14,7 @@ import {
 import { buildCameraFrameUrl } from '../utils/cameraFrame';
 import { buildCameraZoomState } from '../utils/cameraZoom';
 import { hasCloudStatus, shouldPromptForPrinterIp } from '../utils/printerIpPrompt';
+import { dragRegionStyle, noDragRegionStyle } from '../utils/windowDragRegions';
 import {
   buildInitialCameraState,
   cameraStartErrorState,
@@ -1347,10 +1348,19 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
           background: 'linear-gradient(180deg, rgba(8,12,19,0.98), rgba(3,7,13,0.98))',
           border: '1px solid rgba(255,255,255,0.1)',
           boxShadow: '0 28px 80px rgba(0,0,0,0.58)',
-          WebkitAppRegion: 'no-drag',
+          ...dragRegionStyle(isLocked),
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div
+          onClick={(event) => event.stopPropagation()}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            ...dragRegionStyle(isLocked),
+          }}
+        >
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 850, color: '#f7fbff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {zoomState.title}
@@ -1385,6 +1395,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
             alignItems: 'center',
             justifyContent: 'center',
             position: 'relative',
+            ...noDragRegionStyle(),
           }}
         >
           {zoomState.isSnapshotStream ? (
