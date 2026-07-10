@@ -81,8 +81,108 @@ function withCurrentWindowSize(bounds = {}, currentSize = []) {
   };
 }
 
+function createWindowBoundsCloseHandshake({
+  requestIdFactory,
+  sendRequest,
+  closeWindow,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
+  timeoutMs = 300,
+}) {
+  let phase = 'idle';
+  let pendingRequest = null;
+  let fallbackTimer = null;
+
+  const clearFallbackTimer = () => {
+    if (fallbackTimer === null) return;
+    clearTimeoutFn(fallbackTimer);
+    fallbackTimer = null;
+  };
+
+  const finish = () => {
+    if (phase !== 'waiting') return false;
+
+    phase = 'closing';
+    pendingRequest = null;
+    clearFallbackTimer();
+    try {
+      closeWindow();
+    } catch {
+      // The BrowserWindow may already be gone during shutdown.
+    }
+    return true;
+  };
+
+  const begin = (sender, bounds = {}) => {
+    if (phase !== 'idle') return false;
+
+    const requestId = requestIdFactory();
+    const payload = {
+      requestId,
+      width: bounds?.width,
+      height: bounds?.height,
+    };
+    phase = 'waiting';
+    pendingRequest = { requestId, sender };
+    fallbackTimer = setTimeoutFn(() => {
+      fallbackTimer = null;
+      finish();
+    }, timeoutMs);
+
+    try {
+      sendRequest(sender, payload);
+    } catch {
+      // The bounded fallback still releases the close if delivery fails.
+    }
+    return true;
+  };
+
+  return {
+    acknowledge(sender, requestId) {
+      if (
+        phase !== 'waiting'
+        || sender !== pendingRequest?.sender
+        || requestId !== pendingRequest?.requestId
+      ) return false;
+      return finish();
+    },
+    begin,
+    dispose() {
+      clearFallbackTimer();
+      pendingRequest = null;
+      phase = 'disposed';
+    },
+    isWaiting() {
+      return phase === 'waiting';
+    },
+    shouldAllowClose() {
+      return phase === 'closing';
+    },
+  };
+}
+
+function createWindowBoundsSaveRequestHandler(callback, acknowledge) {
+  if (typeof callback !== 'function' || typeof acknowledge !== 'function') return null;
+
+  return async (payload) => {
+    try {
+      await callback(payload);
+    } catch {
+      // Closing must continue even when persistence fails.
+    } finally {
+      try {
+        acknowledge(payload?.requestId);
+      } catch {
+        // Main also has a bounded fallback if the renderer is already closing.
+      }
+    }
+  };
+}
+
 module.exports = {
   clampWindowSize,
+  createWindowBoundsCloseHandshake,
+  createWindowBoundsSaveRequestHandler,
   getMainWindowOptions,
   withCurrentWindowSize,
 };

@@ -129,6 +129,9 @@ export const electronEvents = {
   onWindowBoundsChanged(callback) {
     return getElectronApi()?.events.onWindowBoundsChanged(callback) || noOp;
   },
+  onWindowBoundsSaveRequest(callback) {
+    return getElectronApi()?.events.onWindowBoundsSaveRequest(callback) || noOp;
+  },
   onMqttData(callback) {
     return getElectronApi()?.events.onMqttData(callback) || noOp;
   },

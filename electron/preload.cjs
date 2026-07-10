@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const { createWindowBoundsSaveRequestHandler } = require('./window-bounds.cjs');
 
 function subscribe(channel) {
   return (callback) => {
@@ -14,6 +15,28 @@ function subscribe(channel) {
     return () => {
       ipcRenderer.removeListener(channel, listener);
     };
+  };
+}
+
+function subscribeWindowBoundsSaveRequest(callback) {
+  if (typeof callback !== 'function') {
+    return () => {};
+  }
+
+  const handleRequest = createWindowBoundsSaveRequestHandler(
+    callback,
+    (requestId) => ipcRenderer.send('window-bounds-save-ack', { requestId }),
+  );
+  const listener = (_event, payload) => {
+    void handleRequest(payload);
+  };
+  let subscribed = true;
+
+  ipcRenderer.on('window-bounds-save-request', listener);
+  return () => {
+    if (!subscribed) return;
+    subscribed = false;
+    ipcRenderer.removeListener('window-bounds-save-request', listener);
   };
 }
 
@@ -64,6 +87,7 @@ contextBridge.exposeInMainWorld('bambuApi', {
     onAlwaysOnTopChanged: subscribe('always-on-top-changed'),
     onWindowOpacityChanged: subscribe('window-opacity-changed'),
     onWindowBoundsChanged: subscribe('window-bounds-changed'),
+    onWindowBoundsSaveRequest: subscribeWindowBoundsSaveRequest,
     onMqttData: subscribe('mqtt-data'),
     onMqttConnected: subscribe('mqtt-connected'),
     onMqttReconnecting: subscribe('mqtt-reconnecting'),

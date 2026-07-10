@@ -14,6 +14,7 @@ const {
 const { buildMqttConnectionOptions, extractBambuUsername } = require('./mqtt-options.cjs');
 const {
   clampWindowSize,
+  createWindowBoundsCloseHandshake,
   getMainWindowOptions,
   withCurrentWindowSize,
 } = require('./window-bounds.cjs');
@@ -44,6 +45,7 @@ let isAlwaysOnTop = true;
 let windowOpacity = 1;
 let windowBoundsTimer = null;
 let pendingWindowBounds = null;
+let windowBoundsLifecycleCleanup = null;
 const OPACITY_PRESETS = [1, 0.95, 0.9, 0.85, 0.8];
 
 const mqttConnections = new Map();
@@ -70,6 +72,12 @@ function clearWindowBoundsTimer() {
 function clearWindowBoundsState() {
   clearWindowBoundsTimer();
   pendingWindowBounds = null;
+}
+
+function clearWindowBoundsLifecycle() {
+  const cleanup = windowBoundsLifecycleCleanup;
+  windowBoundsLifecycleCleanup = null;
+  if (cleanup) cleanup();
 }
 
 function getWindowContentBounds(win) {
@@ -108,15 +116,6 @@ function scheduleWindowBoundsChanged(win) {
     pendingWindowBounds = null;
     sendWindowBoundsChanged(win, boundsToSend);
   }, 120);
-}
-
-function flushWindowBoundsChanged(win) {
-  if (!windowBoundsTimer || !pendingWindowBounds) return;
-
-  const bounds = getWindowContentBounds(win) || pendingWindowBounds;
-  sendWindowBoundsChanged(win, bounds);
-  clearWindowBoundsTimer();
-  pendingWindowBounds = null;
 }
 
 function clearMqttDisconnectTimer(entry) {
@@ -739,20 +738,70 @@ function createWindow() {
     setMouseLock(false);
   });
 
+  clearWindowBoundsLifecycle();
   const windowForBoundsEvents = mainWindow;
+  const boundsWebContents = windowForBoundsEvents.webContents;
+  const closeHandshake = createWindowBoundsCloseHandshake({
+    requestIdFactory: () => crypto.randomUUID(),
+    sendRequest: (sender, payload) => {
+      if (sender !== boundsWebContents || sender.isDestroyed()) return;
+      sender.send('window-bounds-save-request', payload);
+    },
+    closeWindow: () => {
+      if (!windowForBoundsEvents.isDestroyed()) {
+        windowForBoundsEvents.close();
+      }
+    },
+    timeoutMs: 300,
+  });
   const handleWindowResize = () => {
+    if (closeHandshake.isWaiting() || closeHandshake.shouldAllowClose()) return;
     scheduleWindowBoundsChanged(windowForBoundsEvents);
   };
-  const handleWindowClose = () => {
-    flushWindowBoundsChanged(windowForBoundsEvents);
+  const handleWindowClose = (event) => {
+    if (closeHandshake.shouldAllowClose()) return;
+    if (closeHandshake.isWaiting()) {
+      event.preventDefault();
+      return;
+    }
+
+    const finalBounds = getWindowContentBounds(windowForBoundsEvents) || pendingWindowBounds;
+    if (!finalBounds || boundsWebContents.isDestroyed()) {
+      clearWindowBoundsState();
+      return;
+    }
+
+    event.preventDefault();
+    clearWindowBoundsState();
+    closeHandshake.begin(boundsWebContents, finalBounds);
   };
+  const handleWindowBoundsSaveAck = (event, payload) => {
+    if (event.sender !== boundsWebContents || boundsWebContents.isDestroyed()) return;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+    if (typeof payload.requestId !== 'string') return;
+    closeHandshake.acknowledge(event.sender, payload.requestId);
+  };
+  let lifecycleDisposed = false;
+  const cleanupWindowBoundsLifecycle = () => {
+    if (lifecycleDisposed) return;
+    lifecycleDisposed = true;
+    windowForBoundsEvents.removeListener('resize', handleWindowResize);
+    windowForBoundsEvents.removeListener('close', handleWindowClose);
+    ipcMain.removeListener('window-bounds-save-ack', handleWindowBoundsSaveAck);
+    closeHandshake.dispose();
+    clearWindowBoundsState();
+  };
+  windowBoundsLifecycleCleanup = cleanupWindowBoundsLifecycle;
+  ipcMain.on('window-bounds-save-ack', handleWindowBoundsSaveAck);
   mainWindow.on('resize', handleWindowResize);
   mainWindow.on('close', handleWindowClose);
 
   mainWindow.once('closed', () => {
-    windowForBoundsEvents.removeListener('resize', handleWindowResize);
-    windowForBoundsEvents.removeListener('close', handleWindowClose);
-    clearWindowBoundsState();
+    if (windowBoundsLifecycleCleanup === cleanupWindowBoundsLifecycle) {
+      clearWindowBoundsLifecycle();
+    } else {
+      cleanupWindowBoundsLifecycle();
+    }
     if (mainWindow === windowForBoundsEvents) {
       mainWindow = null;
     }
@@ -798,6 +847,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  clearWindowBoundsLifecycle();
   clearWindowBoundsState();
   globalShortcut.unregisterAll();
   safelyCloseSocket(global.listenSocket);

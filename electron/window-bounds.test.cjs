@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 
 const {
   clampWindowSize,
+  createWindowBoundsCloseHandshake,
+  createWindowBoundsSaveRequestHandler,
   getMainWindowOptions,
   withCurrentWindowSize,
 } = require('./window-bounds.cjs');
@@ -176,4 +178,127 @@ test('fills only omitted resize axes from the current content size', () => {
     withCurrentWindowSize({ width: 'invalid' }, [640, 480]),
     { width: 'invalid', height: 480 },
   );
+});
+
+test('closes once only for an ack from the matching sender and request', () => {
+  const sender = {};
+  const otherSender = {};
+  const requests = [];
+  const timers = [];
+  const clearedTimers = [];
+  let closeCount = 0;
+  const handshake = createWindowBoundsCloseHandshake({
+    requestIdFactory: () => 'request-1',
+    sendRequest: (target, payload) => requests.push({ target, payload }),
+    closeWindow: () => { closeCount += 1; },
+    setTimeoutFn: (callback, delay) => {
+      const timer = { callback, delay };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeoutFn: (timer) => clearedTimers.push(timer),
+    timeoutMs: 300,
+  });
+
+  assert.equal(handshake.begin(sender, { width: 640, height: 480 }), true);
+  assert.equal(handshake.begin(sender, { width: 800, height: 600 }), false);
+  assert.deepEqual(requests, [{
+    target: sender,
+    payload: { requestId: 'request-1', width: 640, height: 480 },
+  }]);
+  assert.equal(timers[0].delay, 300);
+  assert.equal(handshake.acknowledge(otherSender, 'request-1'), false);
+  assert.equal(handshake.acknowledge(sender, 'wrong-request'), false);
+  assert.equal(closeCount, 0);
+  assert.equal(handshake.isWaiting(), true);
+
+  assert.equal(handshake.acknowledge(sender, 'request-1'), true);
+  assert.equal(handshake.shouldAllowClose(), true);
+  assert.equal(closeCount, 1);
+  assert.deepEqual(clearedTimers, [timers[0]]);
+
+  assert.equal(handshake.acknowledge(sender, 'request-1'), false);
+  timers[0].callback();
+  assert.equal(closeCount, 1);
+});
+
+test('closes once on timeout and cancels timeout work when disposed', () => {
+  const sender = {};
+  const timeoutCallbacks = [];
+  let timeoutCloseCount = 0;
+  const timeoutHandshake = createWindowBoundsCloseHandshake({
+    requestIdFactory: () => 'timeout-request',
+    sendRequest: () => {},
+    closeWindow: () => { timeoutCloseCount += 1; },
+    setTimeoutFn: (callback) => {
+      timeoutCallbacks.push(callback);
+      return callback;
+    },
+    clearTimeoutFn: () => {},
+    timeoutMs: 300,
+  });
+
+  timeoutHandshake.begin(sender, { width: 640, height: 480 });
+  timeoutCallbacks[0]();
+  timeoutCallbacks[0]();
+  assert.equal(timeoutCloseCount, 1);
+  assert.equal(timeoutHandshake.shouldAllowClose(), true);
+
+  const disposedCallbacks = [];
+  const clearedTimers = [];
+  let disposedCloseCount = 0;
+  const disposedHandshake = createWindowBoundsCloseHandshake({
+    requestIdFactory: () => 'disposed-request',
+    sendRequest: () => {},
+    closeWindow: () => { disposedCloseCount += 1; },
+    setTimeoutFn: (callback) => {
+      disposedCallbacks.push(callback);
+      return callback;
+    },
+    clearTimeoutFn: (timer) => clearedTimers.push(timer),
+    timeoutMs: 300,
+  });
+
+  disposedHandshake.begin(sender, { width: 640, height: 480 });
+  disposedHandshake.dispose();
+  disposedCallbacks[0]();
+  assert.equal(disposedCloseCount, 0);
+  assert.deepEqual(clearedTimers, [disposedCallbacks[0]]);
+  assert.equal(disposedHandshake.acknowledge(sender, 'disposed-request'), false);
+});
+
+test('acks a save request only after its async callback completes', async () => {
+  const events = [];
+  let resolveSave;
+  const handler = createWindowBoundsSaveRequestHandler(
+    async (payload) => {
+      events.push(`start:${payload.requestId}`);
+      await new Promise((resolve) => { resolveSave = resolve; });
+      events.push(`saved:${payload.requestId}`);
+    },
+    (requestId) => events.push(`ack:${requestId}`),
+  );
+
+  const pending = handler({ requestId: 'async-request', width: 640, height: 480 });
+  await Promise.resolve();
+  assert.deepEqual(events, ['start:async-request']);
+
+  resolveSave();
+  await pending;
+  assert.deepEqual(events, [
+    'start:async-request',
+    'saved:async-request',
+    'ack:async-request',
+  ]);
+});
+
+test('acks a save request when its callback throws', async () => {
+  const acknowledgements = [];
+  const handler = createWindowBoundsSaveRequestHandler(
+    () => { throw new Error('save failed'); },
+    (requestId) => acknowledgements.push(requestId),
+  );
+
+  await assert.doesNotReject(() => handler({ requestId: 'failed-request' }));
+  assert.deepEqual(acknowledgements, ['failed-request']);
 });
