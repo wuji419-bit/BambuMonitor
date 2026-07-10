@@ -1,16 +1,23 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Eye, EyeOff, LockKeyhole, Radio, ShieldCheck } from 'lucide-react';
+import { Eye, EyeOff, LockKeyhole, Minus, Radio, ShieldCheck, X } from 'lucide-react';
 import PrinterWidget from './components/PrinterWidget';
 import MobileDashboard from './components/MobileDashboard';
 import appIconUrl from './assets/app-icon.svg';
 import { bambuClient, scanPrinters } from './services/bambu';
-import { electronAuth, electronWindow, isElectronEnvironment } from './services/electron';
+import { electronAuth, electronEvents, electronWindow, isElectronEnvironment } from './services/electron';
 import { dispatchPrinterNotification, getPrinterNotificationEvent } from './services/notifications';
 import { getRemovedPrinterIds, reconcilePrinterInventory } from './utils/deviceInventory';
 import { buildDeviceSyncSnapshot, mergePrinterState } from './utils/printerSync';
 import { acceptsConnectionGeneration, beginConnectionGeneration } from './utils/sessionGeneration';
 import { cachePrinterAddress, isValidPrinterAddress, normalizePrinterAddress } from './utils/printerAddress';
 import { runGenerationBoundScan } from './utils/generationBoundScan';
+import {
+  getWindowModeConfig,
+  normalizeSavedWindowSize,
+  readWindowSizeMap,
+  updateWindowSizeMap,
+  WINDOW_SIZE_STORAGE_KEY,
+} from './utils/windowModes';
 
 const isTokenInvalidError = (errorText) => (
   /expired|invalid|unauthorized|forbidden|401|token/i.test(String(errorText || ''))
@@ -143,10 +150,10 @@ function TitleBar({ isElectron }) {
       <div className="title-bar-drag" />
       <div className="title-bar-buttons">
         <button className="title-btn minimize" onClick={() => electronWindow.minimize()} aria-label="最小化">
-          _
+          <Minus size={16} aria-hidden="true" />
         </button>
         <button className="title-btn close" onClick={() => electronWindow.close()} aria-label="关闭">
-          ×
+          <X size={16} aria-hidden="true" />
         </button>
       </div>
     </div>
@@ -288,7 +295,6 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
       setSuccessMsg(`已读取 ${cloudDevices.length} 台云端设备，正在通过云端 MQTT 同步实时状态...`);
       connectCloudDevices(initialPrinters, token, result.username);
       setLoading(false);
-      electronWindow.resize({ width: 450, height: 200 });
       const connectionGeneration = onConnect(initialPrinters, {
         accessToken: token,
         username: result.username || '',
@@ -600,12 +606,36 @@ function App() {
   const refreshDevicesRef = useRef(null);
 
   useEffect(() => {
-    if (!isElectron) return;
-    if (isConnected) {
-      electronWindow.resize({ width: 460, height: 610 });
-    } else {
-      electronWindow.resize({ width: 860, height: 620 });
-    }
+    if (!isElectron || isConnected) return undefined;
+
+    const persistLoginBounds = (bounds) => {
+      const normalized = normalizeSavedWindowSize('login', bounds);
+      if (!normalized) return;
+      const current = readWindowSizeMap(localStorage.getItem(WINDOW_SIZE_STORAGE_KEY));
+      localStorage.setItem(
+        WINDOW_SIZE_STORAGE_KEY,
+        JSON.stringify(updateWindowSizeMap(current, 'login', normalized)),
+      );
+    };
+
+    const config = getWindowModeConfig('login');
+    const savedSizes = readWindowSizeMap(localStorage.getItem(WINDOW_SIZE_STORAGE_KEY));
+    const size = normalizeSavedWindowSize('login', savedSizes.login) || config.defaultSize;
+    const frameId = requestAnimationFrame(() => {
+      electronWindow.setModeSize({
+        ...size,
+        minWidth: config.minSize.width,
+        minHeight: config.minSize.height,
+      });
+    });
+    const offBoundsChanged = electronEvents.onWindowBoundsChanged(persistLoginBounds);
+    const offBoundsSaveRequest = electronEvents.onWindowBoundsSaveRequest(persistLoginBounds);
+
+    return () => {
+      cancelAnimationFrame(frameId);
+      offBoundsChanged();
+      offBoundsSaveRequest();
+    };
   }, [isElectron, isConnected]);
 
   const handleConnect = (initialPrinters = [], session = null, expectedGeneration = null) => {
