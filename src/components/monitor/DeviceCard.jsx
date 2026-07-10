@@ -3,8 +3,12 @@ import { getPrinterConnectionState, getPrinterJobStatus } from '../../utils/prin
 import { hasCloudStatus } from '../../utils/printerIpPrompt';
 
 function deviceLabel(printer) {
-  const source = printer?.model || printer?.productName || printer?.printerType || printer?.name || 'BM';
+  const source = printer?.model || printer?.modelCode || printer?.productName || printer?.printerType || printer?.name || 'BM';
   return String(source).replace(/[^\p{L}\p{N}]/gu, '').slice(0, 3).toUpperCase() || 'BM';
+}
+
+function deviceModel(printer) {
+  return String(printer?.model || printer?.modelCode || printer?.productName || printer?.printerType || '机型未知').trim();
 }
 
 export default function DeviceCard({ printer, renderAction, presentation }) {
@@ -16,14 +20,17 @@ export default function DeviceCard({ printer, renderAction, presentation }) {
   const meta = infoLine(printer);
   const ams = amsInfo(printer);
   const cloudOnly = !printer.ip && hasCloudStatus(printer);
+  const model = deviceModel(printer);
+  const connectionCopy = printer.ip ? `IP ${printer.ip}` : (cloudOnly ? '云端在线 · 本地 IP 可选' : '等待本地连接');
+  const hasRemainingTime = Boolean(printer.timeLeft && printer.timeLeft !== '--');
 
   return (
-    <article className={`device-card device-card--${status}`} data-printer-card data-status={status} data-connection={connection} aria-label={`${printer.name || '未命名打印机'}，${statusText(printer)}`}>
+    <article className={`device-card device-card--${status}`} data-printer-card data-status={status} data-connection={connection} aria-label={`${printer.name || '未命名打印机'}，${model}，${statusText(printer)}`}>
       <header className="device-card__header">
         <span className="device-card__avatar" aria-hidden="true">{deviceLabel(printer)}</span>
         <div className="device-card__identity">
           <strong title={printer.name || '未命名打印机'}>{printer.name || '未命名打印机'}</strong>
-          <span title={printer.ip || ''}>{printer.ip ? `IP ${printer.ip}` : (cloudOnly ? '云端在线 · 本地 IP 可选' : '等待本地连接')}</span>
+          <span title={`${model} · ${connectionCopy}`}>{model} · {connectionCopy}</span>
         </div>
         <div className="device-card__action">{renderAction(printer, true)}</div>
       </header>
@@ -38,7 +45,7 @@ export default function DeviceCard({ printer, renderAction, presentation }) {
 
       <div className="device-card__facts">
         <span title={meta.right}>{meta.right}</span>
-        <span>{printer.timeLeft && printer.timeLeft !== '--' ? `剩余 ${printer.timeLeft}` : temperatureText(printer)}</span>
+        {hasRemainingTime ? <span>剩余 {printer.timeLeft}</span> : null}
         <span className="device-card__temperature">{temperatureText(printer)}</span>
       </div>
 

@@ -319,17 +319,6 @@
   color: var(--amber);
 }
 
-.device-summary__compact-copy {
-  display: none;
-  min-width: 0;
-  margin-left: auto;
-  overflow: hidden;
-  color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 9px;
-}
-
 .device-cloud-notice {
   flex: 0 0 auto;
   margin: 0;
@@ -382,9 +371,7 @@
   border-color: rgba(255, 209, 125, 0.46);
 }
 
-.device-card--error,
-.device-card[data-connection="offline"],
-.device-card[data-connection="error"] {
+.device-card--error {
   border-color: rgba(239, 119, 114, 0.5);
 }
 
@@ -579,10 +566,6 @@
 @media (max-width: 419px) {
   .device-summary__metric--secondary {
     display: none;
-  }
-
-  .device-summary__compact-copy {
-    display: block;
   }
 
   .device-card__header {

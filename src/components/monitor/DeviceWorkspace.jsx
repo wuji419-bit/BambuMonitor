@@ -8,7 +8,6 @@ export default function DeviceWorkspace({ printers, summary, cloudOverviewCount,
   return (
     <section className="device-workspace" aria-label="设备工作区">
       <div className="device-summary" aria-label={accessibleSummary}>
-        <span className="device-summary__compact-copy">{total} 台设备 · {summary.attention} 台需关注</span>
         <span className="device-summary__metric device-summary__metric--secondary"><small>总设备</small><strong>{total}</strong></span>
         <span className="device-summary__metric"><small>在线</small><strong>{summary.online}</strong></span>
         <span className="device-summary__metric"><small>打印中</small><strong>{summary.printing}</strong></span>
