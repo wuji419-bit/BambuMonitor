@@ -626,9 +626,10 @@
 .monitor-shell--mini .monitor-content { inset: 0; }
 .monitor-shell--mini .monitor-legacy-surface { padding: 0 !important; }
 .mini-monitor { display: grid; grid-template-columns: 22px minmax(0, 1fr) 58px; align-items: center; gap: 5px; width: 100%; height: 100%; min-width: 0; min-height: 0; padding: 5px 5px 5px 2px; overflow: hidden; }
-.mini-drag-handle { display: flex; align-items: center; justify-content: center; align-self: stretch; color: #71829a; cursor: move; -webkit-app-region: drag; }
+.mini-drag-handle { display: flex; align-items: center; justify-content: center; align-self: stretch; color: #71829a; cursor: move; }
 .mini-drag-handle * { pointer-events: none; }
-.monitor-shell.is-locked .mini-drag-handle { cursor: default; -webkit-app-region: no-drag; }
+.monitor-content .mini-drag-handle { -webkit-app-region: drag; }
+.monitor-shell.is-locked .monitor-content .mini-drag-handle { cursor: default; -webkit-app-region: no-drag; }
 .mini-center { display: grid; grid-template-rows: 18px 14px 5px; align-content: center; gap: 2px; min-width: 0; overflow: hidden; }
 .mini-primary { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; min-width: 0; }
 .mini-primary strong, .mini-primary span, .mini-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: 0; }
