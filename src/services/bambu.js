@@ -1,13 +1,13 @@
 // Bambu Lab Local LAN Connection
 // MQTT connections now run in main process via IPC for TLS stability in packaged apps
-import { electronDevices, electronEvents, electronMqtt, isElectronEnvironment } from './electron';
+import { electronDevices, electronEvents, electronMqtt, isElectronEnvironment } from './electron.js';
 import {
     applyMqttConnectedState,
     applyMqttDisconnectedState,
     applyMqttReconnectingState,
     isReusableMqttConnectionStatus,
-} from '../utils/mqttConnectionState';
-import { getPrintTaskName, mapTelemetryStatus } from '../utils/printTaskStatus';
+} from '../utils/mqttConnectionState.js';
+import { getPrintTaskName, mapTelemetryStatus } from '../utils/printTaskStatus.js';
 
 // Scan for printers on local network using SSDP
 // This runs in Electron main process via IPC
@@ -451,17 +451,22 @@ export class BambuClient {
         if (!isElectronEnvironment()) return;
 
         if (serialNumber) {
-            await electronMqtt.disconnect({ serialNumber });
-            this.printers.delete(serialNumber);
-            this.callbacks.delete(serialNumber);
-            if (this.printers.size === 0) this.stopCountdownTimer();
+            try {
+                await electronMqtt.disconnect({ serialNumber });
+            } finally {
+                this.printers.delete(serialNumber);
+                this.callbacks.delete(serialNumber);
+                if (this.printers.size === 0) this.stopCountdownTimer();
+            }
         } else {
-            // Disconnect all
-            await electronMqtt.disconnectAll();
-            this.printers.clear();
-            this.callbacks.clear();
-            this.globalUpdateCallback = null;
-            this.stopCountdownTimer();
+            try {
+                await electronMqtt.disconnectAll();
+            } finally {
+                this.printers.clear();
+                this.callbacks.clear();
+                this.globalUpdateCallback = null;
+                this.stopCountdownTimer();
+            }
         }
     }
 
