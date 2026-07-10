@@ -6,6 +6,7 @@ import appIconUrl from './assets/app-icon.svg';
 import { bambuClient, scanPrinters } from './services/bambu';
 import { electronAuth, electronWindow, isElectronEnvironment } from './services/electron';
 import { dispatchPrinterNotification, getPrinterNotificationEvent } from './services/notifications';
+import { getRemovedPrinterIds, reconcilePrinterInventory } from './utils/deviceInventory';
 import { buildDeviceSyncSnapshot, mergePrinterState, normalizeName } from './utils/printerSync';
 
 const isTokenInvalidError = (errorText) => (
@@ -13,6 +14,46 @@ const isTokenInvalidError = (errorText) => (
 );
 
 const AGREEMENT_KEY = 'bambu_terms_agreed';
+const DEVICE_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+
+function readCachedPrinterIps() {
+  try {
+    return JSON.parse(localStorage.getItem('cached_printer_ips') || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function syncCloudDeviceSnapshot(cloudDevices, scannedPrinters = []) {
+  const snapshot = buildDeviceSyncSnapshot({
+    cloudDevices,
+    scannedPrinters,
+    cachedIps: readCachedPrinterIps(),
+  });
+  localStorage.setItem('cached_printer_ips', JSON.stringify(snapshot.cachedIps));
+  return snapshot;
+}
+
+function connectCloudPrinters(initialPrinters, token, username = '') {
+  const existingById = new Map(bambuClient.getAllPrinters().map((printer) => [printer.dev_id, printer]));
+
+  initialPrinters.forEach((printer) => {
+    const existing = existingById.get(printer.dev_id);
+    if (existing?.connectionMode === 'cloud' && bambuClient.isConnected(printer.dev_id)) return;
+
+    bambuClient.connectCloud({
+      authToken: token,
+      username,
+      region: 'China',
+      serialNumber: printer.dev_id,
+      onUpdate: (updatedPrinter) => updatedPrinter,
+      deviceName: printer.name,
+      initialPrinter: printer,
+    }).catch((err) => {
+      console.error(`Failed to connect cloud MQTT for ${printer.name}:`, err);
+    });
+  });
+}
 
 const PREVIEW_PRINTERS = [
   {
@@ -177,22 +218,8 @@ function ConnectionScreen({ onConnect, isElectron }) {
     }
   };
 
-  const readCachedIps = () => {
-    try {
-      return JSON.parse(localStorage.getItem('cached_printer_ips') || '{}');
-    } catch {
-      return {};
-    }
-  };
-
   const buildDeviceSync = (cloudDevices, scannedPrinters = []) => {
-    const snapshot = buildDeviceSyncSnapshot({
-      cloudDevices,
-      scannedPrinters,
-      cachedIps: readCachedIps(),
-    });
-
-    localStorage.setItem('cached_printer_ips', JSON.stringify(snapshot.cachedIps));
+    const snapshot = syncCloudDeviceSnapshot(cloudDevices, scannedPrinters);
 
     return {
       devicesWithIp: snapshot.devicesWithIp,
@@ -201,24 +228,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
   };
 
   const connectCloudDevices = (initialPrinters, token, username = '') => {
-    const existingById = new Map(bambuClient.getAllPrinters().map((printer) => [printer.dev_id, printer]));
-
-    initialPrinters.forEach((printer) => {
-      const existing = existingById.get(printer.dev_id);
-      if (existing?.connectionMode === 'cloud' && bambuClient.isConnected(printer.dev_id)) return;
-
-      bambuClient.connectCloud({
-        authToken: token,
-        username,
-        region: 'China',
-        serialNumber: printer.dev_id,
-        onUpdate: (updatedPrinter) => updatedPrinter,
-        deviceName: printer.name,
-        initialPrinter: printer,
-      }).catch((err) => {
-        console.error(`Failed to connect cloud MQTT for ${printer.name}:`, err);
-      });
-    });
+    connectCloudPrinters(initialPrinters, token, username);
   };
 
   const refreshLanDevicesInBackground = async (cloudDevices) => {
@@ -272,20 +282,16 @@ function ConnectionScreen({ onConnect, isElectron }) {
         return;
       }
 
-      const { devicesWithIp, initialPrinters } = buildDeviceSync(cloudDevices);
-      const reachableDevices = devicesWithIp.filter((device) => device.ip);
-
-      setSuccessMsg(
-        reachableDevices.length > 0
-          ? `已读取 ${cloudDevices.length} 台设备，正在使用缓存 IP 快速连接 ${reachableDevices.length} 台...`
-          : `已读取 ${cloudDevices.length} 台云端设备，先进入概览，后台继续扫描局域网...`,
-      );
+      const { initialPrinters } = buildDeviceSync(cloudDevices);
 
       setSuccessMsg(`已读取 ${cloudDevices.length} 台云端设备，正在通过云端 MQTT 同步实时状态...`);
       connectCloudDevices(initialPrinters, token, result.username);
       setLoading(false);
       electronWindow.resize({ width: 450, height: 200 });
-      onConnect(initialPrinters);
+      onConnect(initialPrinters, {
+        accessToken: token,
+        username: result.username || '',
+      });
       refreshLanDevicesInBackground(cloudDevices);
     } catch (err) {
       console.error('Fetch device list error:', err);
@@ -338,7 +344,6 @@ function ConnectionScreen({ onConnect, isElectron }) {
       if (result.success) {
         setSuccessMsg('登录成功，正在同步设备...');
         localStorage.setItem('bambu_account', account);
-        localStorage.setItem('bambu_token', result.accessToken);
         await electronAuth.saveSession({ account, accessToken: result.accessToken });
         await fetchDeviceList(result.accessToken);
         return;
@@ -381,22 +386,20 @@ function ConnectionScreen({ onConnect, isElectron }) {
     const restoreLogin = async () => {
       if (!isElectron) return;
 
-      let savedToken = localStorage.getItem('bambu_token');
+      localStorage.removeItem('bambu_token');
+      let savedToken = '';
       let savedAccount = localStorage.getItem('bambu_account') || '';
 
-      if (!savedToken) {
-        try {
-          const result = await electronAuth.getSavedSession();
-          const session = result?.session;
-          if (session?.accessToken) {
-            savedToken = session.accessToken;
-            savedAccount = session.account || savedAccount;
-            localStorage.setItem('bambu_token', savedToken);
-            if (savedAccount) localStorage.setItem('bambu_account', savedAccount);
-          }
-        } catch (err) {
-          console.warn('Read saved session failed:', err);
+      try {
+        const result = await electronAuth.getSavedSession();
+        const session = result?.session;
+        if (session?.accessToken) {
+          savedToken = session.accessToken;
+          savedAccount = session.account || savedAccount;
+          if (savedAccount) localStorage.setItem('bambu_account', savedAccount);
         }
+      } catch (err) {
+        console.warn('Read saved session failed:', err);
       }
 
       if (savedAccount) setAccount(savedAccount);
@@ -581,7 +584,13 @@ function App() {
   ));
   const [isConnected, setIsConnected] = useState(() => isPreviewMode);
   const [printers, setPrinters] = useState(() => (isPreviewMode ? PREVIEW_PRINTERS : []));
+  const [isRefreshingDevices, setIsRefreshingDevices] = useState(false);
+  const [lastDeviceSyncAt, setLastDeviceSyncAt] = useState(() => (isPreviewMode ? Date.now() : 0));
+  const [deviceSyncError, setDeviceSyncError] = useState('');
   const lastPrinterStatusRef = useRef(new Map());
+  const authSessionRef = useRef(null);
+  const deviceSyncBusyRef = useRef(false);
+  const refreshDevicesRef = useRef(null);
 
   useEffect(() => {
     if (!isElectron) return;
@@ -592,7 +601,13 @@ function App() {
     }
   }, [isElectron, isConnected]);
 
-  const handleConnect = (initialPrinters = []) => {
+  const handleConnect = (initialPrinters = [], session = null) => {
+    if (session?.accessToken) {
+      authSessionRef.current = session;
+      setLastDeviceSyncAt(Date.now());
+      setDeviceSyncError('');
+    }
+
     const connectedPrinters = bambuClient.getAllPrinters();
     const mergedById = new Map();
 
@@ -621,6 +636,75 @@ function App() {
     setIsConnected(true);
   };
 
+  const refreshDeviceInventory = async ({ includeLan = true } = {}) => {
+    if (isPreviewMode) {
+      setLastDeviceSyncAt(Date.now());
+      setDeviceSyncError('');
+      return;
+    }
+    if (!isElectron || deviceSyncBusyRef.current) return;
+
+    deviceSyncBusyRef.current = true;
+    setIsRefreshingDevices(true);
+    setDeviceSyncError('');
+
+    try {
+      let session = authSessionRef.current;
+      if (!session?.accessToken) {
+        const saved = await electronAuth.getSavedSession();
+        session = saved?.session || null;
+        if (session?.accessToken) authSessionRef.current = session;
+      }
+      if (!session?.accessToken) {
+        throw new Error('登录状态不可用，请重新登录');
+      }
+
+      const result = await electronAuth.getDeviceList({ accessToken: session.accessToken });
+      if (!result?.success) {
+        throw new Error(result?.error || '同步设备失败');
+      }
+
+      const cloudDevices = result.devices || [];
+      const snapshot = syncCloudDeviceSnapshot(cloudDevices);
+      const removedIds = getRemovedPrinterIds(bambuClient.getAllPrinters(), snapshot.initialPrinters);
+      await Promise.allSettled(removedIds.map((serialNumber) => bambuClient.disconnect(serialNumber)));
+
+      setPrinters((current) => reconcilePrinterInventory(current, snapshot.initialPrinters));
+      authSessionRef.current = {
+        ...session,
+        username: result.username || session.username || '',
+      };
+      connectCloudPrinters(snapshot.initialPrinters, session.accessToken, authSessionRef.current.username);
+      setLastDeviceSyncAt(Date.now());
+
+      if (includeLan) {
+        scanPrinters()
+          .then((scannedPrinters) => {
+            const lanSnapshot = syncCloudDeviceSnapshot(cloudDevices, scannedPrinters);
+            setPrinters((current) => reconcilePrinterInventory(current, lanSnapshot.initialPrinters));
+          })
+          .catch((error) => {
+            console.warn('Background LAN refresh failed:', error);
+          });
+      }
+    } catch (error) {
+      setDeviceSyncError(error?.message || '同步设备失败');
+    } finally {
+      deviceSyncBusyRef.current = false;
+      setIsRefreshingDevices(false);
+    }
+  };
+
+  refreshDevicesRef.current = refreshDeviceInventory;
+
+  useEffect(() => {
+    if (!isConnected || !isElectron || isPreviewMode) return undefined;
+    const timer = window.setInterval(() => {
+      refreshDevicesRef.current?.({ includeLan: false });
+    }, DEVICE_SYNC_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [isConnected, isElectron, isPreviewMode]);
+
   useEffect(() => {
     const statusMap = lastPrinterStatusRef.current;
     const currentIds = new Set(printers.map((printer) => printer.dev_id));
@@ -632,11 +716,12 @@ function App() {
     }
 
     for (const printer of printers) {
-      const prevStatus = statusMap.get(printer.dev_id);
-      const currentStatus = printer.status;
-      const notificationEvent = getPrinterNotificationEvent(prevStatus, currentStatus);
+      const previousPrinter = statusMap.get(printer.dev_id);
+      const previousJobStatus = previousPrinter?.jobStatus || previousPrinter?.status;
+      const currentJobStatus = printer.jobStatus || printer.status;
+      const notificationEvent = getPrinterNotificationEvent(previousPrinter, printer);
 
-      if (prevStatus && prevStatus !== 'finished' && currentStatus === 'finished') {
+      if (previousJobStatus && previousJobStatus !== 'finished' && currentJobStatus === 'finished') {
         const message = `${printer.name || '打印机'} 打印完成`;
         try {
           if (typeof window !== 'undefined' && window.speechSynthesis && window.SpeechSynthesisUtterance) {
@@ -650,13 +735,17 @@ function App() {
       }
 
       if (notificationEvent) {
-        dispatchPrinterNotification(notificationEvent, printer, { previousStatus: prevStatus })
+        dispatchPrinterNotification(notificationEvent, printer, { previousStatus: previousJobStatus })
           .catch((err) => {
             console.error('发送打印机通知失败:', err);
           });
       }
 
-      statusMap.set(printer.dev_id, currentStatus);
+      statusMap.set(printer.dev_id, {
+        status: printer.status,
+        jobStatus: printer.jobStatus,
+        connectionState: printer.connectionState,
+      });
     }
   }, [printers]);
 
@@ -680,7 +769,14 @@ function App() {
       throw new Error('未找到对应的打印机');
     }
 
-    const savedToken = localStorage.getItem('bambu_token') || '';
+    let savedToken = authSessionRef.current?.accessToken || '';
+    if (!savedToken && isElectron) {
+      const saved = await electronAuth.getSavedSession();
+      if (saved?.session?.accessToken) {
+        authSessionRef.current = saved.session;
+        savedToken = saved.session.accessToken;
+      }
+    }
     const shouldUseCloudStatus = Boolean(savedToken)
       && (printer.connectionMode === 'cloud' || printer.statusSource === 'cloud');
 
@@ -697,7 +793,7 @@ function App() {
       const next = [...prev];
       next[index] = {
         ...next[index],
-        status: 'connecting',
+        connectionState: 'connecting',
         statusSource: shouldUseCloudStatus ? 'cloud' : 'local',
         connectionMode: shouldUseCloudStatus ? 'cloud' : 'local',
         ip: normalizedIp,
@@ -720,7 +816,7 @@ function App() {
       if (shouldUseCloudStatus) {
         await bambuClient.connectCloud({
           authToken: savedToken,
-          username: printer.cloudUsername || '',
+          username: authSessionRef.current?.username || printer.cloudUsername || '',
           region: 'China',
           serialNumber: serial,
           onUpdate: onPrinterUpdate,
@@ -749,7 +845,8 @@ function App() {
         const next = [...prev];
         next[index] = {
           ...next[index],
-          status: 'error',
+          status: next[index].jobStatus || next[index].status || 'error',
+          connectionState: 'error',
           statusSource: shouldUseCloudStatus ? 'cloud' : 'local',
           connectionMode: shouldUseCloudStatus ? 'cloud' : 'local',
           ip: normalizedIp,
@@ -767,7 +864,14 @@ function App() {
 
   return (
     <>
-      <PrinterWidget printers={printers} onUpdateIp={handleUpdateIp} />
+      <PrinterWidget
+        printers={printers}
+        onUpdateIp={handleUpdateIp}
+        onRefreshDevices={() => refreshDeviceInventory({ includeLan: true })}
+        isRefreshingDevices={isRefreshingDevices}
+        lastDeviceSyncAt={lastDeviceSyncAt}
+        deviceSyncError={deviceSyncError}
+      />
       {!isElectron && !isPreviewMode ? <MobileDashboard printers={printers} /> : null}
     </>
   );

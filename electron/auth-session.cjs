@@ -19,23 +19,59 @@ function normalizeAuthSession(session = {}) {
   };
 }
 
-function readAuthSession(userDataPath) {
+function canProtect(protection) {
+  return typeof protection?.protect === 'function';
+}
+
+function canUnprotect(protection) {
+  return typeof protection?.unprotect === 'function';
+}
+
+function createProtectedEnvelope(session, protection) {
+  const protectedValue = protection.protect(JSON.stringify(session));
+  return {
+    version: 2,
+    protected: true,
+    payload: Buffer.from(protectedValue).toString('base64'),
+  };
+}
+
+function readAuthSession(userDataPath, protection = null) {
   try {
     const raw = fs.readFileSync(getAuthSessionPath(userDataPath), 'utf8');
-    return normalizeAuthSession(JSON.parse(raw));
+    const stored = JSON.parse(raw);
+
+    if (stored?.protected === true) {
+      if (!stored.payload || !canUnprotect(protection)) return null;
+      const decrypted = protection.unprotect(Buffer.from(stored.payload, 'base64'));
+      return normalizeAuthSession(JSON.parse(decrypted));
+    }
+
+    const normalized = normalizeAuthSession(stored);
+    if (normalized && canProtect(protection)) {
+      writeAuthSession(userDataPath, normalized, protection);
+    }
+    return normalized;
   } catch {
     return null;
   }
 }
 
-function writeAuthSession(userDataPath, session) {
+function writeAuthSession(userDataPath, session, protection = null) {
   const normalized = normalizeAuthSession(session);
   if (!normalized) {
     throw new Error('缺少登录令牌');
   }
 
   fs.mkdirSync(userDataPath, { recursive: true });
-  fs.writeFileSync(getAuthSessionPath(userDataPath), JSON.stringify(normalized, null, 2), 'utf8');
+  const stored = canProtect(protection)
+    ? createProtectedEnvelope(normalized, protection)
+    : normalized;
+  fs.writeFileSync(
+    getAuthSessionPath(userDataPath),
+    JSON.stringify(stored, null, 2),
+    { encoding: 'utf8', mode: 0o600 },
+  );
   return normalized;
 }
 

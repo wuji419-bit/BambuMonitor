@@ -1,4 +1,9 @@
 export const DEFAULT_CAMERA_START_TIMEOUT_MS = 6000;
+const CAMERA_RETRY_DELAYS_MS = [1500, 4000];
+
+export function getCameraRetryDelay(attempt) {
+  return CAMERA_RETRY_DELAYS_MS[Number(attempt)] ?? null;
+}
 
 export function buildInitialCameraState(source = {}) {
   const key = source.key;

@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Camera, Copy, GripHorizontal, LayoutGrid, Lock, Maximize2, Minimize2, Pin, PinOff, Power, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Camera, Copy, GripHorizontal, LayoutGrid, Lock, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
 import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
 import {
   cameraCompatibilityNote,
@@ -13,14 +13,22 @@ import {
 } from '../services/camera';
 import { buildCameraFrameUrl } from '../utils/cameraFrame';
 import { buildCameraZoomState } from '../utils/cameraZoom';
+import { mapWithConcurrency } from '../utils/asyncPool';
 import { hasCloudStatus, shouldPromptForPrinterIp } from '../utils/printerIpPrompt';
 import { dragRegionStyle, noDragRegionStyle } from '../utils/windowDragRegions';
+import {
+  getPrinterConnectionState,
+  getPrinterJobStatus,
+  getPrinterSummary,
+  sortPrintersForDisplay,
+} from '../utils/printerPresentation';
 import {
   buildInitialCameraState,
   cameraStartErrorState,
   cameraStartResultState,
   cameraStartWithTimeout,
   DEFAULT_CAMERA_START_TIMEOUT_MS,
+  getCameraRetryDelay,
 } from '../utils/cameraStartup';
 import {
   buildIntegrationSnippet,
@@ -82,21 +90,34 @@ function isCloudOverview(printer) {
 }
 
 function statusText(printer) {
+  const connectionState = getPrinterConnectionState(printer);
+  const jobStatus = getPrinterJobStatus(printer) || printer.status;
+
+  if (connectionState === 'reconnecting') {
+    return jobStatus === 'printing'
+      ? `重连中 · ${safeProgress(printer.progress)}%`
+      : '正在重连';
+  }
+  if (['offline', 'error'].includes(connectionState)) return '连接中断';
+
   if (isCloudOverview(printer)) {
-    if (printer.status === 'cloud_offline' || printer.cloudOnline === false) return '云端离线';
-    if (printer.status === 'printing') return '云端：打印中';
-    if (printer.status === 'paused') return '云端：暂停';
-    if (printer.status === 'preparing') return '云端：准备';
-    if (printer.status === 'finished') return '云端：完成';
-    if (printer.status === 'idle') return '云端：空闲';
+    if (jobStatus === 'printing') return '云端：打印中';
+    if (jobStatus === 'paused') return '云端：暂停';
+    if (jobStatus === 'preparing') return '云端：准备';
+    if (jobStatus === 'finished') return '云端：完成';
+    if (jobStatus === 'idle') return '云端：空闲';
     return '云端概览';
   }
-  if (printer.status === 'printing') return `${printer.progress || 0}% • ${printer.timeLeft || '--'}`;
-  return (statusMap[printer.status] || [printer.status || '--'])[0];
+  if (jobStatus === 'printing') return `${printer.progress || 0}% • ${printer.timeLeft || '--'}`;
+  return (statusMap[jobStatus] || [jobStatus || printer.status || '--'])[0];
 }
 
 function statusStyle(printer) {
-  const [, color = '#dce6f9', background = 'rgba(255,255,255,0.09)', border = 'rgba(255,255,255,0.12)'] = statusMap[printer.status] || [];
+  const connectionState = getPrinterConnectionState(printer);
+  const paletteKey = ['offline', 'error'].includes(connectionState)
+    ? 'disconnected'
+    : (connectionState === 'reconnecting' ? 'connecting' : (getPrinterJobStatus(printer) || printer.status));
+  const [, color = '#dce6f9', background = 'rgba(255,255,255,0.09)', border = 'rgba(255,255,255,0.12)'] = statusMap[paletteKey] || [];
   return { color, background, border };
 }
 
@@ -137,9 +158,9 @@ function amsInfo(printer) {
 
 function infoLine(printer) {
   if (hasCloudStatus(printer)) {
-    const cloudLabel = statusText(printer).replace('云端：', '').replace('浜戠锛?', '');
+    const cloudLabel = statusText(printer).replace('云端：', '');
     return {
-      left: cloudLabel && cloudLabel !== '云端概览' && cloudLabel !== '浜戠姒傝'
+      left: cloudLabel && cloudLabel !== '云端概览'
         ? `云端状态：${cloudLabel}`
         : '云端状态已启用',
       right: printer.ip ? `IP ${printer.ip}` : 'IP 仅用于摄像头/本地直连',
@@ -165,14 +186,22 @@ function safeProgress(value) {
   return Math.max(0, Math.min(Number(value) || 0, 100));
 }
 
+function formatDeviceSyncTime(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return '尚未同步设备';
+  return `设备同步于 ${new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
+}
+
 function formatTemperatureValue(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? `${Math.round(numeric)}°` : '--';
 }
 
 function temperatureText(printer) {
-  if (isCloudOverview(printer)) return '等待本地实时数据';
   const temperature = printer.temperature || {};
+  if (isCloudOverview(printer) && !Number(temperature.nozzle) && !Number(temperature.bed)) {
+    return '等待实时温度';
+  }
   return `喷嘴 ${formatTemperatureValue(temperature.nozzle)} · 热床 ${formatTemperatureValue(temperature.bed)}`;
 }
 
@@ -632,7 +661,14 @@ async function copyTextToClipboard(text) {
   }
 }
 
-export default function PrinterWidget({ printers, onUpdateIp }) {
+export default function PrinterWidget({
+  printers,
+  onUpdateIp,
+  onRefreshDevices,
+  isRefreshingDevices = false,
+  lastDeviceSyncAt = 0,
+  deviceSyncError = '',
+}) {
   const [isLocked, setIsLocked] = useState(false);
   const [isHorizontal, setIsHorizontal] = useState(false);
   const [viewMode, setViewMode] = useState(() => localStorage.getItem(VIEW_MODE_KEY) || 'full');
@@ -660,22 +696,34 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
   const [startupFeedback, setStartupFeedback] = useState('');
   const widgetRef = useRef(null);
   const lastResizeRef = useRef({ width: 0, height: 0 });
+  const cameraWallOpenRef = useRef(false);
+  const cameraRetryAttemptsRef = useRef({});
+  const cameraRetryTimersRef = useRef({});
+  const restartCameraRef = useRef(null);
 
   const isCompact = viewMode === 'compact';
   const isMini = viewMode === 'mini';
   const isFullPanel = !cameraOpen && !settingsOpen && !ipDialog && !isMini && !isCompact;
-  const onlineCount = printers.filter((printer) => !['error', 'disconnected', 'cloud_offline'].includes(printer.status) && printer.cloudOnline !== false).length;
-  const printingCount = printers.filter((printer) => printer.status === 'printing').length;
-  const cloudOverviewCount = printers.filter((printer) => isCloudOverview(printer)).length;
-  const attentionCount = printers.filter((printer) => ['error', 'disconnected', 'paused', 'cloud_offline', 'no_ip'].includes(printer.status) || printer.cloudOnline === false).length;
-  const finishedPrinters = printers.filter((printer) => isFinishedPrinter(printer));
-  const activeMiniPrinters = printers.filter((printer) => !isFinishedPrinter(printer));
+  const displayPrinters = sortPrintersForDisplay(printers);
+  const summary = getPrinterSummary(printers);
+  const onlineCount = summary.online;
+  const printingCount = summary.printing;
+  const reconnectingCount = summary.reconnecting;
+  const attentionCount = summary.attention;
+  const cloudOverviewCount = displayPrinters.filter((printer) => isCloudOverview(printer)).length;
+  const finishedPrinters = displayPrinters.filter((printer) => isFinishedPrinter(printer));
+  const activeMiniPrinters = displayPrinters.filter((printer) => !isFinishedPrinter(printer));
   const rotatingMiniPrinter = activeMiniPrinters.length > 0
     ? activeMiniPrinters[miniActiveIndex % activeMiniPrinters.length]
     : null;
-  const compactProgress = printers.length > 0
-    ? Math.round(printers.reduce((sum, printer) => sum + safeProgress(printer.progress), 0) / printers.length)
-    : 0;
+  const compactPrimaryPrinter = displayPrinters.find((printer) => (
+    ['printing', 'drying', 'preparing'].includes(getPrinterJobStatus(printer))
+  ));
+  const compactProgress = safeProgress(compactPrimaryPrinter?.progress);
+  const compactProgressStatus = getPrinterJobStatus(compactPrimaryPrinter) || 'idle';
+  const deviceSyncCopy = deviceSyncError
+    ? `同步失败：${deviceSyncError}`
+    : (isRefreshingDevices ? '正在同步设备...' : formatDeviceSyncTime(lastDeviceSyncAt));
   const miniAutoSize = isMini && !cameraOpen && !settingsOpen && !ipDialog;
   const panelWidth = cameraOpen ? (cameraZoomKey ? 960 : 760) : (settingsOpen ? 432 : (ipDialog ? 360 : (isCompact ? 396 : (isHorizontal ? Math.min(120 + Math.max(printers.length, 1) * 232, 1600) : 432))));
   const cameraSourceKey = JSON.stringify(printers.map((printer) => {
@@ -693,6 +741,95 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
       autoCameraSupported: isAutoCameraSupported(printer),
     };
   }));
+  cameraWallOpenRef.current = cameraOpen;
+
+  const updateCameraState = (key, nextState) => {
+    if (!key || !nextState || !cameraWallOpenRef.current) return;
+    setCameraStreams((prev) => ({ ...prev, [key]: nextState.stream }));
+    setCameraImageStates((prev) => ({ ...prev, [key]: nextState.imageState }));
+  };
+
+  const restartCameraSource = async (sourceOrKey, { stopFirst = true } = {}) => {
+    let sources = [];
+    try {
+      sources = JSON.parse(cameraSourceKey);
+    } catch {
+      sources = [];
+    }
+    const source = typeof sourceOrKey === 'string'
+      ? sources.find((item) => item.key === sourceOrKey)
+      : sourceOrKey;
+    if (!source?.key || !cameraWallOpenRef.current) return;
+
+    const initialState = buildInitialCameraState(source);
+    if (!initialState) return;
+
+    if (!initialState.shouldStart) {
+      if (source.customUrl) {
+        const separator = source.customUrl.includes('?') ? '&' : '?';
+        updateCameraState(source.key, {
+          stream: { success: true, url: `${source.customUrl}${separator}bambuRetry=${Date.now()}`, mode: 'custom' },
+          imageState: { status: 'loading' },
+        });
+      } else {
+        updateCameraState(source.key, initialState);
+      }
+      return;
+    }
+
+    updateCameraState(source.key, initialState);
+    try {
+      if (stopFirst) {
+        await electronCamera.stop({ serialNumber: source.key });
+      }
+      const result = await cameraStartWithTimeout(
+        electronCamera.start({
+          serialNumber: source.key,
+          cloudId: source.cloudId,
+          name: source.name,
+          model: source.model,
+          modelCode: source.modelCode,
+          cameraMode: source.cameraMode,
+          ip: source.ip,
+          accessCode: source.accessCode,
+        }),
+        DEFAULT_CAMERA_START_TIMEOUT_MS,
+        source.name || source.key,
+      );
+      updateCameraState(source.key, cameraStartResultState(result));
+    } catch (error) {
+      updateCameraState(source.key, cameraStartErrorState(error));
+    }
+  };
+
+  restartCameraRef.current = restartCameraSource;
+
+  const clearCameraRetryTimer = useCallback((key) => {
+    const timer = cameraRetryTimersRef.current[key];
+    if (timer) window.clearTimeout(timer);
+    delete cameraRetryTimersRef.current[key];
+  }, []);
+
+  const scheduleCameraRetry = useCallback((key) => {
+    if (!key || cameraRetryTimersRef.current[key]) return;
+    const attempt = cameraRetryAttemptsRef.current[key] || 0;
+    const delay = getCameraRetryDelay(attempt);
+    if (delay === null) return;
+
+    cameraRetryAttemptsRef.current[key] = attempt + 1;
+    cameraRetryTimersRef.current[key] = window.setTimeout(() => {
+      delete cameraRetryTimersRef.current[key];
+      restartCameraRef.current?.(key);
+    }, delay);
+  }, []);
+
+  const retryCamera = (printer) => {
+    const key = getPrinterCameraKey(printer);
+    if (!key) return;
+    clearCameraRetryTimer(key);
+    cameraRetryAttemptsRef.current[key] = 0;
+    restartCameraRef.current?.(key);
+  };
 
   useEffect(() => {
     if (!isElectronEnvironment()) return undefined;
@@ -797,6 +934,9 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
 
     const startCameraStreams = () => {
       setCameraFeedback('');
+      Object.values(cameraRetryTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+      cameraRetryTimersRef.current = {};
+      cameraRetryAttemptsRef.current = {};
       const initialStreams = {};
       const initialImageStates = {};
       const startableSources = [];
@@ -821,39 +961,11 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
         setCameraImageStates(initialImageStates);
       }
 
-      const updateCameraState = (key, nextState) => {
-        if (cancelled || !key || !nextState) return;
-        setCameraStreams((prev) => ({
-          ...prev,
-          [key]: nextState.stream,
-        }));
-        setCameraImageStates((prev) => ({
-          ...prev,
-          [key]: nextState.imageState,
-        }));
-      };
-
-      startableSources.forEach(async (source) => {
-        const key = source.key;
-        try {
-          const result = await cameraStartWithTimeout(
-            electronCamera.start({
-              serialNumber: key,
-              cloudId: source.cloudId,
-              name: source.name,
-              model: source.model,
-              modelCode: source.modelCode,
-              cameraMode: source.cameraMode,
-              ip: source.ip,
-              accessCode: source.accessCode,
-            }),
-            DEFAULT_CAMERA_START_TIMEOUT_MS,
-            source.name || key,
-          );
-          updateCameraState(key, cameraStartResultState(result));
-        } catch (error) {
-          updateCameraState(key, cameraStartErrorState(error));
-        }
+      mapWithConcurrency(startableSources, 2, async (source) => {
+        if (cancelled) return;
+        await restartCameraRef.current?.(source, { stopFirst: false });
+      }).catch((error) => {
+        if (!cancelled) setCameraFeedback(error?.message || '摄像头启动失败');
       });
     };
 
@@ -866,6 +978,9 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
 
   useEffect(() => {
     if (cameraOpen) return undefined;
+    Object.values(cameraRetryTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+    cameraRetryTimersRef.current = {};
+    cameraRetryAttemptsRef.current = {};
     setCameraStreams({});
     setCameraImageStates({});
     if (!isElectronEnvironment()) return undefined;
@@ -897,6 +1012,36 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
       timers.forEach((timer) => window.clearTimeout(timer));
     };
   }, [cameraOpen, cameraStreams]);
+
+  useEffect(() => {
+    if (!cameraOpen) return undefined;
+
+    let sources = [];
+    try {
+      sources = JSON.parse(cameraSourceKey);
+    } catch {
+      sources = [];
+    }
+    const retryableKeys = new Set(sources
+      .filter((source) => (
+        !source.customUrl
+        && source.ip
+        && source.accessCode
+        && source.autoCameraSupported
+      ))
+      .map((source) => source.key));
+
+    Object.entries(cameraImageStates).forEach(([key, imageState]) => {
+      if (imageState?.status === 'ready') {
+        clearCameraRetryTimer(key);
+        cameraRetryAttemptsRef.current[key] = 0;
+      } else if (imageState?.status === 'error' && retryableKeys.has(key)) {
+        scheduleCameraRetry(key);
+      }
+    });
+
+    return undefined;
+  }, [cameraImageStates, cameraOpen, cameraSourceKey, clearCameraRetryTimer, scheduleCameraRetry]);
 
   useEffect(() => {
     if (!isElectronEnvironment()) return;
@@ -1062,7 +1207,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
   };
 
   const renderCloudNotice = (compact = false) => {
-    if (cloudOverviewCount >= 0) return null;
+    if (cloudOverviewCount <= 0) return null;
     return (
       <div
         style={{
@@ -1075,9 +1220,9 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
           lineHeight: 1.55,
         }}
       >
-        {cloudOverviewCount} 台未识别本地 IP：当前只能看云端在线/打印状态；温度、AMS、层数和精确进度需要本地或 VPN 实时连接。
+        {cloudOverviewCount} 台设备未填写本地 IP：状态与遥测会继续通过云端 MQTT 更新；摄像头和本地直连仍需局域网或 VPN IP。
         <br />
-        官方远程视图请使用 Bambu Connect / Bambu Handy；本工具不读取私有网络插件数据。
+        云端数据可能有延迟；官方远程控制请使用 Bambu Connect / Bambu Handy。
       </div>
     );
   };
@@ -1151,6 +1296,28 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
       }}
     >
       <Camera size={size <= 24 ? 12 : (size <= 30 ? 14 : 16)} />
+    </button>
+  );
+
+  const renderSyncButton = (size = 34) => (
+    <button
+      type="button"
+      onClick={onRefreshDevices}
+      disabled={isRefreshingDevices || typeof onRefreshDevices !== 'function'}
+      title={deviceSyncCopy}
+      style={{
+        ...interactive,
+        width: size,
+        height: size,
+        borderRadius: size <= 28 ? 8 : (size <= 30 ? 10 : 11),
+        color: deviceSyncError ? '#ffb1b1' : (isRefreshingDevices ? '#9ac8ff' : 'rgba(246,250,255,0.88)'),
+        background: deviceSyncError ? 'rgba(255,107,107,0.12)' : 'rgba(255,255,255,0.08)',
+        border: deviceSyncError ? '1px solid rgba(255,107,107,0.2)' : '1px solid rgba(255,255,255,0.1)',
+        opacity: isRefreshingDevices ? 0.72 : 1,
+        cursor: isRefreshingDevices ? 'wait' : 'pointer',
+      }}
+    >
+      <RefreshCw size={size <= 24 ? 12 : (size <= 30 ? 14 : 16)} />
     </button>
   );
 
@@ -1302,7 +1469,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
       );
     }
 
-    if ((printer.status === 'error' || printer.status === 'disconnected') && printer.ip) {
+    if (['offline', 'error'].includes(getPrinterConnectionState(printer)) && printer.ip) {
       return (
         <button
           type="button"
@@ -1465,8 +1632,8 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
           正在等待打印机列表...
         </div>
       ) : (
-        <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, overflowY: 'auto', paddingRight: 2 }}>
-          {printers.map((printer) => {
+        <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gridAutoRows: 'max-content', alignContent: 'start', gap: 12, overflowY: 'auto', paddingRight: 2 }}>
+          {displayPrinters.map((printer) => {
             const key = getPrinterCameraKey(printer);
             const stream = cameraStreams[key];
             const customUrl = getCustomCameraUrl(cameraConfig, printer);
@@ -1560,6 +1727,30 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                       <Camera size={24} style={{ marginBottom: 6, opacity: 0.72 }} />
                       <div>{cameraMessage}</div>
                       {note ? <div style={{ marginTop: 6, color: 'rgba(255,220,162,0.82)' }}>{note}</div> : null}
+                      {imageState?.status === 'error' ? (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            retryCamera(printer);
+                          }}
+                          style={{
+                            ...interactive,
+                            height: 30,
+                            margin: '10px auto 0',
+                            padding: '0 11px',
+                            borderRadius: 9,
+                            color: '#dff2ff',
+                            background: 'rgba(91,177,255,0.14)',
+                            border: '1px solid rgba(91,177,255,0.24)',
+                            fontSize: 11,
+                            fontWeight: 700,
+                          }}
+                        >
+                          <RefreshCw size={12} />
+                          重试
+                        </button>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -1590,9 +1781,13 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
       ref={widgetRef}
       style={{
         position: 'relative',
-        width: miniAutoSize ? 'fit-content' : panelWidth,
+        width: miniAutoSize ? 'fit-content' : `min(${panelWidth}px, 100vw)`,
         minWidth: miniAutoSize ? 0 : (isCompact ? 360 : 220),
-        minHeight: settingsOpen ? 640 : (cameraOpen ? (cameraZoomKey ? 640 : 420) : (ipDialog ? 240 : undefined)),
+        minHeight: settingsOpen
+          ? 'min(640px, 100vh)'
+          : (cameraOpen
+              ? `min(${cameraZoomKey ? 640 : 420}px, 100vh)`
+              : (ipDialog ? 'min(240px, 100vh)' : undefined)),
         maxHeight: miniAutoSize ? undefined : '100vh',
         padding: isMini ? '9px 10px' : (isCompact ? '12px 14px' : '18px 18px 14px'),
         boxSizing: 'border-box',
@@ -1674,7 +1869,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                 )}
               </div>
               <div style={{ marginTop: 7 }}>
-                <ProgressBar progress={compactProgress} status={printingCount > 0 ? 'printing' : 'idle'} compact />
+                <ProgressBar progress={compactProgress} status={compactProgressStatus} compact />
               </div>
             </div>
             <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', gap: 7, WebkitAppRegion: 'no-drag' }}>
@@ -1684,6 +1879,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
               <button type="button" onClick={() => setViewMode('mini')} title="切换为超迷你模式" style={{ ...interactive, width: 30, height: 30, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
                 <Minimize2 size={14} />
               </button>
+              {renderSyncButton(30)}
               {renderCameraButton(30)}
               {renderTopButton(30)}
               {renderSettingsButton(30)}
@@ -1707,7 +1903,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
             </div>
           ) : (
             <div style={{ display: 'grid', gap: 8 }}>
-              {printers.map((printer) => {
+              {displayPrinters.map((printer) => {
                 const progress = safeProgress(printer.progress);
                 const progressMeta = progressPalette(printer.status);
                 const meta = infoLine(printer);
@@ -1761,7 +1957,12 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                   {printers.length > 0 ? '打印控制台' : '正在准备打印机数据'}
                 </div>
                 <div style={{ marginTop: 5, fontSize: 11, color: 'rgba(203,217,239,0.62)', lineHeight: 1.45 }}>
-                  {cloudOverviewCount > 0 ? '本地实时与云端状态兜底' : (isHorizontal ? '横向总览模式' : '纵向实时监控模式')}
+                  {reconnectingCount > 0
+                    ? `${reconnectingCount} 台正在自动重连`
+                    : (cloudOverviewCount > 0 ? '云端状态与本地摄像头协同' : (isHorizontal ? '横向总览模式' : '纵向实时监控模式'))}
+                </div>
+                <div style={{ marginTop: 3, fontSize: 10, color: deviceSyncError ? '#ffb1b1' : 'rgba(178,196,220,0.52)', lineHeight: 1.35 }}>
+                  {deviceSyncCopy}
                 </div>
               </div>
 
@@ -1769,6 +1970,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
               <button type="button" onClick={() => setViewMode('compact')} title="切换为紧凑模式" style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
                 <Minimize2 size={16} />
               </button>
+              {renderSyncButton(34)}
               {renderCameraButton(34)}
               {renderTopButton(34)}
               <button
@@ -1788,14 +1990,6 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                 style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: isLocked ? '#ffcf82' : 'rgba(246,250,255,0.88)', background: isLocked ? 'rgba(255,183,77,0.14)' : 'rgba(255,255,255,0.08)', border: isLocked ? '1px solid rgba(255,183,77,0.22)' : '1px solid rgba(255,255,255,0.1)', opacity: isLocked ? 0.62 : 1, cursor: isLocked ? 'default' : 'pointer' }}
               >
                 <Lock size={16} />
-              </button>
-              <button
-                type="button"
-                onClick={() => electronWindow.quit()}
-                title="退出应用"
-                style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: '#ff9f9f', background: 'rgba(255,107,107,0.12)', border: '1px solid rgba(255,107,107,0.2)' }}
-              >
-                <Power size={16} />
               </button>
               </div>
             </div>
@@ -1827,7 +2021,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
               }}
             >
               <div style={{ display: 'flex', flexDirection: isHorizontal ? 'row' : 'column', gap: isHorizontal ? 12 : 10, alignItems: 'stretch', minHeight: 0 }}>
-                {printers.map((printer) => {
+                {displayPrinters.map((printer) => {
                   const ams = amsInfo(printer);
                   const meta = infoLine(printer);
                   const progress = safeProgress(printer.progress);
@@ -2016,7 +2210,7 @@ export default function PrinterWidget({ printers, onUpdateIp }) {
                 <div style={{ fontSize: 11, color: 'rgba(203,217,239,0.6)', lineHeight: 1.5 }}>
                   留空会按机型自动尝试 RTSPS 或 6000 JPEG 流；外部 MJPEG/快照 URL 只作为兜底。
                 </div>
-                {printers.map((printer) => {
+                {displayPrinters.map((printer) => {
                   const key = getPrinterCameraKey(printer);
                   return (
                     <input

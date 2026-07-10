@@ -6,6 +6,7 @@ import {
   cameraStartWithTimeout,
   cameraStartErrorState,
   cameraStartResultState,
+  getCameraRetryDelay,
 } from './cameraStartup.js';
 
 test('marks startable cameras as pending immediately', () => {
@@ -42,4 +43,10 @@ test('normalizes camera start results and errors', () => {
     stream: { success: false, error: 'boom' },
     imageState: { status: 'error', message: 'boom' },
   });
+});
+
+test('bounds automatic camera retries', () => {
+  assert.equal(getCameraRetryDelay(0), 1500);
+  assert.equal(getCameraRetryDelay(1), 4000);
+  assert.equal(getCameraRetryDelay(2), null);
 });

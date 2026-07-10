@@ -1,9 +1,8 @@
-import { electronNotifications, isElectronEnvironment } from './electron';
+import { electronNotifications, isElectronEnvironment } from './electron.js';
+import { getPrinterConnectionState, getPrinterJobStatus } from '../utils/printerPresentation.js';
 
 const STORAGE_KEY = 'bambu_notification_integrations';
 const DEFAULT_COOLDOWN_MS = 30_000;
-const ISSUE_STATUSES = new Set(['error', 'disconnected']);
-
 const EVENT_COPY = {
   print_finished: {
     severity: 'success',
@@ -163,22 +162,39 @@ server.listen(PORT, '0.0.0.0', () => {
 `;
 }
 
-export function getPrinterNotificationEvent(previousStatus, currentStatus) {
-  if (!previousStatus || previousStatus === currentStatus) return null;
+function normalizeNotificationState(value) {
+  if (!value) return null;
+  const printer = typeof value === 'string' ? { status: value } : value;
+  return {
+    jobStatus: getPrinterJobStatus(printer) || printer.status || '',
+    connectionState: getPrinterConnectionState(printer),
+  };
+}
 
-  if (previousStatus !== 'finished' && currentStatus === 'finished') {
+export function getPrinterNotificationEvent(previousValue, currentValue) {
+  const previous = normalizeNotificationState(previousValue);
+  const current = normalizeNotificationState(currentValue);
+  if (!previous || !current) return null;
+
+  if (previous.jobStatus !== 'finished' && current.jobStatus === 'finished') {
     return 'print_finished';
   }
 
-  if (currentStatus === 'disconnected') {
+  if (previous.connectionState !== 'offline' && current.connectionState === 'offline') {
     return 'printer_disconnected';
   }
 
-  if (currentStatus === 'error') {
+  if (
+    current.connectionState === 'error'
+    || (previous.jobStatus !== 'error' && current.jobStatus === 'error')
+  ) {
     return 'printer_issue';
   }
 
-  if (ISSUE_STATUSES.has(previousStatus) && !ISSUE_STATUSES.has(currentStatus)) {
+  if (
+    ['offline', 'error'].includes(previous.connectionState)
+    && current.connectionState === 'online'
+  ) {
     return 'printer_recovered';
   }
 

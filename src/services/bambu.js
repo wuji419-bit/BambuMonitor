@@ -124,6 +124,8 @@ export class BambuClient {
             name: deviceName || `Bambu Printer (${ip})`,
             model: 'Unknown',
             status: 'connecting',
+            jobStatus: '',
+            connectionState: 'connecting',
             statusSource: 'local',
             connectionMode: 'local',
             progress: 0,
@@ -150,6 +152,7 @@ export class BambuClient {
             if (result.success) {
                 // Wait for first telemetry before claiming idle/printing.
                 printer.status = 'connected';
+                printer.connectionState = 'online';
                 delete printer.errorMsg;
                 this.emitUpdate(serialNumber);
                 return true;
@@ -159,6 +162,7 @@ export class BambuClient {
         } catch (err) {
             console.error(`[Renderer] MQTT connect error:`, err);
             printer.status = 'error';
+            printer.connectionState = 'error';
             printer.errorMsg = err.message;
             this.emitUpdate(serialNumber);
             throw err;
@@ -188,6 +192,8 @@ export class BambuClient {
             name: deviceName || initialPrinter.name || current.name || `Bambu Printer (${serialNumber})`,
             model: initialPrinter.model || current.model || 'Unknown',
             status: initialPrinter.status || current.status || 'connecting',
+            jobStatus: initialPrinter.jobStatus || current.jobStatus || '',
+            connectionState: 'connecting',
             statusSource: 'cloud',
             connectionMode: 'cloud',
             cloudUsername: username || current.cloudUsername || initialPrinter.cloudUsername || '',
@@ -227,6 +233,7 @@ export class BambuClient {
         } catch (err) {
             console.error('[Renderer] Cloud MQTT connect error:', err);
             printer.status = 'error';
+            printer.connectionState = 'error';
             printer.statusSource = 'cloud';
             printer.connectionMode = 'cloud';
             printer.errorMsg = err.message;
@@ -243,6 +250,8 @@ export class BambuClient {
         if (!data) return;
 
         let nextStatus = printer.status;
+        printer.connectionState = 'online';
+        printer.lastTelemetryAt = Date.now();
 
         // Update printer state
         if (data.mc_percent !== undefined) {
@@ -254,6 +263,7 @@ export class BambuClient {
         if (data.gcode_state) {
             nextStatus = mapTelemetryStatus(data, printer);
             printer.status = nextStatus;
+            printer.jobStatus = nextStatus;
         }
 
         this.updateRemainingTime(printer, data, nextStatus);
@@ -457,13 +467,20 @@ export class BambuClient {
 
     isConnected(serialNumber) {
         const printer = this.printers.get(serialNumber);
-        return printer ? isReusableMqttConnectionStatus(printer.status) : false;
+        if (!printer) return false;
+        if (['offline', 'error'].includes(printer.connectionState)) return false;
+        return isReusableMqttConnectionStatus(printer.status);
     }
 
     getConnectedCount() {
         let count = 0;
         for (const printer of this.printers.values()) {
-            if (printer.status !== 'error' && printer.status !== 'disconnected' && printer.status !== 'connecting') {
+            if (printer.connectionState === 'online' || (
+                !printer.connectionState
+                && printer.status !== 'error'
+                && printer.status !== 'disconnected'
+                && printer.status !== 'connecting'
+            )) {
                 count++;
             }
         }

@@ -99,6 +99,8 @@ export function buildDeviceSyncSnapshot({ cloudDevices = [], scannedPrinters = [
       ip: device.ip,
       accessCode: device.accessCode,
       status: mapCloudPrintStatus(device.printStatus, Boolean(device.ip), device.online),
+      jobStatus: mapCloudPrintStatus(device.printStatus, Boolean(device.ip), device.online),
+      connectionState: device.online === false ? 'offline' : 'connecting',
       statusSource: 'cloud',
       connectionMode: 'cloud',
       cloudOnline: device.online,

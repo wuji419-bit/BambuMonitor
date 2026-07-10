@@ -1,5 +1,6 @@
 ﻿const { app, BrowserWindow, ipcMain, screen, globalShortcut, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
+const { safeStorage } = require('electron');
 const crypto = require('crypto');
 const http = require('http');
 const { spawn } = require('child_process');
@@ -18,6 +19,18 @@ const {
 } = require('./camera-stream.cjs');
 
 installSafeConsole();
+
+function getAuthSessionProtection() {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    return {
+      protect: (value) => safeStorage.encryptString(value),
+      unprotect: (value) => safeStorage.decryptString(value),
+    };
+  } catch {
+    return null;
+  }
+}
 
 let mainWindow;
 let tray = null;
@@ -1086,7 +1099,7 @@ ipcMain.handle('cloud-login', async (_event, { account, password }) => {
     });
 
     const data = await response.json();
-    console.log('Login response:', JSON.stringify(data, null, 2));
+    console.log(`Cloud login response received (${response.status})`);
 
     if (data.accessToken) {
       return { success: true, accessToken: data.accessToken };
@@ -1109,14 +1122,14 @@ ipcMain.handle('cloud-login', async (_event, { account, password }) => {
 
 ipcMain.handle('auth-session-get', async () => ({
   success: true,
-  session: readAuthSession(app.getPath('userData')),
+  session: readAuthSession(app.getPath('userData'), getAuthSessionProtection()),
 }));
 
 ipcMain.handle('auth-session-set', async (_event, session) => {
   try {
     return {
       success: true,
-      session: writeAuthSession(app.getPath('userData'), session),
+      session: writeAuthSession(app.getPath('userData'), session, getAuthSessionProtection()),
     };
   } catch (err) {
     return { success: false, error: err.message || '保存登录状态失败' };
@@ -1208,7 +1221,7 @@ ipcMain.handle('get-device-list', async (_event, { accessToken }) => {
     });
 
     const data = await response.json();
-    console.log('Device list response:', JSON.stringify(data, null, 2));
+    console.log(`Device list response received (${response.status}, ${Array.isArray(data.devices) ? data.devices.length : 0} devices)`);
 
     if (data.devices) {
       const username = await getBambuCloudUsername(accessToken);

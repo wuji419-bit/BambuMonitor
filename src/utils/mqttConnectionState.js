@@ -15,7 +15,7 @@ export function applyMqttReconnectingState(printer = {}) {
   const source = getConnectionSource(printer);
   return {
     ...printer,
-    status: 'connecting',
+    connectionState: 'reconnecting',
     statusSource: source,
     connectionMode: printer.connectionMode || source,
     errorMsg: `${getConnectionLabel(source)}中断，正在自动重连...`,
@@ -24,9 +24,13 @@ export function applyMqttReconnectingState(printer = {}) {
 
 export function applyMqttConnectedState(printer = {}) {
   const source = getConnectionSource(printer);
+  const preservedStatus = printer.jobStatus
+    || (!['connecting', 'disconnected', 'error'].includes(printer.status) ? printer.status : '')
+    || 'connected';
   return {
     ...printer,
-    status: ['connecting', 'disconnected', 'error'].includes(printer.status) ? 'connected' : printer.status,
+    status: preservedStatus,
+    connectionState: 'online',
     statusSource: source,
     connectionMode: printer.connectionMode || source,
     errorMsg: '',
@@ -35,9 +39,13 @@ export function applyMqttConnectedState(printer = {}) {
 
 export function applyMqttDisconnectedState(printer = {}) {
   const source = getConnectionSource(printer);
+  const preservedStatus = printer.jobStatus
+    || (!['connecting', 'connected', 'disconnected', 'error'].includes(printer.status) ? printer.status : '')
+    || 'disconnected';
   return {
     ...printer,
-    status: 'disconnected',
+    status: preservedStatus,
+    connectionState: 'offline',
     statusSource: source,
     connectionMode: printer.connectionMode || source,
     errorMsg: `${getConnectionLabel(source)}中断，自动重连失败，请检查网络或点击重连`,

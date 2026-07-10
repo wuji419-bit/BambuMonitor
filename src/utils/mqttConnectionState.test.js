@@ -22,7 +22,8 @@ test('keeps live telemetry while marking a local printer as reconnecting', () =>
 
   const next = applyMqttReconnectingState(printer);
 
-  assert.equal(next.status, 'connecting');
+  assert.equal(next.status, 'printing');
+  assert.equal(next.connectionState, 'reconnecting');
   assert.equal(next.statusSource, 'local');
   assert.equal(next.connectionMode, 'local');
   assert.equal(next.progress, 42);
@@ -35,22 +36,26 @@ test('keeps live telemetry while marking a local printer as reconnecting', () =>
 test('clears reconnect copy when MQTT is connected again', () => {
   const next = applyMqttConnectedState({
     status: 'connecting',
+    connectionState: 'reconnecting',
     errorMsg: '本地连接中断，正在自动重连...',
   });
 
   assert.equal(next.status, 'connected');
+  assert.equal(next.connectionState, 'online');
   assert.equal(next.statusSource, 'local');
   assert.equal(next.errorMsg, '');
 });
 
 test('marks a local printer disconnected only after reconnect grace expires', () => {
   const next = applyMqttDisconnectedState({
-    status: 'connecting',
+    status: 'printing',
+    connectionState: 'reconnecting',
     progress: 19,
     errorMsg: '本地连接中断，正在自动重连...',
   });
 
-  assert.equal(next.status, 'disconnected');
+  assert.equal(next.status, 'printing');
+  assert.equal(next.connectionState, 'offline');
   assert.equal(next.statusSource, 'local');
   assert.equal(next.progress, 19);
   assert.match(next.errorMsg, /本地连接/);
@@ -65,7 +70,8 @@ test('keeps cloud source while marking cloud MQTT reconnecting', () => {
     progress: 55,
   });
 
-  assert.equal(next.status, 'connecting');
+  assert.equal(next.status, 'printing');
+  assert.equal(next.connectionState, 'reconnecting');
   assert.equal(next.statusSource, 'cloud');
   assert.equal(next.connectionMode, 'cloud');
   assert.equal(next.progress, 55);
@@ -74,12 +80,13 @@ test('keeps cloud source while marking cloud MQTT reconnecting', () => {
 
 test('keeps cloud source when cloud MQTT disconnects', () => {
   const next = applyMqttDisconnectedState({
-    status: 'connecting',
+    status: 'paused',
     statusSource: 'cloud',
     connectionMode: 'cloud',
   });
 
-  assert.equal(next.status, 'disconnected');
+  assert.equal(next.status, 'paused');
+  assert.equal(next.connectionState, 'offline');
   assert.equal(next.statusSource, 'cloud');
   assert.equal(next.connectionMode, 'cloud');
   assert.match(next.errorMsg, /云端状态连接/);

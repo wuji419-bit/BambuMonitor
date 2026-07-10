@@ -1,7 +1,7 @@
 {
   "name": "bambu_monitor",
   "private": true,
-  "version": "1.0.10",
+  "version": "1.0.11",
   "license": "AGPL-3.0-or-later",
   "description": "Bambu Lab / 拓竹桌面打印机悬浮监控工具",
   "author": "Antigravity",
@@ -14,7 +14,7 @@
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && ELECTRON_START_URL=http://localhost:5173 electron .\"",
     "electron:build": "npm run build && electron-builder",
-    "test": "node --test src/utils/printerSync.test.js src/utils/cameraFrame.test.js src/utils/cameraStartup.test.js src/utils/mqttConnectionState.test.js src/utils/cameraZoom.test.js src/utils/printTaskStatus.test.js src/utils/printerIpPrompt.test.js src/utils/windowDragRegions.test.js src/services/camera.test.js electron/camera-stream.test.cjs electron/safe-console.test.cjs electron/mqtt-options.test.cjs electron/auth-session.test.cjs"
+    "test": "node --test src/utils/printerSync.test.js src/utils/deviceInventory.test.js src/utils/printerPresentation.test.js src/utils/asyncPool.test.js src/utils/cameraFrame.test.js src/utils/cameraStartup.test.js src/utils/mqttConnectionState.test.js src/utils/cameraZoom.test.js src/utils/printTaskStatus.test.js src/utils/printerIpPrompt.test.js src/utils/windowDragRegions.test.js src/services/camera.test.js src/services/notifications.test.js electron/camera-stream.test.cjs electron/safe-console.test.cjs electron/mqtt-options.test.cjs electron/auth-session.test.cjs"
   },
   "build": {
     "appId": "com.bambumonitor.app",
@@ -65,20 +65,23 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
+  "overrides": {
+    "ip-address": "10.2.0",
+    "ws": "8.21.0"
+  },
   "devDependencies": {
-    "@electron/packager": "^19.0.2",
     "@eslint/js": "^9.39.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
-    "concurrently": "^9.2.1",
-    "electron": "^40.1.0",
-    "electron-builder": "^26.4.0",
+    "concurrently": "^10.0.3",
+    "electron": "^40.10.6",
+    "electron-builder": "^26.15.3",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
-    "vite": "^7.2.4",
+    "vite": "^7.3.6",
     "wait-on": "^9.0.3"
   }
 }
