@@ -35,7 +35,7 @@
   flex: 0 0 auto;
   min-height: 52px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(120px, 1fr) auto;
   align-items: stretch;
   gap: 8px;
   padding: 7px 9px 7px 12px;
@@ -139,7 +139,9 @@
   display: grid;
   gap: 2px;
   padding: 5px;
-  overflow: hidden;
+  max-height: calc(100vh - 54px);
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   background: #141d27;
@@ -253,6 +255,21 @@
   -webkit-app-region: no-drag;
 }
 
+.monitor-content .legacy-window-drag-region {
+  cursor: move;
+  -webkit-app-region: drag;
+}
+
+.monitor-content .legacy-window-drag-region button,
+.monitor-content .legacy-window-drag-region [role="button"] {
+  -webkit-app-region: no-drag;
+}
+
+.monitor-shell.is-locked .monitor-content .legacy-window-drag-region {
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+
 .monitor-legacy-surface {
   width: 100%;
   height: 100%;
@@ -264,6 +281,18 @@
 .legacy-camera-heading,
 .legacy-monitor-hint {
   display: none !important;
+}
+
+.monitor-modal-backdrop {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 400;
+  width: 100vw;
+  height: 100vh;
+  overflow: auto;
+  border-radius: 0;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
 }
 
 .monitor-resize-grip {
@@ -303,6 +332,51 @@
   width: 28px;
   height: 28px;
   flex-basis: 28px;
+}
+
+.monitor-shell--mini .monitor-menu {
+  position: fixed;
+  top: 38px;
+  right: auto;
+  left: 0;
+  width: 100vw;
+  height: 40px;
+  max-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-right: 0;
+  border-left: 0;
+  border-radius: 0;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
+}
+
+.monitor-shell--mini .monitor-menu button {
+  width: max-content;
+  min-width: 104px;
+  min-height: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  grid-template-columns: 16px auto;
+  gap: 5px;
+  padding: 0 8px;
+}
+
+.monitor-shell--mini .monitor-menu button span {
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.monitor-shell--mini .monitor-menu::-webkit-scrollbar {
+  height: 4px;
+}
+
+.monitor-shell--mini .monitor-menu::-webkit-scrollbar-thumb {
+  background: rgba(116, 191, 233, 0.46);
+  border-radius: 4px;
 }
 
 @media (max-width: 359px) {

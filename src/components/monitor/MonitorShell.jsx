@@ -11,7 +11,6 @@ import {
   RotateCcw,
   Rows3,
   Settings,
-  Unlock,
 } from 'lucide-react';
 import './monitor.css';
 
@@ -82,14 +81,14 @@ export default function MonitorShell({
           <button
             type="button"
             className={isAlwaysOnTop ? 'is-active' : ''}
-            aria-label={isAlwaysOnTop ? '取消窗口置顶' : '窗口置顶'}
-            title={isAlwaysOnTop ? '取消窗口置顶' : '窗口置顶'}
+            aria-label={isAlwaysOnTop ? '取消置顶' : '窗口置顶'}
+            title={isAlwaysOnTop ? '取消置顶' : '窗口置顶'}
             aria-pressed={isAlwaysOnTop}
             onClick={onToggleTop}
           >
             {isAlwaysOnTop
-              ? <Pin size={15} aria-hidden="true" />
-              : <PinOff size={15} aria-hidden="true" />}
+              ? <PinOff size={15} aria-hidden="true" />
+              : <Pin size={15} aria-hidden="true" />}
           </button>
 
           <div className="monitor-menu-area" ref={menuAreaRef}>
@@ -117,10 +116,8 @@ export default function MonitorShell({
                   <span>超迷你模式</span>
                 </button>
                 <button type="button" role="menuitem" onClick={() => choose(onToggleLock)}>
-                  {isLocked
-                    ? <Unlock size={14} aria-hidden="true" />
-                    : <Lock size={14} aria-hidden="true" />}
-                  <span>{isLocked ? '解除鼠标穿透' : '锁定鼠标穿透'}</span>
+                  <Lock size={14} aria-hidden="true" />
+                  <span>{isLocked ? '解除穿透' : '锁定穿透'}</span>
                 </button>
                 <button type="button" role="menuitem" onClick={() => choose(onOpenSettings)}>
                   <Settings size={14} aria-hidden="true" />

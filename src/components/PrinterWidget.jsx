@@ -705,6 +705,7 @@ export default function PrinterWidget({
 
   const isCompact = viewMode === 'compact';
   const isMini = viewMode === 'mini';
+  const nativeMode = cameraZoomKey ? 'zoom' : (cameraOpen ? 'full' : viewMode);
   const isFullPanel = !cameraOpen && !settingsOpen && !ipDialog && !isMini && !isCompact;
   const displayPrinters = sortPrintersForDisplay(printers);
   const summary = getPrinterSummary(printers);
@@ -726,8 +727,6 @@ export default function PrinterWidget({
   const deviceSyncCopy = deviceSyncError
     ? `同步失败：${deviceSyncError}`
     : (isRefreshingDevices ? '正在同步设备...' : formatDeviceSyncTime(lastDeviceSyncAt));
-  const miniAutoSize = isMini && !cameraOpen && !settingsOpen && !ipDialog;
-  const panelWidth = cameraOpen ? (cameraZoomKey ? 960 : 760) : (settingsOpen ? 432 : (ipDialog ? 360 : (isCompact ? 396 : (isHorizontal ? Math.min(120 + Math.max(printers.length, 1) * 232, 1600) : 432))));
   const cameraSourceKey = JSON.stringify(printers.map((printer) => {
     const key = getPrinterCameraKey(printer);
     return {
@@ -833,6 +832,11 @@ export default function PrinterWidget({
     restartCameraRef.current?.(key);
   };
 
+  const openCameraWorkspace = useCallback(() => {
+    setViewMode('full');
+    setCameraOpen(true);
+  }, []);
+
   useEffect(() => {
     if (!isElectronEnvironment()) return undefined;
     const offLock = electronEvents.onLockStatusChanged((locked) => setIsLocked(locked));
@@ -907,9 +911,9 @@ export default function PrinterWidget({
 
   useEffect(() => {
     if (cameraConfig.autoOpen && printers.length > 0) {
-      setCameraOpen(true);
+      openCameraWorkspace();
     }
-  }, [cameraConfig.autoOpen, printers.length]);
+  }, [cameraConfig.autoOpen, openCameraWorkspace, printers.length]);
 
   useEffect(() => {
     if (cameraOpen) return;
@@ -1049,25 +1053,42 @@ export default function PrinterWidget({
     if (!isElectronEnvironment()) return;
     const node = widgetRef.current;
     if (!node) return undefined;
+    const shell = node.closest('.monitor-shell');
+    if (!shell) return undefined;
+
+    const { minSize } = getWindowModeConfig(nativeMode);
 
     let frameId = 0;
     const measureAndResize = () => {
       if (frameId) cancelAnimationFrame(frameId);
       frameId = requestAnimationFrame(() => {
-        const rect = node.getBoundingClientRect();
-        const measuredWidth = Math.ceil(rect.width);
-        const measuredHeight = Math.ceil(node.scrollHeight || rect.height);
-        const minWindowWidth = miniAutoSize ? 148 : (cameraOpen ? (cameraZoomKey ? 860 : 680) : (isCompact ? 360 : 320));
-        const minWindowHeight = miniAutoSize ? 74 : (cameraOpen ? (cameraZoomKey ? 640 : 420) : 80);
-        const width = Math.max(minWindowWidth, measuredWidth);
-        const height = Math.max(minWindowHeight, measuredHeight);
+        frameId = 0;
+        const rect = shell.getBoundingClientRect();
+        const measuredWidth = Math.ceil(shell.clientWidth || rect.width);
+        const measuredHeight = Math.ceil(shell.clientHeight || rect.height);
+        if (measuredWidth <= 0 || measuredHeight <= 0) return;
+
+        const width = Math.max(minSize.width, measuredWidth);
+        const height = Math.max(minSize.height, measuredHeight);
 
         if (
           Math.abs(lastResizeRef.current.width - width) > 1
           || Math.abs(lastResizeRef.current.height - height) > 1
+          || lastResizeRef.current.minWidth !== minSize.width
+          || lastResizeRef.current.minHeight !== minSize.height
         ) {
-          lastResizeRef.current = { width, height };
-          electronWindow.resize({ width, height, minWidth: minWindowWidth, minHeight: minWindowHeight });
+          lastResizeRef.current = {
+            width,
+            height,
+            minWidth: minSize.width,
+            minHeight: minSize.height,
+          };
+          electronWindow.resize({
+            width,
+            height,
+            minWidth: minSize.width,
+            minHeight: minSize.height,
+          });
         }
       });
     };
@@ -1081,13 +1102,14 @@ export default function PrinterWidget({
     }
 
     const observer = new ResizeObserver(measureAndResize);
+    observer.observe(shell);
     observer.observe(node);
 
     return () => {
       if (frameId) cancelAnimationFrame(frameId);
       observer.disconnect();
     };
-  }, [printers.length, miniAutoSize, cameraOpen, cameraZoomKey, isCompact, isHorizontal, ipDialog, settingsOpen, panelWidth, finishedPrinters.length, activeMiniPrinters.length, cameraSourceKey]);
+  }, [nativeMode]);
 
   const openIpDialog = (printer) => {
     setIpDialog({ serial: printer.dev_id, name: printer.name, value: printer.ip || '' });
@@ -1254,12 +1276,19 @@ export default function PrinterWidget({
     setCameraZoomKey('');
     setCameraOpen(false);
     setSettingsOpen(false);
+    setIpDialog(null);
+    setIpDialogError('');
     setViewMode(mode);
   };
 
   const changeWorkspaceTab = (tab) => {
     setCameraZoomKey('');
-    setCameraOpen(tab === 'cameras');
+    setViewMode('full');
+    if (tab === 'cameras') {
+      openCameraWorkspace();
+    } else {
+      setCameraOpen(false);
+    }
   };
 
   const resetCurrentWindowSize = () => {
@@ -1280,7 +1309,7 @@ export default function PrinterWidget({
     <button
       type="button"
       onClick={toggleAlwaysOnTop}
-      title={isAlwaysOnTop ? '取消窗口置顶' : '窗口置顶'}
+      title={isAlwaysOnTop ? '取消置顶' : '窗口置顶'}
       style={{
         ...interactive,
         width: size,
@@ -1291,7 +1320,7 @@ export default function PrinterWidget({
         border: isAlwaysOnTop ? '1px solid rgba(86,226,168,0.26)' : '1px solid rgba(255,255,255,0.1)',
       }}
     >
-      {isAlwaysOnTop ? <Pin size={size <= 24 ? 12 : (size <= 30 ? 13 : 15)} /> : <PinOff size={size <= 24 ? 12 : (size <= 30 ? 13 : 15)} />}
+      {isAlwaysOnTop ? <PinOff size={size <= 24 ? 12 : (size <= 30 ? 13 : 15)} /> : <Pin size={size <= 24 ? 12 : (size <= 30 ? 13 : 15)} />}
     </button>
   );
 
@@ -1317,7 +1346,10 @@ export default function PrinterWidget({
   const renderCameraButton = (size = 34) => (
     <button
       type="button"
-      onClick={() => setCameraOpen((prev) => !prev)}
+      onClick={() => {
+        if (cameraOpen) setCameraOpen(false);
+        else openCameraWorkspace();
+      }}
       title={cameraOpen ? '返回监控面板' : '打开摄像头墙'}
       style={{
         ...interactive,
@@ -1553,13 +1585,13 @@ export default function PrinterWidget({
         }}
       >
         <div
+          className="legacy-window-drag-region legacy-zoom-drag-region"
           onClick={(event) => event.stopPropagation()}
           style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
             gap: 12,
-            ...noDragRegionStyle(),
           }}
         >
           <div style={{ minWidth: 0 }}>
@@ -1647,7 +1679,7 @@ export default function PrinterWidget({
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, WebkitAppRegion: 'no-drag' }}>
-          <button type="button" onClick={() => setCameraOpen(false)} title="返回监控面板" style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
+          <button type="button" onClick={() => changeWorkspaceTab('devices')} title="返回监控面板" style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
             <Rows3 size={16} />
           </button>
           {renderSettingsButton(34)}
@@ -1859,9 +1891,9 @@ export default function PrinterWidget({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
             <div
+              className="legacy-window-drag-region legacy-mini-drag-region"
               title="拖动窗口"
               style={{
-                WebkitAppRegion: 'no-drag',
                 width: 38,
                 height: 24,
                 display: 'inline-flex',
@@ -2175,7 +2207,7 @@ export default function PrinterWidget({
       )}
 
       {settingsOpen ? (
-        <div style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.62)', backdropFilter: 'blur(14px)', borderRadius: 0, WebkitAppRegion: 'no-drag', overflowY: 'auto' }}>
+        <div className="monitor-modal-backdrop monitor-settings-backdrop" role="dialog" aria-modal="true" aria-label="设置" style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.62)', backdropFilter: 'blur(14px)', borderRadius: 0, WebkitAppRegion: 'no-drag', overflowY: 'auto' }}>
           <div style={{ minHeight: '100%', display: 'flex', flexDirection: 'column', gap: 14, padding: 18, borderRadius: 8, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(10,16,27,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 20px 52px rgba(0,0,0,0.38)' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
               <div>
@@ -2248,7 +2280,7 @@ export default function PrinterWidget({
                 checked={Boolean(cameraConfig.autoOpen)}
                 onChange={(event) => {
                   updateCameraConfig({ autoOpen: event.target.checked });
-                  if (event.target.checked) setCameraOpen(true);
+                  if (event.target.checked) openCameraWorkspace();
                 }}
                 style={{ width: 18, height: 18 }}
               />
@@ -2376,7 +2408,7 @@ export default function PrinterWidget({
       ) : null}
 
       {ipDialog ? (
-        <div style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.58)', backdropFilter: 'blur(12px)', borderRadius: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', WebkitAppRegion: 'no-drag' }}>
+        <div className="monitor-modal-backdrop monitor-ip-backdrop" role="dialog" aria-modal="true" aria-label="设置打印机 IP" style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.58)', backdropFilter: 'blur(12px)', borderRadius: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', WebkitAppRegion: 'no-drag' }}>
           <form onSubmit={submitIpDialog} style={{ width: '100%', maxWidth: 320, padding: 18, borderRadius: 8, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(11,18,30,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 18px 42px rgba(0,0,0,0.38)' }}>
             <div style={{ fontSize: 15, fontWeight: 600, color: '#f7fbff' }}>设置打印机 IP</div>
             <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(203,217,239,0.68)', lineHeight: 1.5 }}>
