@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Copy, LayoutGrid, Lock, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
+import { Camera, Copy, Lock, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
 import MonitorShell from './monitor/MonitorShell';
+import DeviceWorkspace from './monitor/DeviceWorkspace';
 import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
 import {
   cameraCompatibilityNote,
@@ -606,62 +607,6 @@ function StatusBadge({ printer, compact = false }) {
   );
 }
 
-function SummaryPill({ label, value, tone = 'neutral' }) {
-  const tones = {
-    neutral: ['rgba(255,255,255,0.055)', 'rgba(255,255,255,0.08)', 'rgba(230,238,250,0.72)', '#f6fbff'],
-    live: ['rgba(91,226,170,0.12)', 'rgba(91,226,170,0.22)', 'rgba(181,255,229,0.72)', '#91f3c5'],
-    cloud: ['rgba(116,184,255,0.12)', 'rgba(116,184,255,0.22)', 'rgba(205,229,255,0.72)', '#9fcbff'],
-    warn: ['rgba(255,209,102,0.12)', 'rgba(255,209,102,0.22)', 'rgba(255,233,178,0.76)', '#ffd985'],
-  };
-  const [background, border, muted, strong] = tones[tone] || tones.neutral;
-  return (
-    <div
-      style={{
-        minWidth: 0,
-        minHeight: 42,
-        display: 'grid',
-        alignContent: 'center',
-        gap: 3,
-        padding: '8px 10px',
-        borderRadius: 8,
-        background,
-        border: `1px solid ${border}`,
-      }}
-    >
-      <span style={{ fontSize: 10, color: muted, lineHeight: 1.1 }}>{label}</span>
-      <strong style={{ fontSize: 14, color: strong, lineHeight: 1.1, fontWeight: 850 }}>{value}</strong>
-    </div>
-  );
-}
-
-function PrinterAvatar({ printer, palette }) {
-  const name = String(printer?.name || 'BM').trim();
-  const label = name.replace(/[^\p{L}\p{N}]/gu, '').slice(0, 2).toUpperCase() || 'BM';
-  return (
-    <div
-      aria-hidden="true"
-      style={{
-        width: 38,
-        height: 38,
-        flex: '0 0 auto',
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderRadius: 8,
-        color: palette.text,
-        background: `linear-gradient(145deg, ${palette.badge}, rgba(255,255,255,0.045))`,
-        border: `1px solid ${palette.border}`,
-        boxShadow: `0 0 18px ${palette.glow}`,
-        fontSize: 11,
-        fontWeight: 850,
-        letterSpacing: 0,
-      }}
-    >
-      {label}
-    </div>
-  );
-}
-
 async function copyTextToClipboard(text) {
   if (navigator?.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -692,7 +637,6 @@ export default function PrinterWidget({
   deviceSyncError = '',
 }) {
   const [isLocked, setIsLocked] = useState(false);
-  const [isHorizontal, setIsHorizontal] = useState(false);
   const [viewMode, setViewMode] = useState(() => localStorage.getItem(VIEW_MODE_KEY) || 'full');
   const [isAlwaysOnTop, setIsAlwaysOnTop] = useState(() => localStorage.getItem(ALWAYS_ON_TOP_KEY) !== 'false');
   const [windowOpacity, setWindowOpacityState] = useState(() => {
@@ -735,7 +679,6 @@ export default function PrinterWidget({
   const onlineCount = summary.online;
   const printingCount = summary.printing;
   const reconnectingCount = summary.reconnecting;
-  const attentionCount = summary.attention;
   const cloudOverviewCount = displayPrinters.filter((printer) => isCloudOverview(printer)).length;
   const finishedPrinters = displayPrinters.filter((printer) => isFinishedPrinter(printer));
   const activeMiniPrinters = displayPrinters.filter((printer) => !isFinishedPrinter(printer));
@@ -877,7 +820,6 @@ export default function PrinterWidget({
   useEffect(() => {
     if (!isElectronEnvironment()) return undefined;
     const offLock = electronEvents.onLockStatusChanged((locked) => setIsLocked(locked));
-    const offLayout = electronEvents.onToggleLayout(() => setIsHorizontal((prev) => !prev));
     const offTop = electronEvents.onAlwaysOnTopChanged((flag) => setIsAlwaysOnTop(Boolean(flag)));
     const offOpacity = electronEvents.onWindowOpacityChanged((opacity) => {
       const next = Number(opacity);
@@ -885,7 +827,6 @@ export default function PrinterWidget({
     });
     return () => {
       offLock();
-      offLayout();
       offTop();
       offOpacity();
     };
@@ -2083,180 +2024,15 @@ export default function PrinterWidget({
           )}
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0, flex: '1 1 auto', overflow: 'hidden' }}>
-          <div style={{ display: 'grid', gap: 12, flex: '0 0 auto' }}>
-            <div className="legacy-full-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 10, lineHeight: 1.2, letterSpacing: 0, textTransform: 'uppercase', color: 'rgba(202,213,228,0.58)', marginBottom: 7, fontWeight: 800 }}>
-                  Bambu Monitor
-                </div>
-                <div style={{ fontSize: 18, fontWeight: 850, color: '#f7fbff', lineHeight: 1.18 }}>
-                  {printers.length > 0 ? '打印控制台' : '正在准备打印机数据'}
-                </div>
-                <div style={{ marginTop: 5, fontSize: 11, color: 'rgba(203,217,239,0.62)', lineHeight: 1.45 }}>
-                  {reconnectingCount > 0
-                    ? `${reconnectingCount} 台正在自动重连`
-                    : (cloudOverviewCount > 0 ? '云端状态与本地摄像头协同' : (isHorizontal ? '横向总览模式' : '纵向实时监控模式'))}
-                </div>
-                <div style={{ marginTop: 3, fontSize: 10, color: deviceSyncError ? '#ffb1b1' : 'rgba(178,196,220,0.52)', lineHeight: 1.35 }}>
-                  {deviceSyncCopy}
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: 8, WebkitAppRegion: 'no-drag' }}>
-              <button type="button" onClick={() => setViewMode('compact')} title="切换为紧凑模式" style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
-                <Minimize2 size={16} />
-              </button>
-              {renderSyncButton(34)}
-              {renderCameraButton(34)}
-              {renderTopButton(34)}
-              <button
-                type="button"
-                onClick={() => setIsHorizontal((prev) => !prev)}
-                title={isHorizontal ? '切换为竖向' : '切换为横向'}
-                style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}
-              >
-                {isHorizontal ? <Rows3 size={16} /> : <LayoutGrid size={16} />}
-              </button>
-              {renderSettingsButton(34)}
-              <button
-                type="button"
-                onClick={lockMousePassthrough}
-                disabled={isLocked}
-                title={isLocked ? '已锁定，使用 Ctrl+Shift+L 或托盘解除' : '锁定鼠标穿透'}
-                style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: isLocked ? '#ffcf82' : 'rgba(246,250,255,0.88)', background: isLocked ? 'rgba(255,183,77,0.14)' : 'rgba(255,255,255,0.08)', border: isLocked ? '1px solid rgba(255,183,77,0.22)' : '1px solid rgba(255,255,255,0.1)', opacity: isLocked ? 0.62 : 1, cursor: isLocked ? 'default' : 'pointer' }}
-              >
-                <Lock size={16} />
-              </button>
-              </div>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
-              <SummaryPill label="总设备" value={printers.length || 0} tone="cloud" />
-              <SummaryPill label="在线" value={onlineCount} tone="live" />
-              <SummaryPill label="打印中" value={printingCount} tone={printingCount > 0 ? 'live' : 'neutral'} />
-              <SummaryPill label="需关注" value={attentionCount} tone={attentionCount > 0 ? 'warn' : 'neutral'} />
-            </div>
-          </div>
-
-          {renderCloudNotice()}
-
-          {printers.length === 0 ? (
-            <div style={{ padding: '24px 18px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 13, background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
-              正在同步云端设备并等待本地遥测...
-            </div>
-          ) : (
-            <div
-              style={{
-                flex: '1 1 auto',
-                minHeight: 0,
-                overflowY: isHorizontal ? 'hidden' : 'auto',
-                overflowX: isHorizontal ? 'auto' : 'hidden',
-                paddingRight: isHorizontal ? 0 : 2,
-                paddingBottom: 2,
-                WebkitAppRegion: 'no-drag',
-              }}
-            >
-              <div style={{ display: 'flex', flexDirection: isHorizontal ? 'row' : 'column', gap: isHorizontal ? 12 : 10, alignItems: 'stretch', minHeight: 0 }}>
-                {displayPrinters.map((printer) => {
-                  const ams = amsInfo(printer);
-                  const meta = infoLine(printer);
-                  const progress = safeProgress(printer.progress);
-                  const progressMeta = progressPalette(printer.status);
-
-                  return (
-                    <div
-                      key={printer.dev_id}
-                      style={{
-                        flex: isHorizontal ? '0 0 212px' : '1 1 auto',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 12,
-                        padding: '12px',
-                        borderRadius: 8,
-                        background: 'linear-gradient(180deg, rgba(255,255,255,0.062), rgba(255,255,255,0.032))',
-                        border: `1px solid ${progressMeta.border}`,
-                        boxShadow: `inset 0 1px 0 rgba(255,255,255,0.055), 0 10px 24px rgba(0,0,0,0.18), 0 0 20px ${progressMeta.glow}`,
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
-                        <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
-                          <PrinterAvatar printer={printer} palette={progressMeta} />
-                          <div style={{ minWidth: 0 }}>
-                            <div style={{ fontSize: 14, fontWeight: 800, color: '#f7fbff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                              {printer.name || '未命名打印机'}
-                            </div>
-                            <div style={{ marginTop: 4, fontSize: 11, color: 'rgba(200,214,234,0.62)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                              {printer.ip ? `IP ${printer.ip}` : (hasCloudStatus(printer) ? '云端状态已启用 · IP 可选' : '等待填写可访问 IP')}
-                            </div>
-                          </div>
-                        </div>
-                        {renderAction(printer, isHorizontal)}
-                      </div>
-
-                      <div>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'end', gap: 10, marginBottom: 8 }}>
-                          <span style={{ minWidth: 0, maxWidth: isHorizontal ? 118 : 240, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 11, color: 'rgba(226,235,248,0.72)' }}>
-                            {meta.left}
-                          </span>
-                          <span
-                            style={{
-                              minWidth: 52,
-                              textAlign: 'right',
-                              color: progressMeta.text,
-                              fontSize: isCloudOverview(printer) ? 12 : 20,
-                              lineHeight: 1,
-                              fontWeight: 900,
-                              letterSpacing: 0,
-                            }}
-                          >
-                            {isCloudOverview(printer) ? statusText(printer).replace('云端：', '') : `${progress}%`}
-                          </span>
-                        </div>
-                        <ProgressBar progress={progress} status={printer.status} />
-                      </div>
-
-                      <div style={{ display: 'grid', gridTemplateColumns: isHorizontal ? '1fr' : '1fr auto', gap: '6px 10px', alignItems: 'center', padding: '8px 0 0', borderTop: '1px solid rgba(255,255,255,0.065)' }}>
-                        <div style={{ minWidth: 0, fontSize: 11, color: 'rgba(226,235,248,0.72)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{meta.right}</div>
-                        <div style={{ fontSize: 11, color: 'rgba(172,191,216,0.7)', justifySelf: isHorizontal ? 'start' : 'end', whiteSpace: 'nowrap' }}>
-                          {temperatureText(printer)}
-                        </div>
-                      </div>
-
-                      {ams.text ? (
-                        <div style={{ padding: '8px 9px', borderRadius: 8, background: 'rgba(118,143,179,0.11)', color: 'rgba(229,239,255,0.78)', fontSize: 11, lineHeight: 1.5 }}>
-                          {ams.text}
-                        </div>
-                      ) : null}
-
-                      {ams.trays.length > 0 ? (
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          {ams.trays.map((tray) => (
-                            <div key={`${printer.dev_id}-${tray.id}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.06)', fontSize: 10, color: 'rgba(236,243,255,0.8)' }}>
-                              <span style={{ width: 10, height: 10, borderRadius: '50%', background: tray.color, border: '1px solid rgba(255,255,255,0.24)' }} />
-                              <span>{tray.remain === null ? '--' : `${tray.remain}%`}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
-
-                      {printer.errorMsg ? (
-                        <div style={{ fontSize: 11, color: '#ffb1b1', background: 'rgba(255,107,107,0.1)', border: '1px solid rgba(255,107,107,0.16)', borderRadius: 8, padding: '8px 10px', lineHeight: 1.5 }}>
-                          {printer.errorMsg}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          <div className="legacy-monitor-hint" style={{ flex: '0 0 auto', textAlign: 'center', color: 'rgba(203,217,239,0.48)', fontSize: 10 }}>
-            Ctrl+Shift+L 切换穿透 · {isLocked ? '当前已锁定鼠标穿透' : '可拖拽移动窗口'}
-          </div>
-        </div>
+        <DeviceWorkspace
+          printers={displayPrinters}
+          summary={summary}
+          cloudOverviewCount={cloudOverviewCount}
+          renderAction={renderAction}
+          presentation={{ amsInfo, infoLine, progressPalette, safeProgress, statusStyle, statusText, temperatureText }}
+        />
       )}
+
 
       {settingsOpen ? (
         <div ref={settingsDialogRef} className="monitor-modal-backdrop monitor-settings-backdrop" role="dialog" aria-modal="true" aria-label="设置" tabIndex={-1} style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.62)', backdropFilter: 'blur(14px)', borderRadius: 0, WebkitAppRegion: 'no-drag', overflowY: 'auto' }}>
