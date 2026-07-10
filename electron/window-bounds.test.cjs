@@ -180,17 +180,22 @@ test('fills only omitted resize axes from the current content size', () => {
   );
 });
 
-test('closes once only for an ack from the matching sender and request', () => {
+test('continues an ordinary window close once after a matching ack', () => {
   const sender = {};
   const otherSender = {};
   const requests = [];
   const timers = [];
   const clearedTimers = [];
-  let closeCount = 0;
+  let windowCloseCount = 0;
+  let appQuitCount = 0;
+  const quitIntent = false;
   const handshake = createWindowBoundsCloseHandshake({
     requestIdFactory: () => 'request-1',
     sendRequest: (target, payload) => requests.push({ target, payload }),
-    closeWindow: () => { closeCount += 1; },
+    continueClose: () => {
+      if (quitIntent) appQuitCount += 1;
+      else windowCloseCount += 1;
+    },
     setTimeoutFn: (callback, delay) => {
       const timer = { callback, delay };
       timers.push(timer);
@@ -209,27 +214,91 @@ test('closes once only for an ack from the matching sender and request', () => {
   assert.equal(timers[0].delay, 300);
   assert.equal(handshake.acknowledge(otherSender, 'request-1'), false);
   assert.equal(handshake.acknowledge(sender, 'wrong-request'), false);
-  assert.equal(closeCount, 0);
+  assert.equal(windowCloseCount, 0);
+  assert.equal(appQuitCount, 0);
   assert.equal(handshake.isWaiting(), true);
 
   assert.equal(handshake.acknowledge(sender, 'request-1'), true);
   assert.equal(handshake.shouldAllowClose(), true);
-  assert.equal(closeCount, 1);
+  assert.equal(windowCloseCount, 1);
+  assert.equal(appQuitCount, 0);
   assert.deepEqual(clearedTimers, [timers[0]]);
 
   assert.equal(handshake.acknowledge(sender, 'request-1'), false);
   timers[0].callback();
-  assert.equal(closeCount, 1);
+  assert.equal(windowCloseCount, 1);
+  assert.equal(appQuitCount, 0);
 });
 
-test('closes once on timeout and cancels timeout work when disposed', () => {
+test('continues app quit once after a matching ack', () => {
+  const sender = {};
+  const timers = [];
+  let windowCloseCount = 0;
+  let appQuitCount = 0;
+  const quitIntent = true;
+  const handshake = createWindowBoundsCloseHandshake({
+    requestIdFactory: () => 'quit-ack-request',
+    sendRequest: () => {},
+    continueClose: () => {
+      if (quitIntent) appQuitCount += 1;
+      else windowCloseCount += 1;
+    },
+    setTimeoutFn: (callback) => {
+      timers.push(callback);
+      return callback;
+    },
+    clearTimeoutFn: () => {},
+    timeoutMs: 300,
+  });
+
+  handshake.begin(sender, { width: 640, height: 480 });
+  assert.equal(handshake.acknowledge(sender, 'quit-ack-request'), true);
+  assert.equal(appQuitCount, 1);
+  assert.equal(windowCloseCount, 0);
+
+  assert.equal(handshake.acknowledge(sender, 'quit-ack-request'), false);
+  timers[0]();
+  assert.equal(appQuitCount, 1);
+  assert.equal(windowCloseCount, 0);
+});
+
+test('continues app quit once after the fallback timeout', () => {
+  const sender = {};
+  const timeoutCallbacks = [];
+  let windowCloseCount = 0;
+  let appQuitCount = 0;
+  const quitIntent = true;
+  const handshake = createWindowBoundsCloseHandshake({
+    requestIdFactory: () => 'quit-timeout-request',
+    sendRequest: () => {},
+    continueClose: () => {
+      if (quitIntent) appQuitCount += 1;
+      else windowCloseCount += 1;
+    },
+    setTimeoutFn: (callback) => {
+      timeoutCallbacks.push(callback);
+      return callback;
+    },
+    clearTimeoutFn: () => {},
+    timeoutMs: 300,
+  });
+
+  handshake.begin(sender, { width: 640, height: 480 });
+  timeoutCallbacks[0]();
+  timeoutCallbacks[0]();
+  assert.equal(appQuitCount, 1);
+  assert.equal(windowCloseCount, 0);
+  assert.equal(handshake.shouldAllowClose(), true);
+});
+
+test('continues an ordinary timeout once and cancels timeout work when disposed', () => {
   const sender = {};
   const timeoutCallbacks = [];
   let timeoutCloseCount = 0;
   const timeoutHandshake = createWindowBoundsCloseHandshake({
     requestIdFactory: () => 'timeout-request',
     sendRequest: () => {},
-    closeWindow: () => { timeoutCloseCount += 1; },
+    continueClose: () => { timeoutCloseCount += 1; },
     setTimeoutFn: (callback) => {
       timeoutCallbacks.push(callback);
       return callback;
@@ -250,7 +319,7 @@ test('closes once on timeout and cancels timeout work when disposed', () => {
   const disposedHandshake = createWindowBoundsCloseHandshake({
     requestIdFactory: () => 'disposed-request',
     sendRequest: () => {},
-    closeWindow: () => { disposedCloseCount += 1; },
+    continueClose: () => { disposedCloseCount += 1; },
     setTimeoutFn: (callback) => {
       disposedCallbacks.push(callback);
       return callback;

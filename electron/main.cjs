@@ -42,6 +42,7 @@ let mainWindow;
 let tray = null;
 let isMouseLocked = false;
 let isAlwaysOnTop = true;
+let isAppQuitRequested = false;
 let windowOpacity = 1;
 let windowBoundsTimer = null;
 let pendingWindowBounds = null;
@@ -686,6 +687,7 @@ function setMouseLock(lockFlag) {
 }
 
 function createWindow() {
+  isAppQuitRequested = false;
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
   const isDev = !app.isPackaged;
 
@@ -747,7 +749,11 @@ function createWindow() {
       if (sender !== boundsWebContents || sender.isDestroyed()) return;
       sender.send('window-bounds-save-request', payload);
     },
-    closeWindow: () => {
+    continueClose: () => {
+      if (isAppQuitRequested) {
+        app.quit();
+        return;
+      }
       if (!windowForBoundsEvents.isDestroyed()) {
         windowForBoundsEvents.close();
       }
@@ -842,6 +848,10 @@ app.on('ready', () => {
   });
 });
 
+app.on('before-quit', () => {
+  isAppQuitRequested = true;
+});
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
@@ -849,6 +859,7 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   clearWindowBoundsLifecycle();
   clearWindowBoundsState();
+  isAppQuitRequested = false;
   globalShortcut.unregisterAll();
   safelyCloseSocket(global.listenSocket);
   safelyCloseSocket(global.searchSocket);

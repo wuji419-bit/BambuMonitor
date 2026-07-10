@@ -84,7 +84,7 @@ function withCurrentWindowSize(bounds = {}, currentSize = []) {
 function createWindowBoundsCloseHandshake({
   requestIdFactory,
   sendRequest,
-  closeWindow,
+  continueClose,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
   timeoutMs = 300,
@@ -106,9 +106,9 @@ function createWindowBoundsCloseHandshake({
     pendingRequest = null;
     clearFallbackTimer();
     try {
-      closeWindow();
+      continueClose();
     } catch {
-      // The BrowserWindow may already be gone during shutdown.
+      // The app or BrowserWindow may already be gone during shutdown.
     }
     return true;
   };
