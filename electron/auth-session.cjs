@@ -76,11 +76,7 @@ function writeAuthSession(userDataPath, session, protection = null) {
 }
 
 function clearAuthSession(userDataPath) {
-  try {
-    fs.rmSync(getAuthSessionPath(userDataPath), { force: true });
-  } catch {
-    // Ignore cleanup failures.
-  }
+  fs.rmSync(getAuthSessionPath(userDataPath), { force: true });
 }
 
 module.exports = {

@@ -1275,8 +1275,12 @@ ipcMain.handle('auth-session-set', async (_event, session) => {
 });
 
 ipcMain.handle('auth-session-clear', async () => {
-  clearAuthSession(app.getPath('userData'));
-  return { success: true };
+  try {
+    clearAuthSession(app.getPath('userData'));
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message || '清除登录状态失败' };
+  }
 });
 
 ipcMain.handle('request-verify-code', async (_event, { account }) => {

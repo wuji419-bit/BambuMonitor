@@ -54,6 +54,16 @@ test('clears persisted auth session', () => {
   assert.equal(readAuthSession(dir), null);
 });
 
+test('propagates persisted session deletion failures', () => {
+  const originalRmSync = fs.rmSync;
+  fs.rmSync = () => { throw new Error('file locked'); };
+  try {
+    assert.throws(() => clearAuthSession(makeTempDir()), /file locked/);
+  } finally {
+    fs.rmSync = originalRmSync;
+  }
+});
+
 test('rejects empty persisted session tokens', () => {
   assert.throws(
     () => writeAuthSession(makeTempDir(), { account: 'user@example.com', accessToken: '' }),

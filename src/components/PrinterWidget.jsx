@@ -49,6 +49,7 @@ import {
   saveNotificationConfig,
   sendTestNotification,
 } from '../services/notifications';
+import { isValidPrinterAddress, normalizePrinterAddress } from '../utils/printerAddress';
 
 const statusMap = {
   no_ip: ['云端概览', '#8cc8ff', 'rgba(102, 178, 255, 0.14)', 'rgba(102, 178, 255, 0.22)'],
@@ -478,7 +479,6 @@ export default function PrinterWidget({
   const [cameraZoomKey, setCameraZoomKey] = useState('');
   const [cameraFeedback, setCameraFeedback] = useState('');
   const [startupEnabled, setStartupEnabledState] = useState(false);
-  const [startupBusy, setStartupBusy] = useState(false);
   const [startupFeedback, setStartupFeedback] = useState('');
   const cameraWallOpenRef = useRef(false);
   const cameraRetryAttemptsRef = useRef({});
@@ -1000,9 +1000,9 @@ export default function PrinterWidget({
   const submitIpDialog = async (event) => {
     event.preventDefault();
     if (!ipDialog) return;
-    const value = String(ipDialog.value || '').trim();
-    if (!value) {
-      setIpDialogError('请输入当前电脑可访问的打印机 IP，例如 192.168.1.100 或 VPN/Tailscale IP');
+    const value = normalizePrinterAddress(ipDialog.value);
+    if (!isValidPrinterAddress(value)) {
+      setIpDialogError('请输入有效的 IPv4、IPv6 或主机名，不要包含协议或端口');
       return;
     }
     setSubmittingIp(true);
@@ -1015,28 +1015,6 @@ export default function PrinterWidget({
     } finally {
       setSubmittingIp(false);
     }
-  };
-
-  const updateNotificationConfig = (updater) => {
-    setNotificationFeedback('');
-    setNotificationConfig((prev) => {
-      const base = prev || createDefaultNotificationConfig();
-      return typeof updater === 'function' ? updater(base) : { ...base, ...updater };
-    });
-  };
-
-  const updateNotificationTarget = (targetId, patch) => {
-    updateNotificationConfig((prev) => ({
-      ...prev,
-      targets: prev.targets.map((target) => (
-        target.id === targetId ? { ...target, ...patch } : target
-      )),
-    }));
-  };
-
-  const saveNotificationSettings = () => {
-    saveNotificationConfig(notificationConfig);
-    setNotificationFeedback('通知设置已保存');
   };
 
   const testNotificationTarget = async (target) => {
@@ -1066,42 +1044,23 @@ export default function PrinterWidget({
     }
   };
 
-  const updateCameraConfig = (updater) => {
+  const applySettingsDraft = async (draft) => {
+    setNotificationFeedback('');
     setCameraFeedback('');
-    setCameraConfig((prev) => {
-      const base = prev || createDefaultCameraConfig();
-      const next = typeof updater === 'function' ? updater(base) : { ...base, ...updater };
-      saveCameraConfig(next);
-      return next;
-    });
-  };
-
-  const updateCameraUrl = (printer, value) => {
-    const key = getPrinterCameraKey(printer);
-    updateCameraConfig((prev) => ({
-      ...prev,
-      customUrls: {
-        ...(prev.customUrls || {}),
-        [key]: value,
-      },
-    }));
-  };
-
-  const toggleStartup = async (enabled) => {
-    setStartupBusy(true);
-    setStartupFeedback('');
-    try {
-      const result = await electronApp.setStartupEnabled({ enabled });
-      if (!result?.success) {
-        throw new Error(result?.error || '设置开机启动失败');
-      }
+    setIsAlwaysOnTop(Boolean(draft.isAlwaysOnTop));
+    updateWindowOpacity(draft.windowOpacity);
+    if (Boolean(draft.startupEnabled) !== startupEnabled) {
+      const result = await electronApp.setStartupEnabled({ enabled: Boolean(draft.startupEnabled) });
+      if (!result?.success) throw new Error(result?.error || '设置开机启动失败');
       setStartupEnabledState(Boolean(result.enabled));
-      setStartupFeedback(result.enabled ? '已开启开机自启动' : '已关闭开机自启动');
-    } catch (error) {
-      setStartupFeedback(error?.message || '设置开机启动失败');
-    } finally {
-      setStartupBusy(false);
     }
+    const nextCameraConfig = draft.cameraConfig || createDefaultCameraConfig();
+    saveCameraConfig(nextCameraConfig);
+    setCameraConfig(nextCameraConfig);
+    const nextNotificationConfig = draft.notificationConfig || createDefaultNotificationConfig();
+    saveNotificationConfig(nextNotificationConfig);
+    setNotificationConfig(nextNotificationConfig);
+    if (nextCameraConfig.autoOpen) openCameraWorkspace();
   };
 
   const toggleAlwaysOnTop = () => {
@@ -1267,29 +1226,14 @@ export default function PrinterWidget({
         <SettingsSheet
           dialogRef={settingsDialogRef}
           printers={displayPrinters}
-          notificationConfig={notificationConfig}
-          notificationFeedback={notificationFeedback}
+          baseline={{ isAlwaysOnTop, windowOpacity, startupEnabled, cameraConfig, notificationConfig }}
           testingTargetId={testingTargetId}
-          cameraConfig={cameraConfig}
-          cameraFeedback={cameraFeedback}
-          startupEnabled={startupEnabled}
-          startupBusy={startupBusy}
-          startupFeedback={startupFeedback}
-          isAlwaysOnTop={isAlwaysOnTop}
-          windowOpacity={windowOpacity}
+          externalFeedback={notificationFeedback || startupFeedback || cameraFeedback}
           onClose={() => setSettingsOpen(false)}
           onSignOut={onSignOut}
-          onSetAlwaysOnTop={setIsAlwaysOnTop}
-          onSetOpacity={updateWindowOpacity}
-          onToggleStartup={toggleStartup}
-          onUpdateCameraConfig={(patch) => { updateCameraConfig(patch); if (patch.autoOpen) openCameraWorkspace(); }}
-          onUpdateCameraUrl={updateCameraUrl}
-          onUpdateNotificationConfig={updateNotificationConfig}
-          onUpdateNotificationTarget={updateNotificationTarget}
           onCopyIntegration={copyIntegrationCode}
           onTestNotification={testNotificationTarget}
-          onRestore={() => { setNotificationConfig(getNotificationConfig()); setNotificationFeedback(''); }}
-          onSave={saveNotificationSettings}
+          onSave={applySettingsDraft}
         />
       ) : null}
 

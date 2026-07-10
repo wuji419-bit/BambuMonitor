@@ -7,7 +7,9 @@ import { bambuClient, scanPrinters } from './services/bambu';
 import { electronAuth, electronWindow, isElectronEnvironment } from './services/electron';
 import { dispatchPrinterNotification, getPrinterNotificationEvent } from './services/notifications';
 import { getRemovedPrinterIds, reconcilePrinterInventory } from './utils/deviceInventory';
-import { buildDeviceSyncSnapshot, mergePrinterState, normalizeName } from './utils/printerSync';
+import { buildDeviceSyncSnapshot, mergePrinterState } from './utils/printerSync';
+import { acceptsConnectionGeneration, beginConnectionGeneration } from './utils/sessionGeneration';
+import { cachePrinterAddress, isValidPrinterAddress, normalizePrinterAddress } from './utils/printerAddress';
 
 const isTokenInvalidError = (errorText) => (
   /expired|invalid|unauthorized|forbidden|401|token/i.test(String(errorText || ''))
@@ -150,7 +152,7 @@ function TitleBar({ isElectron }) {
   );
 }
 
-function ConnectionScreen({ onConnect, isElectron }) {
+function ConnectionScreen({ onConnect, isElectron, suppressAutoLogin = false, sessionWarning = '' }) {
   const [isPasswordMode, setIsPasswordMode] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [account, setAccount] = useState('');
@@ -231,7 +233,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
     connectCloudPrinters(initialPrinters, token, username);
   };
 
-  const refreshLanDevicesInBackground = async (cloudDevices) => {
+  const refreshLanDevicesInBackground = async (cloudDevices, expectedGeneration) => {
     let scannedPrinters = [];
     try {
       scannedPrinters = await scanPrinters();
@@ -242,7 +244,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
 
     const { devicesWithIp, initialPrinters } = buildDeviceSync(cloudDevices, scannedPrinters);
     if (devicesWithIp.some((device) => device.ip)) {
-      onConnect(initialPrinters);
+      onConnect(initialPrinters, null, expectedGeneration);
     }
   };
 
@@ -288,11 +290,11 @@ function ConnectionScreen({ onConnect, isElectron }) {
       connectCloudDevices(initialPrinters, token, result.username);
       setLoading(false);
       electronWindow.resize({ width: 450, height: 200 });
-      onConnect(initialPrinters, {
+      const connectionGeneration = onConnect(initialPrinters, {
         accessToken: token,
         username: result.username || '',
       });
-      refreshLanDevicesInBackground(cloudDevices);
+      refreshLanDevicesInBackground(cloudDevices, connectionGeneration);
     } catch (err) {
       console.error('Fetch device list error:', err);
       const errorText = err.message || '获取设备失败';
@@ -382,6 +384,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
   useEffect(() => {
     if (autoLoginAttemptedRef.current) return;
     autoLoginAttemptedRef.current = true;
+    if (suppressAutoLogin) return;
 
     const restoreLogin = async () => {
       if (!isElectron) return;
@@ -410,7 +413,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
     };
 
     restoreLogin();
-  }, [isElectron]);
+  }, [isElectron, suppressAutoLogin]);
   /* eslint-enable react-hooks/exhaustive-deps */
 
   const canSubmit = account && (isPasswordMode ? password : verifyCode) && agreed;
@@ -467,6 +470,7 @@ function ConnectionScreen({ onConnect, isElectron }) {
           {!isElectron ? (
             <div className="feedback-msg error">当前窗口仅用于界面预览，请启动桌面版应用后再登录。</div>
           ) : null}
+          {sessionWarning ? <div className="feedback-msg error" role="alert">{sessionWarning}</div> : null}
 
           <form onSubmit={handleLogin}>
             <div className="mode-switch">
@@ -587,6 +591,8 @@ function App() {
   const [isRefreshingDevices, setIsRefreshingDevices] = useState(false);
   const [lastDeviceSyncAt, setLastDeviceSyncAt] = useState(() => (isPreviewMode ? Date.now() : 0));
   const [deviceSyncError, setDeviceSyncError] = useState('');
+  const [suppressAutoLogin, setSuppressAutoLogin] = useState(false);
+  const [sessionWarning, setSessionWarning] = useState('');
   const lastPrinterStatusRef = useRef(new Map());
   const authSessionRef = useRef(null);
   const deviceSyncBusyRef = useRef(false);
@@ -603,12 +609,15 @@ function App() {
     }
   }, [isElectron, isConnected]);
 
-  const handleConnect = (initialPrinters = [], session = null) => {
+  const handleConnect = (initialPrinters = [], session = null, expectedGeneration = null) => {
+    if (!acceptsConnectionGeneration(deviceSyncGenerationRef.current, expectedGeneration)) return null;
     if (session?.accessToken) {
-      deviceSyncGenerationRef.current += 1;
+      deviceSyncGenerationRef.current = beginConnectionGeneration(deviceSyncGenerationRef.current);
       deviceSyncBusyRef.current = false;
       deviceSyncBusyGenerationRef.current = null;
       authSessionRef.current = session;
+      setSuppressAutoLogin(false);
+      setSessionWarning('');
       setLastDeviceSyncAt(Date.now());
       setDeviceSyncError('');
     }
@@ -639,6 +648,7 @@ function App() {
     });
 
     setIsConnected(true);
+    return deviceSyncGenerationRef.current;
   };
 
   const refreshDeviceInventory = async ({ includeLan = true } = {}) => {
@@ -721,7 +731,9 @@ function App() {
     deviceSyncBusyRef.current = false;
     deviceSyncBusyGenerationRef.current = null;
     setIsRefreshingDevices(false);
+    setSuppressAutoLogin(true);
     let disconnectError = null;
+    let sessionClearError = null;
     try {
       await bambuClient.disconnect();
     } catch (error) {
@@ -731,8 +743,10 @@ function App() {
       if (deviceSyncGenerationRef.current === signOutGeneration) {
         if (isElectron) {
           try {
-            await electronAuth.clearSavedSession();
+            const clearResult = await electronAuth.clearSavedSession();
+            if (!clearResult?.success) sessionClearError = new Error(clearResult?.error || '无法删除加密登录状态');
           } catch (error) {
+            sessionClearError = error;
             console.warn('Clear saved session during sign-out failed:', error);
           }
         }
@@ -746,7 +760,10 @@ function App() {
           setPrinters([]);
           setIsRefreshingDevices(false);
           setLastDeviceSyncAt(0);
-          setDeviceSyncError(disconnectError ? '退出时断开设备失败，本地登录信息已清除' : '');
+          setDeviceSyncError('');
+          setSessionWarning(sessionClearError
+            ? '已退出账号，但加密登录文件删除失败；本次运行不会自动登录，请稍后重试。'
+            : (disconnectError ? '设备断开失败，但你已退出账号。' : ''));
           setIsConnected(false);
         }
       }
@@ -814,9 +831,9 @@ function App() {
   }, [isElectron]);
 
   const handleUpdateIp = async (serial, ip) => {
-    const normalizedIp = String(ip || '').trim();
-    if (!normalizedIp) {
-      throw new Error('请输入当前电脑可访问的打印机 IP');
+    const normalizedIp = normalizePrinterAddress(ip);
+    if (!isValidPrinterAddress(normalizedIp)) {
+      throw new Error('请输入有效的 IPv4、IPv6 或主机名，不要包含协议或端口');
     }
 
     const printer = printers.find((item) => item.dev_id === serial);
@@ -835,13 +852,6 @@ function App() {
     }
     const shouldUseCloudStatus = Boolean(savedToken)
       && (printer.connectionMode === 'cloud' || printer.statusSource === 'cloud');
-
-    const cachedIps = JSON.parse(localStorage.getItem('cached_printer_ips') || '{}');
-    cachedIps[printer.cloudId || printer.dev_id] = normalizedIp;
-    cachedIps[printer.dev_id] = normalizedIp;
-    const nameKey = normalizeName(printer.name);
-    if (nameKey) cachedIps[nameKey] = normalizedIp;
-    localStorage.setItem('cached_printer_ips', JSON.stringify(cachedIps));
 
     setPrinters((prev) => {
       const index = prev.findIndex((item) => item.dev_id === serial);
@@ -893,6 +903,8 @@ function App() {
           printer.name,
         );
       }
+      const cachedIps = cachePrinterAddress(readCachedPrinterIps(), printer, normalizedIp);
+      localStorage.setItem('cached_printer_ips', JSON.stringify(cachedIps));
     } catch (err) {
       console.error('Manual connect failed:', err);
       setPrinters((prev) => {
@@ -915,7 +927,7 @@ function App() {
   };
 
   if (!isConnected) {
-    return <ConnectionScreen onConnect={handleConnect} isElectron={isElectron} />;
+    return <ConnectionScreen onConnect={handleConnect} isElectron={isElectron} suppressAutoLogin={suppressAutoLogin} sessionWarning={sessionWarning} />;
   }
 
   return (
