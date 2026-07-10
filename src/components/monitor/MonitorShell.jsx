@@ -104,7 +104,7 @@ export default function MonitorShell({
       className={`monitor-shell monitor-shell--${mode}${isLocked ? ' is-locked' : ''}`}
       data-testid="monitor-shell"
     >
-      <header className="monitor-appbar">
+      {mode !== 'mini' ? <header className="monitor-appbar">
         <div className="monitor-drag-region" data-testid="monitor-drag-region">
           <div className="monitor-identity">
             <strong>BambuMonitor</strong>
@@ -169,7 +169,7 @@ export default function MonitorShell({
             ) : null}
           </div>
         </div>
-      </header>
+      </header> : null}
 
       {mode === 'full' ? (
         <nav className="monitor-tabs" aria-label="监控视图">

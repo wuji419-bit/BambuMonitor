@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Camera, Copy, Lock, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
 import MonitorShell from './monitor/MonitorShell';
 import DeviceWorkspace from './monitor/DeviceWorkspace';
+import CompactMonitor from './monitor/CompactMonitor';
+import MiniMonitor from './monitor/MiniMonitor';
 import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
 import {
   cameraCompatibilityNote,
@@ -235,62 +237,6 @@ function temperatureText(printer) {
 
 function isFinishedPrinter(printer) {
   return printer.status === 'finished' || safeProgress(printer.progress) >= 100;
-}
-
-function miniRemainingText(printer) {
-  if (!printer) return '--';
-  if (isCloudOverview(printer)) return statusText(printer).replace('云端：', '');
-  if (printer.timeLeft && printer.timeLeft !== '--') return printer.timeLeft;
-  return statusMap[printer.status]?.[0] || '--';
-}
-
-function miniRingState(printer) {
-  const progress = safeProgress(printer?.progress);
-  if (isCloudOverview(printer)) {
-    const offline = printer.status === 'cloud_offline' || printer.cloudOnline === false;
-    if (printer.status === 'finished') {
-      return {
-        progress: 100,
-        label: '完成',
-        color: '#78f0b8',
-        glow: 'rgba(120, 240, 184, 0.34)',
-        track: 'rgba(120, 240, 184, 0.14)',
-      };
-    }
-    return {
-      progress: offline ? 100 : Math.max(16, progress),
-      label: offline ? '离线' : miniRemainingText(printer),
-      color: offline ? '#a9b5c7' : '#8cc8ff',
-      glow: offline ? 'rgba(169, 181, 199, 0.2)' : 'rgba(102, 178, 255, 0.3)',
-      track: offline ? 'rgba(255,255,255,0.1)' : 'rgba(102, 178, 255, 0.14)',
-    };
-  }
-
-  if (['error', 'disconnected'].includes(printer?.status)) {
-    return {
-      progress: 100,
-      label: '故障',
-      color: '#ff6b6b',
-      glow: 'rgba(255, 107, 107, 0.34)',
-      track: 'rgba(255, 107, 107, 0.16)',
-    };
-  }
-  if (isFinishedPrinter(printer)) {
-    return {
-      progress: 100,
-      label: '完成',
-      color: '#78f0b8',
-      glow: 'rgba(120, 240, 184, 0.34)',
-      track: 'rgba(120, 240, 184, 0.14)',
-    };
-  }
-  return {
-    progress,
-    label: miniRemainingText(printer),
-    color: progressPalette(printer?.status || 'idle').text,
-    glow: progressPalette(printer?.status || 'idle').glow,
-    track: 'rgba(255,255,255,0.12)',
-  };
 }
 
 function progressPalette(status) {
@@ -682,7 +628,6 @@ export default function PrinterWidget({
   const displayPrinters = sortPrintersForDisplay(printers);
   const summary = getPrinterSummary(printers);
   const onlineCount = summary.online;
-  const printingCount = summary.printing;
   const reconnectingCount = summary.reconnecting;
   const cloudOverviewCount = displayPrinters.filter((printer) => isCloudOverview(printer)).length;
   const finishedPrinters = displayPrinters.filter((printer) => isFinishedPrinter(printer));
@@ -690,12 +635,6 @@ export default function PrinterWidget({
   const rotatingMiniPrinter = activeMiniPrinters.length > 0
     ? activeMiniPrinters[miniActiveIndex % activeMiniPrinters.length]
     : null;
-  const miniDisplayPrinter = rotatingMiniPrinter || finishedPrinters[0] || null;
-  const compactPrimaryPrinter = displayPrinters.find((printer) => (
-    ['printing', 'drying', 'preparing'].includes(getPrinterJobStatus(printer))
-  ));
-  const compactProgress = safeProgress(compactPrimaryPrinter?.progress);
-  const compactProgressStatus = getPrinterJobStatus(compactPrimaryPrinter) || 'idle';
   const deviceSyncCopy = deviceSyncError
     ? `同步失败：${deviceSyncError}`
     : (isRefreshingDevices ? '正在同步设备...' : formatDeviceSyncTime(lastDeviceSyncAt));
@@ -1258,27 +1197,6 @@ export default function PrinterWidget({
     }
   };
 
-  const renderCloudNotice = (compact = false) => {
-    if (cloudOverviewCount <= 0) return null;
-    return (
-      <div
-        style={{
-          padding: compact ? '9px 10px' : '10px 12px',
-          borderRadius: 8,
-          background: 'linear-gradient(135deg, rgba(102,178,255,0.12), rgba(126,240,196,0.08))',
-          border: '1px solid rgba(135,195,255,0.18)',
-          color: 'rgba(226,238,255,0.78)',
-          fontSize: compact ? 10 : 11,
-          lineHeight: 1.55,
-        }}
-      >
-        {cloudOverviewCount} 台设备未填写本地 IP：状态与遥测会继续通过云端 MQTT 更新；摄像头和本地直连仍需局域网或 VPN IP。
-        <br />
-        云端数据可能有延迟；官方远程控制请使用 Bambu Connect / Bambu Handy。
-      </div>
-    );
-  };
-
   const toggleAlwaysOnTop = () => {
     setIsAlwaysOnTop((prev) => !prev);
   };
@@ -1286,12 +1204,6 @@ export default function PrinterWidget({
   const updateWindowOpacity = (value) => {
     const next = Math.min(1, Math.max(0.5, Number(value) || 1));
     setWindowOpacityState(next);
-  };
-
-  const lockMousePassthrough = () => {
-    if (isLocked) return;
-    setIsLocked(true);
-    electronWindow.setIgnoreMouseEvents(true);
   };
 
   const toggleMousePassthrough = () => {
@@ -1371,50 +1283,6 @@ export default function PrinterWidget({
     </button>
   );
 
-  const renderCameraButton = (size = 34) => (
-    <button
-      type="button"
-      onClick={() => {
-        if (cameraOpen) setCameraOpen(false);
-        else openCameraWorkspace();
-      }}
-      title={cameraOpen ? '返回监控面板' : '打开摄像头墙'}
-      style={{
-        ...interactive,
-        width: size,
-        height: size,
-        borderRadius: size <= 28 ? 8 : (size <= 30 ? 10 : 11),
-        color: cameraOpen ? '#8bc3ff' : 'rgba(246,250,255,0.88)',
-        background: cameraOpen ? 'rgba(91,177,255,0.16)' : 'rgba(255,255,255,0.08)',
-        border: cameraOpen ? '1px solid rgba(91,177,255,0.28)' : '1px solid rgba(255,255,255,0.1)',
-      }}
-    >
-      <Camera size={size <= 24 ? 12 : (size <= 30 ? 14 : 16)} />
-    </button>
-  );
-
-  const renderSyncButton = (size = 34) => (
-    <button
-      type="button"
-      onClick={onRefreshDevices}
-      disabled={isRefreshingDevices || typeof onRefreshDevices !== 'function'}
-      title={deviceSyncCopy}
-      style={{
-        ...interactive,
-        width: size,
-        height: size,
-        borderRadius: size <= 28 ? 8 : (size <= 30 ? 10 : 11),
-        color: deviceSyncError ? '#ffb1b1' : (isRefreshingDevices ? '#9ac8ff' : 'rgba(246,250,255,0.88)'),
-        background: deviceSyncError ? 'rgba(255,107,107,0.12)' : 'rgba(255,255,255,0.08)',
-        border: deviceSyncError ? '1px solid rgba(255,107,107,0.2)' : '1px solid rgba(255,255,255,0.1)',
-        opacity: isRefreshingDevices ? 0.72 : 1,
-        cursor: isRefreshingDevices ? 'wait' : 'pointer',
-      }}
-    >
-      <RefreshCw size={size <= 24 ? 12 : (size <= 30 ? 14 : 16)} />
-    </button>
-  );
-
   const renderOpacityControl = () => (
     <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 10, alignItems: 'center', padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
       <div style={{ fontSize: 12, color: 'rgba(203,217,239,0.72)', fontWeight: 700 }}>窗口透明度</div>
@@ -1431,116 +1299,6 @@ export default function PrinterWidget({
       </div>
     </div>
   );
-
-  const renderMiniRow = (printer, options = {}) => {
-    const done = isFinishedPrinter(printer);
-    const palette = progressPalette(printer?.status || 'idle');
-    const ring = miniRingState(printer);
-    const ringSize = 24;
-    const ringStroke = 2.5;
-    const ringRadius = (ringSize - ringStroke) / 2;
-    const ringCircumference = 2 * Math.PI * ringRadius;
-    const ringDashOffset = ringCircumference * (1 - ring.progress / 100);
-    const activeChrome = options.active && !options.bare;
-    return (
-      <div
-        key={`${options.active ? 'active' : 'done'}-${printer.dev_id}`}
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr',
-          alignItems: 'center',
-          gap: 8,
-          minHeight: 22,
-          width: 'max-content',
-          maxWidth: '100%',
-          padding: options.bare ? 0 : (activeChrome ? '5px 8px' : '2px 0'),
-          borderRadius: 9,
-          background: activeChrome ? 'rgba(255,255,255,0.065)' : 'transparent',
-          border: activeChrome ? `1px solid ${palette.border}` : '1px solid transparent',
-        }}
-      >
-        <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: done ? '#8df0c0' : palette.text, boxShadow: `0 0 9px ${done ? 'rgba(141,240,192,0.35)' : palette.glow}`, flex: '0 0 auto' }} />
-          <span style={{ minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: '#f7fbff', fontSize: 11, fontWeight: 800 }}>
-            {printer.name || '未命名打印机'}
-          </span>
-          <span
-            aria-label={`${printer.name || '打印机'} ${ring.label}`}
-            style={{
-              position: 'relative',
-              width: ringSize,
-              height: ringSize,
-              flex: '0 0 auto',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              marginLeft: 1,
-            }}
-          >
-            <svg width={ringSize} height={ringSize} viewBox={`0 0 ${ringSize} ${ringSize}`} style={{ position: 'absolute', inset: 0, transform: 'rotate(-90deg)' }}>
-              <circle
-                cx={ringSize / 2}
-                cy={ringSize / 2}
-                r={ringRadius}
-                fill="none"
-                stroke={ring.track}
-                strokeWidth={ringStroke}
-              />
-              <circle
-                cx={ringSize / 2}
-                cy={ringSize / 2}
-                r={ringRadius}
-                fill="none"
-                stroke={ring.color}
-                strokeWidth={ringStroke}
-                strokeLinecap="round"
-                strokeDasharray={ringCircumference}
-                strokeDashoffset={ringDashOffset}
-                style={{
-                  filter: `drop-shadow(0 0 4px ${ring.glow})`,
-                  transition: 'stroke-dashoffset 0.45s cubic-bezier(0.22, 1, 0.36, 1), stroke 0.2s ease',
-                }}
-              />
-            </svg>
-            <span style={{ position: 'relative', zIndex: 1, color: ring.color, fontSize: ring.label.length > 5 ? 6 : (ring.label.length > 3 ? 7 : 8), lineHeight: 1, fontWeight: 900, letterSpacing: 0 }}>
-              {ring.label}
-            </span>
-          </span>
-        </div>
-      </div>
-    );
-  };
-
-  const renderMiniActiveSlot = () => {
-    if (!miniDisplayPrinter) return null;
-    const sizingPrinters = activeMiniPrinters.length > 0
-      ? activeMiniPrinters
-      : [miniDisplayPrinter];
-
-    return (
-      <div
-        style={{
-          display: 'grid',
-          width: 'max-content',
-          maxWidth: '100%',
-          padding: '2px 6px',
-          borderRadius: 8,
-          background: 'linear-gradient(180deg, rgba(255,255,255,0.062), rgba(255,255,255,0.038))',
-          border: '1px solid rgba(126,240,196,0.2)',
-          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.05)',
-        }}
-      >
-        {sizingPrinters.map((printer) => (
-          <div key={`mini-size-${printer.dev_id}`} style={{ gridArea: '1 / 1', visibility: 'hidden' }}>
-            {renderMiniRow(printer, { bare: true })}
-          </div>
-        ))}
-        <div key={`mini-active-${miniDisplayPrinter.dev_id}`} style={{ gridArea: '1 / 1' }}>
-          {renderMiniRow(miniDisplayPrinter, { bare: true })}
-        </div>
-      </div>
-    );
-  };
 
   const renderAction = (printer, compact = false) => {
     const buttonStyle = {
@@ -1918,116 +1676,9 @@ export default function PrinterWidget({
         }}
       >
       {cameraOpen ? renderCameraView() : isMini ? (
-        <div className="legacy-mini-surface">
-          {printers.length === 0 ? (
-            <div className="legacy-mini-empty">
-              正在同步设备...
-            </div>
-          ) : (
-            renderMiniActiveSlot()
-          )}
-        </div>
+        <MiniMonitor finishedPrinters={finishedPrinters} activePrinter={rotatingMiniPrinter} presentation={{ infoLine, progressPalette, safeProgress, statusText }} isAlwaysOnTop={isAlwaysOnTop} onToggleTop={toggleAlwaysOnTop} onReturnFull={() => changeViewMode('full')} />
       ) : isCompact ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '42px 1fr', alignItems: 'center', gap: 10 }}>
-            <div style={{ width: 42, height: 42, borderRadius: 8, background: 'linear-gradient(135deg, rgba(126,240,196,0.28), rgba(255,209,102,0.18))', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#dff8ff', fontSize: 12, fontWeight: 800, letterSpacing: 0 }}>
-              BM
-            </div>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                {printers.length > 0 ? (
-                  <>
-                    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, padding: '3px 7px', borderRadius: 8, background: 'rgba(255,255,255,0.075)', border: '1px solid rgba(255,255,255,0.08)', color: '#f7fbff', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
-                      总设备 <strong style={{ fontSize: 13 }}>{printers.length}</strong>
-                    </span>
-                    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, padding: '3px 7px', borderRadius: 8, background: 'rgba(126,240,196,0.1)', border: '1px solid rgba(126,240,196,0.14)', color: '#92f4c5', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
-                      在线 <strong style={{ fontSize: 13 }}>{onlineCount}</strong>
-                    </span>
-                    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, padding: '3px 7px', borderRadius: 8, background: printingCount > 0 ? 'rgba(126,240,196,0.1)' : 'rgba(255,255,255,0.055)', border: printingCount > 0 ? '1px solid rgba(126,240,196,0.14)' : '1px solid rgba(255,255,255,0.07)', color: printingCount > 0 ? '#80f6b8' : 'rgba(203,217,239,0.62)', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
-                      打印中 <strong style={{ fontSize: 13 }}>{printingCount}</strong>
-                    </span>
-                  </>
-                ) : (
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f7fbff' }}>Bambu Monitor</div>
-                )}
-              </div>
-              <div style={{ marginTop: 7 }}>
-                <ProgressBar progress={compactProgress} status={compactProgressStatus} compact />
-              </div>
-            </div>
-            <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', gap: 7, WebkitAppRegion: 'no-drag' }}>
-              <button type="button" onClick={() => setViewMode('full')} title="展开监控面板" style={{ ...interactive, width: 30, height: 30, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
-                <Maximize2 size={14} />
-              </button>
-              <button type="button" onClick={() => setViewMode('mini')} title="切换为超迷你模式" style={{ ...interactive, width: 30, height: 30, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
-                <Minimize2 size={14} />
-              </button>
-              {renderSyncButton(30)}
-              {renderCameraButton(30)}
-              {renderTopButton(30)}
-              {renderSettingsButton(30)}
-              <button
-                type="button"
-                onClick={lockMousePassthrough}
-                disabled={isLocked}
-                title={isLocked ? '已锁定，使用 Ctrl+Shift+L 或托盘解除' : '锁定鼠标穿透'}
-                style={{ ...interactive, width: 30, height: 30, borderRadius: 10, color: isLocked ? '#ffcf82' : 'rgba(246,250,255,0.88)', background: isLocked ? 'rgba(255,183,77,0.14)' : 'rgba(255,255,255,0.08)', border: isLocked ? '1px solid rgba(255,183,77,0.22)' : '1px solid rgba(255,255,255,0.1)', opacity: isLocked ? 0.62 : 1, cursor: isLocked ? 'default' : 'pointer' }}
-              >
-                <Lock size={14} />
-              </button>
-            </div>
-          </div>
-
-          {renderCloudNotice(true)}
-
-          {printers.length === 0 ? (
-            <div style={{ padding: '14px 12px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 12, background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
-              正在同步设备...
-            </div>
-          ) : (
-            <div style={{ display: 'grid', gap: 8 }}>
-              {displayPrinters.map((printer) => {
-                const progress = safeProgress(printer.progress);
-                const progressMeta = progressPalette(printer.status);
-                const meta = infoLine(printer);
-
-                return (
-                  <div
-                    key={printer.dev_id}
-                    style={{
-                      padding: '10px 11px',
-                      borderRadius: 8,
-                      background: 'linear-gradient(180deg, rgba(255,255,255,0.075), rgba(255,255,255,0.045))',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)',
-                    }}
-                  >
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'center', gap: 8 }}>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: '#f7fbff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {printer.name || '未命名打印机'}
-                        </div>
-                        <div style={{ marginTop: 3, fontSize: 10, color: 'rgba(200,214,234,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {meta.left}
-                        </div>
-                      </div>
-                      {renderAction(printer, true)}
-                    </div>
-
-                    <div style={{ marginTop: 8 }}>
-                      <ProgressBar progress={progress} status={printer.status} compact />
-                    </div>
-
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'center', gap: 8, marginTop: 7, fontSize: 10, color: 'rgba(205,220,241,0.68)' }}>
-                      <span style={{ minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{meta.right}</span>
-                      <span style={{ color: progressMeta.text, whiteSpace: 'nowrap' }}>{temperatureText(printer)}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+        <CompactMonitor printers={displayPrinters} summary={summary} presentation={{ amsInfo, infoLine, progressPalette, safeProgress, statusText, temperatureText }} renderAction={renderAction} />
       ) : (
         <DeviceWorkspace
           printers={displayPrinters}
