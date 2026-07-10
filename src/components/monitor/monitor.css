@@ -255,17 +255,22 @@
   -webkit-app-region: no-drag;
 }
 
-.monitor-content .legacy-window-drag-region {
-  cursor: move;
+.monitor-content .legacy-window-drag-region,
+.monitor-content .legacy-window-drag-region * {
   -webkit-app-region: drag;
 }
 
-.monitor-content .legacy-window-drag-region button,
-.monitor-content .legacy-window-drag-region [role="button"] {
+.monitor-content .legacy-window-drag-region {
+  cursor: move;
+}
+
+.monitor-content .legacy-window-drag-region :is(button, [role="button"], input, select, textarea, a, label),
+.monitor-content .legacy-window-drag-region :is(button, [role="button"], input, select, textarea, a, label) * {
   -webkit-app-region: no-drag;
 }
 
-.monitor-shell.is-locked .monitor-content .legacy-window-drag-region {
+.monitor-shell.is-locked .monitor-content .legacy-window-drag-region,
+.monitor-shell.is-locked .monitor-content .legacy-window-drag-region * {
   cursor: default;
   -webkit-app-region: no-drag;
 }
