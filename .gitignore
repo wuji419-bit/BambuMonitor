@@ -32,6 +32,8 @@ output
 # Local sync/cache directories
 .agent
 .playwright-mcp
+.superpowers/
+.worktrees/
 .stfolder
 .stversions
 .stignore
