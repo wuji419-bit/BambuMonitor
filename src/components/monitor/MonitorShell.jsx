@@ -184,6 +184,7 @@ export default function MonitorShell({
           </button>
           <button
             type="button"
+            data-testid="camera-tab"
             className={activeTab === 'cameras' ? 'is-active' : ''}
             aria-current={activeTab === 'cameras' ? 'page' : undefined}
             onClick={() => onTabChange('cameras')}

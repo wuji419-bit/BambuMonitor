@@ -732,7 +732,16 @@ export default function PrinterWidget({
     const frame = requestAnimationFrame(() => {
       const cards = document.querySelectorAll('[data-camera-card]');
       const card = [...cards].find((element) => element.getAttribute('data-camera-card') === originKey);
-      if (card instanceof HTMLElement) card.focus();
+      const grid = document.querySelector('[data-testid="camera-grid"]');
+      const cameraTab = document.querySelector('[data-testid="camera-tab"]');
+      const target = card instanceof HTMLElement
+        ? card
+        : grid instanceof HTMLElement
+          ? grid
+          : cameraTab instanceof HTMLElement
+            ? cameraTab
+            : document.querySelector('.monitor-actions button');
+      if (target instanceof HTMLElement) target.focus();
       cameraZoomOriginKeyRef.current = '';
     });
     return () => cancelAnimationFrame(frame);

@@ -71,8 +71,8 @@ export function CameraMedia({ zoomState, imageKey, title, imageState, customUrl,
 }
 
 export default function CameraWorkspace({ printers = [], streams = {}, imageStates = {}, cameraConfig = {}, onRetry, onZoom, onImageStateChange }) {
-  if (!printers.length) return <div className="camera-empty">正在等待打印机列表...</div>;
-  return <div className="camera-grid" data-testid="camera-grid">
+  return <div className="camera-grid" data-testid="camera-grid" role="region" aria-label="摄像头列表" tabIndex={-1}>
+    {!printers.length ? <div className="camera-empty" role="status">正在等待打印机列表...</div> : null}
     {printers.map((printer) => {
       const key = getPrinterCameraKey(printer); const stream = streams[key]; const state = imageStates[key];
       const customUrl = getCustomCameraUrl(cameraConfig, printer); const zoomState = buildCameraZoomState({ key, printer, stream, imageState: state });
