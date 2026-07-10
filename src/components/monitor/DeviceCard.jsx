@@ -11,9 +11,22 @@ function deviceModel(printer) {
   return String(printer?.model || printer?.modelCode || printer?.productName || printer?.printerType || '机型未知').trim();
 }
 
+function cloudConnectionCopy(connection) {
+  switch (connection) {
+    case 'online': return '云端在线 · 本地 IP 可选';
+    case 'connecting': return '云端连接中 · 本地 IP 可选';
+    case 'reconnecting': return '云端重连中 · 本地 IP 可选';
+    case 'offline': return '云端离线 · 本地 IP 可选';
+    case 'error': return '云端连接异常 · 本地 IP 可选';
+    default: return '云端状态未知 · 本地 IP 可选';
+  }
+}
+
 export default function DeviceCard({ printer, renderAction, presentation }) {
   const { amsInfo, infoLine, progressPalette, safeProgress, statusText, temperatureText } = presentation;
-  const progress = safeProgress(printer.progress);
+  const rawProgress = printer.progress;
+  const progressKnown = rawProgress !== null && rawProgress !== '' && Number.isFinite(Number(rawProgress));
+  const progress = safeProgress(rawProgress);
   const palette = progressPalette(getPrinterJobStatus(printer) || printer.status || 'idle');
   const status = getPrinterJobStatus(printer) || printer.status || 'idle';
   const connection = getPrinterConnectionState(printer);
@@ -21,8 +34,13 @@ export default function DeviceCard({ printer, renderAction, presentation }) {
   const ams = amsInfo(printer);
   const cloudOnly = !printer.ip && hasCloudStatus(printer);
   const model = deviceModel(printer);
-  const connectionCopy = printer.ip ? `IP ${printer.ip}` : (cloudOnly ? '云端在线 · 本地 IP 可选' : '等待本地连接');
+  const connectionCopy = printer.ip ? `IP ${printer.ip}` : (cloudOnly ? cloudConnectionCopy(connection) : '等待本地连接');
   const hasRemainingTime = Boolean(printer.timeLeft && printer.timeLeft !== '--');
+  const metaHasRemainingTime = /剩余|预计/.test(String(meta.right || ''));
+  const showRemainingTime = hasRemainingTime && !metaHasRemainingTime;
+  const progressValueProps = progressKnown
+    ? { 'aria-valuenow': progress }
+    : { 'aria-valuetext': `${statusText(printer)}，进度未知` };
 
   return (
     <article className={`device-card device-card--${status}`} data-printer-card data-status={status} data-connection={connection} aria-label={`${printer.name || '未命名打印机'}，${model}，${statusText(printer)}`}>
@@ -37,15 +55,15 @@ export default function DeviceCard({ printer, renderAction, presentation }) {
 
       <div className="device-card__task">
         <span title={meta.left}>{meta.left}</span>
-        <strong>{cloudOnly ? statusText(printer).replace('云端：', '') : `${progress}%`}</strong>
+        <strong>{cloudOnly ? statusText(printer).replace('云端：', '') : (progressKnown ? `${progress}%` : '--')}</strong>
       </div>
-      <div className="device-progress" role="progressbar" aria-label="打印进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow={progress} style={{ '--progress': `${progress}%`, '--progress-fill': palette.fill, '--progress-track': palette.track }}>
+      <div className="device-progress" role="progressbar" aria-label="打印进度" aria-valuemin="0" aria-valuemax="100" {...progressValueProps} style={{ '--progress': `${progress}%`, '--progress-fill': palette.fill, '--progress-track': palette.track }}>
         <span />
       </div>
 
       <div className="device-card__facts">
         <span title={meta.right}>{meta.right}</span>
-        {hasRemainingTime ? <span>剩余 {printer.timeLeft}</span> : null}
+        {showRemainingTime ? <span>剩余 {printer.timeLeft}</span> : null}
         <span className="device-card__temperature">{temperatureText(printer)}</span>
       </div>
 
@@ -55,7 +73,7 @@ export default function DeviceCard({ printer, renderAction, presentation }) {
           {ams.trays.length ? (
             <div className="device-card__trays" aria-label="AMS 耗材">
               {ams.trays.slice(0, 8).map((tray) => (
-                <span className="device-tray" key={`${printer.dev_id}-${tray.id}`} title={`料盘 ${tray.id}：${tray.remain === null ? '余量未知' : `剩余 ${tray.remain}%`}`}>
+                <span className="device-tray" key={`${printer.dev_id}-${tray.slotId}`} title={`AMS 单元 ${tray.unitIndex} · 槽位 ${tray.id}：${tray.remain === null ? '余量未知' : `剩余 ${tray.remain}%`}`}>
                   <i style={{ background: tray.color }} aria-hidden="true" />
                   {tray.remain === null ? '--' : `${tray.remain}%`}
                 </span>

@@ -167,11 +167,16 @@ function amsInfo(printer) {
   }
 
   const trays = units
-    .flatMap((unit) => unit.trays || [])
-    .filter((tray) => Number.isFinite(tray?.id))
+    .flatMap((unit, unitPosition) => {
+      const unitIndex = Number.isFinite(Number(unit?.index)) ? Number(unit.index) : unitPosition;
+      return (unit?.trays || []).map((tray) => ({ tray, unitIndex }));
+    })
+    .filter(({ tray }) => Number.isFinite(tray?.id))
     .slice(0, 8)
-    .map((tray) => ({
+    .map(({ tray, unitIndex }) => ({
       id: tray.id,
+      unitIndex,
+      slotId: `${unitIndex}-${tray.id}`,
       remain: Number.isFinite(Number(tray.remain)) ? Number(tray.remain) : null,
       color: trayColor(tray),
     }));
