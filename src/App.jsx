@@ -697,6 +697,34 @@ function App() {
 
   refreshDevicesRef.current = refreshDeviceInventory;
 
+  const handleSignOut = async () => {
+    let disconnectError = null;
+    try {
+      await Promise.all(bambuClient.getAllPrinters().map((printer) => bambuClient.disconnect(printer.dev_id)));
+    } catch (error) {
+      disconnectError = error;
+      console.warn('Disconnect during sign-out failed:', error);
+    } finally {
+      if (isElectron) {
+        try {
+          await electronAuth.clearSavedSession();
+        } catch (error) {
+          console.warn('Clear saved session during sign-out failed:', error);
+        }
+      }
+      localStorage.removeItem('bambu_account');
+      localStorage.removeItem('bambu_token');
+      authSessionRef.current = null;
+      lastPrinterStatusRef.current.clear();
+      deviceSyncBusyRef.current = false;
+      setPrinters([]);
+      setIsRefreshingDevices(false);
+      setLastDeviceSyncAt(0);
+      setDeviceSyncError(disconnectError ? '退出时断开设备失败，本地登录信息已清除' : '');
+      setIsConnected(false);
+    }
+  };
+
   useEffect(() => {
     if (!isConnected || !isElectron || isPreviewMode) return undefined;
     const timer = window.setInterval(() => {
@@ -871,6 +899,7 @@ function App() {
         isRefreshingDevices={isRefreshingDevices}
         lastDeviceSyncAt={lastDeviceSyncAt}
         deviceSyncError={deviceSyncError}
+        onSignOut={handleSignOut}
       />
       {!isElectron && !isPreviewMode ? <MobileDashboard printers={printers} /> : null}
     </>

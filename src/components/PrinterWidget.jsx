@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Copy, Lock, RefreshCw, Send, Settings } from 'lucide-react';
+import { Lock, RefreshCw } from 'lucide-react';
 import MonitorShell from './monitor/MonitorShell';
 import DeviceWorkspace from './monitor/DeviceWorkspace';
 import CompactMonitor from './monitor/CompactMonitor';
 import MiniMonitor from './monitor/MiniMonitor';
 import CameraWorkspace from './monitor/CameraWorkspace';
 import CameraZoom from './monitor/CameraZoom';
+import SettingsSheet from './monitor/SettingsSheet';
 import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
 import {
   createDefaultCameraConfig,
@@ -453,6 +454,7 @@ export default function PrinterWidget({
   isRefreshingDevices = false,
   lastDeviceSyncAt = 0,
   deviceSyncError = '',
+  onSignOut,
 }) {
   const [isLocked, setIsLocked] = useState(false);
   const [viewMode, setViewMode] = useState(() => localStorage.getItem(VIEW_MODE_KEY) || 'full');
@@ -1150,23 +1152,6 @@ export default function PrinterWidget({
     });
   };
 
-  const renderOpacityControl = () => (
-    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 10, alignItems: 'center', padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
-      <div style={{ fontSize: 12, color: 'rgba(203,217,239,0.72)', fontWeight: 700 }}>窗口透明度</div>
-      <input
-        type="range"
-        min="50"
-        max="100"
-        value={Math.round(windowOpacity * 100)}
-        onChange={(event) => updateWindowOpacity(Number(event.target.value) / 100)}
-        style={{ width: '100%', accentColor: '#7ef0c4' }}
-      />
-      <div style={{ width: 36, textAlign: 'right', fontSize: 12, color: '#eaf7ff', fontWeight: 800 }}>
-        {Math.round(windowOpacity * 100)}%
-      </div>
-    </div>
-  );
-
   const renderAction = (printer, compact = false) => {
     const buttonStyle = {
       ...interactive,
@@ -1279,211 +1264,38 @@ export default function PrinterWidget({
 
 
       {settingsOpen ? (
-        <div ref={settingsDialogRef} className="monitor-modal-backdrop monitor-settings-backdrop" role="dialog" aria-modal="true" aria-label="设置" tabIndex={-1} style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.62)', backdropFilter: 'blur(14px)', borderRadius: 0, WebkitAppRegion: 'no-drag', overflowY: 'auto' }}>
-          <div style={{ minHeight: '100%', display: 'flex', flexDirection: 'column', gap: 14, padding: 18, borderRadius: 8, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(10,16,27,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 20px 52px rgba(0,0,0,0.38)' }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 700, color: '#f7fbff' }}>
-                  <Settings size={16} />
-                  设置
-                </div>
-                <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(203,217,239,0.66)', lineHeight: 1.5 }}>
-                  窗口、通知、开机启动和摄像头墙都在这里调整。
-                </div>
-              </div>
-              <button
-                type="button"
-                aria-label="关闭设置"
-                title="关闭设置"
-                onClick={() => setSettingsOpen(false)}
-                style={{ ...interactive, width: 32, height: 32, borderRadius: 10, color: 'rgba(246,250,255,0.78)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}
-              >
-                ×
-              </button>
-            </div>
-
-            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '11px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
-              <span>启用外部通知</span>
-              <input
-                type="checkbox"
-                checked={notificationConfig.enabled}
-                onChange={(event) => updateNotificationConfig({ enabled: event.target.checked })}
-                style={{ width: 18, height: 18 }}
-              />
-            </label>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 10, alignItems: 'center' }}>
-              <div style={{ fontSize: 12, color: 'rgba(203,217,239,0.68)' }}>同一事件冷却时间</div>
-              <input
-                type="number"
-                min="5"
-                max="3600"
-                value={Math.round((Number(notificationConfig.cooldownMs) || 30000) / 1000)}
-                onChange={(event) => updateNotificationConfig({ cooldownMs: Math.max(5, Number(event.target.value) || 30) * 1000 })}
-                style={{ width: 86, padding: '8px 10px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.06)', color: '#f7fbff', outline: 'none' }}
-              />
-            </div>
-
-            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
-              <span>窗口保持最前</span>
-              <input
-                type="checkbox"
-                checked={isAlwaysOnTop}
-                onChange={(event) => setIsAlwaysOnTop(event.target.checked)}
-                style={{ width: 18, height: 18 }}
-              />
-            </label>
-
-            {renderOpacityControl()}
-
-            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
-              <span>开机自动启动</span>
-              <input
-                type="checkbox"
-                checked={startupEnabled}
-                disabled={startupBusy}
-                onChange={(event) => toggleStartup(event.target.checked)}
-                style={{ width: 18, height: 18 }}
-              />
-            </label>
-
-            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(235,243,255,0.9)', fontSize: 13 }}>
-              <span>连接后自动打开摄像头墙</span>
-              <input
-                type="checkbox"
-                checked={Boolean(cameraConfig.autoOpen)}
-                onChange={(event) => {
-                  updateCameraConfig({ autoOpen: event.target.checked });
-                  if (event.target.checked) openCameraWorkspace();
-                }}
-                style={{ width: 18, height: 18 }}
-              />
-            </label>
-
-            {printers.length > 0 ? (
-              <div style={{ display: 'grid', gap: 8, padding: 12, borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'rgba(235,243,255,0.9)', fontSize: 13, fontWeight: 700 }}>
-                  <Camera size={14} />
-                  摄像头地址
-                </div>
-                <div style={{ fontSize: 11, color: 'rgba(203,217,239,0.6)', lineHeight: 1.5 }}>
-                  留空会按机型自动尝试 RTSPS 或 6000 JPEG 流；外部 MJPEG/快照 URL 只作为兜底。
-                </div>
-                {displayPrinters.map((printer) => {
-                  const key = getPrinterCameraKey(printer);
-                  return (
-                    <input
-                      key={`camera-url-${key}`}
-                      type="text"
-                      value={getCustomCameraUrl(cameraConfig, printer)}
-                      onChange={(event) => updateCameraUrl(printer, event.target.value)}
-                      placeholder={`${printer.name || '打印机'} 自定义摄像头 URL（可选）`}
-                      style={{ width: '100%', padding: '9px 10px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.11)', background: 'rgba(255,255,255,0.06)', color: '#f7fbff', outline: 'none', fontSize: 11 }}
-                    />
-                  );
-                })}
-              </div>
-            ) : null}
-
-            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', paddingRight: 2 }}>
-              {notificationConfig.targets.map((target) => (
-                <div key={target.id} style={{ padding: 12, borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: '#f7fbff' }}>{target.name}</div>
-                      <div style={{ marginTop: 3, fontSize: 11, color: 'rgba(203,217,239,0.58)' }}>
-                        Webhook URL + HMAC Secret
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <button
-                        type="button"
-                        onClick={() => copyIntegrationCode(target)}
-                        title={`复制 ${target.name} 接入代码`}
-                        style={{ ...interactive, height: 28, padding: '0 9px', borderRadius: 9, color: '#dff8ff', background: 'rgba(91,177,255,0.12)', border: '1px solid rgba(91,177,255,0.2)', fontSize: 11, fontWeight: 700 }}
-                      >
-                        <Copy size={12} />
-                        接入代码
-                      </button>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: 'rgba(203,217,239,0.74)' }}>
-                        启用
-                        <input
-                          type="checkbox"
-                          checked={Boolean(target.enabled)}
-                          onChange={(event) => updateNotificationTarget(target.id, { enabled: event.target.checked })}
-                          style={{ width: 16, height: 16 }}
-                        />
-                      </label>
-                    </div>
-                  </div>
-
-                  <input
-                    type="text"
-                    value={target.url || ''}
-                    onChange={(event) => updateNotificationTarget(target.id, { url: event.target.value })}
-                    placeholder={`填写 ${target.name} Webhook URL`}
-                    style={{ width: '100%', padding: '10px 12px', borderRadius: 11, border: '1px solid rgba(255,255,255,0.11)', background: 'rgba(255,255,255,0.06)', color: '#f7fbff', outline: 'none', fontSize: 12 }}
-                  />
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, marginTop: 8 }}>
-                    <input
-                      type="password"
-                      value={target.secret || ''}
-                      onChange={(event) => updateNotificationTarget(target.id, { secret: event.target.value })}
-                      placeholder="HMAC Secret（可选）"
-                      style={{ width: '100%', minWidth: 0, padding: '10px 12px', borderRadius: 11, border: '1px solid rgba(255,255,255,0.11)', background: 'rgba(255,255,255,0.06)', color: '#f7fbff', outline: 'none', fontSize: 12 }}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => testNotificationTarget(target)}
-                      disabled={testingTargetId === target.id || !target.url}
-                      style={{ ...interactive, height: 38, padding: '0 12px', borderRadius: 11, color: '#dff8ff', background: 'rgba(91,177,255,0.13)', border: '1px solid rgba(91,177,255,0.22)', fontSize: 12, fontWeight: 700, opacity: !target.url ? 0.48 : 1 }}
-                    >
-                      <Send size={13} />
-                      {testingTargetId === target.id ? '测试中' : '测试'}
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {notificationFeedback ? (
-              <div style={{ fontSize: 12, color: notificationFeedback.includes('失败') ? '#ffb1b1' : '#95f0bf', lineHeight: 1.5 }}>
-                {notificationFeedback}
-              </div>
-            ) : null}
-
-            {startupFeedback || cameraFeedback ? (
-              <div style={{ fontSize: 12, color: (startupFeedback || cameraFeedback).includes('失败') ? '#ffb1b1' : '#95f0bf', lineHeight: 1.5 }}>
-                {startupFeedback || cameraFeedback}
-              </div>
-            ) : null}
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-              <button
-                type="button"
-                onClick={() => {
-                  setNotificationConfig(getNotificationConfig());
-                  setNotificationFeedback('');
-                }}
-                style={{ ...interactive, height: 36, padding: '0 14px', borderRadius: 10, color: 'rgba(229,239,255,0.82)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}
-              >
-                还原
-              </button>
-              <button
-                type="button"
-                onClick={saveNotificationSettings}
-                style={{ ...interactive, height: 36, padding: '0 14px', borderRadius: 10, color: '#06151f', background: 'linear-gradient(135deg, #7ef0c4, #8bc3ff)', border: 'none', fontWeight: 800 }}
-              >
-                保存设置
-              </button>
-            </div>
-          </div>
-        </div>
+        <SettingsSheet
+          dialogRef={settingsDialogRef}
+          printers={displayPrinters}
+          notificationConfig={notificationConfig}
+          notificationFeedback={notificationFeedback}
+          testingTargetId={testingTargetId}
+          cameraConfig={cameraConfig}
+          cameraFeedback={cameraFeedback}
+          startupEnabled={startupEnabled}
+          startupBusy={startupBusy}
+          startupFeedback={startupFeedback}
+          isAlwaysOnTop={isAlwaysOnTop}
+          windowOpacity={windowOpacity}
+          onClose={() => setSettingsOpen(false)}
+          onSignOut={onSignOut}
+          onSetAlwaysOnTop={setIsAlwaysOnTop}
+          onSetOpacity={updateWindowOpacity}
+          onToggleStartup={toggleStartup}
+          onUpdateCameraConfig={(patch) => { updateCameraConfig(patch); if (patch.autoOpen) openCameraWorkspace(); }}
+          onUpdateCameraUrl={updateCameraUrl}
+          onUpdateNotificationConfig={updateNotificationConfig}
+          onUpdateNotificationTarget={updateNotificationTarget}
+          onCopyIntegration={copyIntegrationCode}
+          onTestNotification={testNotificationTarget}
+          onRestore={() => { setNotificationConfig(getNotificationConfig()); setNotificationFeedback(''); }}
+          onSave={saveNotificationSettings}
+        />
       ) : null}
 
       {ipDialog ? (
-        <div ref={ipDialogRef} className="monitor-modal-backdrop monitor-ip-backdrop" role="dialog" aria-modal="true" aria-label="设置打印机 IP" tabIndex={-1} style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.58)', backdropFilter: 'blur(12px)', borderRadius: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', WebkitAppRegion: 'no-drag' }}>
-          <form onSubmit={submitIpDialog} style={{ width: '100%', maxWidth: 320, padding: 18, borderRadius: 8, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(11,18,30,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 18px 42px rgba(0,0,0,0.38)' }}>
+        <div ref={ipDialogRef} className="monitor-modal-backdrop monitor-ip-backdrop" role="dialog" aria-modal="true" aria-label="设置打印机 IP" tabIndex={-1}>
+          <form className="monitor-ip-dialog" onSubmit={submitIpDialog}>
             <div style={{ fontSize: 15, fontWeight: 600, color: '#f7fbff' }}>设置打印机 IP</div>
             <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(203,217,239,0.68)', lineHeight: 1.5 }}>
               {ipDialog.name || '当前设备'}
@@ -1501,14 +1313,14 @@ export default function PrinterWidget({
                 if (ipDialogError) setIpDialogError('');
               }}
               placeholder="192.168.1.100 或 VPN/Tailscale IP"
-              style={{ width: '100%', marginTop: 16, padding: '12px 14px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.06)', color: '#f7fbff', outline: 'none' }}
+              className="monitor-ip-dialog__input"
             />
 
             {ipDialogError ? (
               <div style={{ marginTop: 10, fontSize: 12, color: '#ffaeae', lineHeight: 1.5 }}>{ipDialogError}</div>
             ) : null}
 
-            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+            <div className="monitor-ip-dialog__actions">
               <button
                 type="button"
                 aria-label="取消设置打印机 IP"
