@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Copy, GripHorizontal, LayoutGrid, Lock, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
+import { Camera, Copy, LayoutGrid, Lock, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
 import MonitorShell from './monitor/MonitorShell';
 import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
 import {
@@ -17,7 +17,13 @@ import { buildCameraZoomState } from '../utils/cameraZoom';
 import { mapWithConcurrency } from '../utils/asyncPool';
 import { hasCloudStatus, shouldPromptForPrinterIp } from '../utils/printerIpPrompt';
 import { noDragRegionStyle } from '../utils/windowDragRegions';
-import { getWindowModeConfig, readWindowSizeMap, WINDOW_SIZE_STORAGE_KEY } from '../utils/windowModes';
+import {
+  getWindowModeConfig,
+  normalizeSavedWindowSize,
+  readWindowSizeMap,
+  updateWindowSizeMap,
+  WINDOW_SIZE_STORAGE_KEY,
+} from '../utils/windowModes';
 import {
   getPrinterConnectionState,
   getPrinterJobStatus,
@@ -86,6 +92,20 @@ const VIEW_MODE_KEY = 'bambu_widget_view_mode';
 const ALWAYS_ON_TOP_KEY = 'bambu_widget_always_on_top';
 const OPACITY_KEY = 'bambu_widget_opacity';
 const MINI_ROTATE_MS = 3000;
+const DIALOG_FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+function getDialogFocusables(dialog) {
+  if (!dialog) return [];
+  return [...dialog.querySelectorAll(DIALOG_FOCUSABLE_SELECTOR)]
+    .filter((element) => !element.closest('[inert]') && element.getClientRects().length > 0);
+}
 
 function isCloudOverview(printer) {
   return !printer?.ip && hasCloudStatus(printer);
@@ -696,16 +716,19 @@ export default function PrinterWidget({
   const [startupEnabled, setStartupEnabledState] = useState(false);
   const [startupBusy, setStartupBusy] = useState(false);
   const [startupFeedback, setStartupFeedback] = useState('');
-  const widgetRef = useRef(null);
-  const lastResizeRef = useRef({ width: 0, height: 0 });
   const cameraWallOpenRef = useRef(false);
   const cameraRetryAttemptsRef = useRef({});
   const cameraRetryTimersRef = useRef({});
   const restartCameraRef = useRef(null);
+  const nativeModeRef = useRef(viewMode);
+  const submittingIpRef = useRef(submittingIp);
+  const settingsDialogRef = useRef(null);
+  const ipDialogRef = useRef(null);
 
   const isCompact = viewMode === 'compact';
   const isMini = viewMode === 'mini';
   const nativeMode = cameraZoomKey ? 'zoom' : (cameraOpen ? 'full' : viewMode);
+  const activeDialog = ipDialog ? 'ip' : (settingsOpen ? 'settings' : '');
   const isFullPanel = !cameraOpen && !settingsOpen && !ipDialog && !isMini && !isCompact;
   const displayPrinters = sortPrintersForDisplay(printers);
   const summary = getPrinterSummary(printers);
@@ -719,6 +742,7 @@ export default function PrinterWidget({
   const rotatingMiniPrinter = activeMiniPrinters.length > 0
     ? activeMiniPrinters[miniActiveIndex % activeMiniPrinters.length]
     : null;
+  const miniDisplayPrinter = rotatingMiniPrinter || finishedPrinters[0] || null;
   const compactPrimaryPrinter = displayPrinters.find((printer) => (
     ['printing', 'drying', 'preparing'].includes(getPrinterJobStatus(printer))
   ));
@@ -743,6 +767,8 @@ export default function PrinterWidget({
     };
   }));
   cameraWallOpenRef.current = cameraOpen;
+  nativeModeRef.current = nativeMode;
+  submittingIpRef.current = submittingIp;
 
   const updateCameraState = (key, nextState) => {
     if (!key || !nextState || !cameraWallOpenRef.current) return;
@@ -837,6 +863,17 @@ export default function PrinterWidget({
     setCameraOpen(true);
   }, []);
 
+  const persistWindowBounds = useCallback((bounds) => {
+    const mode = nativeModeRef.current;
+    const normalized = normalizeSavedWindowSize(mode, bounds);
+    if (!normalized) return;
+    const current = readWindowSizeMap(localStorage.getItem(WINDOW_SIZE_STORAGE_KEY));
+    localStorage.setItem(
+      WINDOW_SIZE_STORAGE_KEY,
+      JSON.stringify(updateWindowSizeMap(current, mode, normalized)),
+    );
+  }, []);
+
   useEffect(() => {
     if (!isElectronEnvironment()) return undefined;
     const offLock = electronEvents.onLockStatusChanged((locked) => setIsLocked(locked));
@@ -921,15 +958,98 @@ export default function PrinterWidget({
   }, [cameraOpen]);
 
   useEffect(() => {
-    if (!cameraZoomKey) return undefined;
+    if (!cameraZoomKey || activeDialog) return undefined;
 
     const closeOnEscape = (event) => {
-      if (event.key === 'Escape') setCameraZoomKey('');
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      setCameraZoomKey('');
     };
 
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [cameraZoomKey]);
+  }, [activeDialog, cameraZoomKey]);
+
+  useEffect(() => {
+    if (!activeDialog) return undefined;
+    const dialog = activeDialog === 'ip' ? ipDialogRef.current : settingsDialogRef.current;
+    if (!dialog) return undefined;
+
+    const previousFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const shell = dialog.closest('.monitor-shell');
+    const legacySurface = dialog.closest('.monitor-legacy-surface');
+    const inertTargets = [
+      shell?.querySelector('.monitor-appbar'),
+      shell?.querySelector('.monitor-tabs'),
+      ...[...(legacySurface?.children || [])]
+        .filter((child) => !child.classList.contains('monitor-modal-backdrop')),
+    ].filter(Boolean);
+    const inertState = inertTargets.map((element) => ({
+      element,
+      wasInert: element.hasAttribute('inert'),
+      ariaHidden: element.getAttribute('aria-hidden'),
+    }));
+
+    inertTargets.forEach((element) => {
+      element.inert = true;
+      element.setAttribute('inert', '');
+      element.setAttribute('aria-hidden', 'true');
+    });
+
+    const focusFrame = requestAnimationFrame(() => {
+      const target = dialog.querySelector('[autofocus]')
+        || getDialogFocusables(dialog)[0]
+        || dialog;
+      target.focus();
+    });
+
+    const handleDialogKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (activeDialog === 'settings') {
+          setSettingsOpen(false);
+        } else if (!submittingIpRef.current) {
+          setIpDialog(null);
+          setIpDialogError('');
+        }
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const focusables = getDialogFocusables(dialog);
+      if (focusables.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleDialogKeyDown);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', handleDialogKeyDown);
+      inertState.forEach(({ element, wasInert, ariaHidden }) => {
+        element.inert = wasInert;
+        if (wasInert) element.setAttribute('inert', '');
+        else element.removeAttribute('inert');
+        if (ariaHidden === null) element.removeAttribute('aria-hidden');
+        else element.setAttribute('aria-hidden', ariaHidden);
+      });
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, [activeDialog]);
 
   useEffect(() => {
     if (!cameraOpen || !isElectronEnvironment()) {
@@ -1050,66 +1170,28 @@ export default function PrinterWidget({
   }, [cameraImageStates, cameraOpen, cameraSourceKey, clearCameraRetryTimer, scheduleCameraRetry]);
 
   useEffect(() => {
-    if (!isElectronEnvironment()) return;
-    const node = widgetRef.current;
-    if (!node) return undefined;
-    const shell = node.closest('.monitor-shell');
-    if (!shell) return undefined;
-
-    const { minSize } = getWindowModeConfig(nativeMode);
-
-    let frameId = 0;
-    const measureAndResize = () => {
-      if (frameId) cancelAnimationFrame(frameId);
-      frameId = requestAnimationFrame(() => {
-        frameId = 0;
-        const rect = shell.getBoundingClientRect();
-        const measuredWidth = Math.ceil(shell.clientWidth || rect.width);
-        const measuredHeight = Math.ceil(shell.clientHeight || rect.height);
-        if (measuredWidth <= 0 || measuredHeight <= 0) return;
-
-        const width = Math.max(minSize.width, measuredWidth);
-        const height = Math.max(minSize.height, measuredHeight);
-
-        if (
-          Math.abs(lastResizeRef.current.width - width) > 1
-          || Math.abs(lastResizeRef.current.height - height) > 1
-          || lastResizeRef.current.minWidth !== minSize.width
-          || lastResizeRef.current.minHeight !== minSize.height
-        ) {
-          lastResizeRef.current = {
-            width,
-            height,
-            minWidth: minSize.width,
-            minHeight: minSize.height,
-          };
-          electronWindow.resize({
-            width,
-            height,
-            minWidth: minSize.width,
-            minHeight: minSize.height,
-          });
-        }
+    if (!isElectronEnvironment()) return undefined;
+    const frameId = requestAnimationFrame(() => {
+      const sizes = readWindowSizeMap(localStorage.getItem(WINDOW_SIZE_STORAGE_KEY));
+      const config = getWindowModeConfig(nativeMode);
+      const size = normalizeSavedWindowSize(nativeMode, sizes[nativeMode]) || config.defaultSize;
+      electronWindow.setModeSize({
+        ...size,
+        minWidth: config.minSize.width,
+        minHeight: config.minSize.height,
       });
-    };
-
-    measureAndResize();
-
-    if (typeof ResizeObserver === 'undefined') {
-      return () => {
-        if (frameId) cancelAnimationFrame(frameId);
-      };
-    }
-
-    const observer = new ResizeObserver(measureAndResize);
-    observer.observe(shell);
-    observer.observe(node);
-
-    return () => {
-      if (frameId) cancelAnimationFrame(frameId);
-      observer.disconnect();
-    };
+    });
+    return () => cancelAnimationFrame(frameId);
   }, [nativeMode]);
+
+  useEffect(() => {
+    const offBoundsChanged = electronEvents.onWindowBoundsChanged(persistWindowBounds);
+    const offBoundsSaveRequest = electronEvents.onWindowBoundsSaveRequest(persistWindowBounds);
+    return () => {
+      offBoundsChanged();
+      offBoundsSaveRequest();
+    };
+  }, [persistWindowBounds]);
 
   const openIpDialog = (printer) => {
     setIpDialog({ serial: printer.dev_id, name: printer.name, value: printer.ip || '' });
@@ -1408,8 +1490,8 @@ export default function PrinterWidget({
     const done = isFinishedPrinter(printer);
     const palette = progressPalette(printer?.status || 'idle');
     const ring = miniRingState(printer);
-    const ringSize = 30;
-    const ringStroke = 3;
+    const ringSize = 24;
+    const ringStroke = 2.5;
     const ringRadius = (ringSize - ringStroke) / 2;
     const ringCircumference = 2 * Math.PI * ringRadius;
     const ringDashOffset = ringCircumference * (1 - ring.progress / 100);
@@ -1484,7 +1566,10 @@ export default function PrinterWidget({
   };
 
   const renderMiniActiveSlot = () => {
-    if (!rotatingMiniPrinter) return null;
+    if (!miniDisplayPrinter) return null;
+    const sizingPrinters = activeMiniPrinters.length > 0
+      ? activeMiniPrinters
+      : [miniDisplayPrinter];
 
     return (
       <div
@@ -1492,20 +1577,20 @@ export default function PrinterWidget({
           display: 'grid',
           width: 'max-content',
           maxWidth: '100%',
-          padding: '5px 8px',
+          padding: '2px 6px',
           borderRadius: 8,
           background: 'linear-gradient(180deg, rgba(255,255,255,0.062), rgba(255,255,255,0.038))',
           border: '1px solid rgba(126,240,196,0.2)',
           boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.05)',
         }}
       >
-        {activeMiniPrinters.map((printer) => (
+        {sizingPrinters.map((printer) => (
           <div key={`mini-size-${printer.dev_id}`} style={{ gridArea: '1 / 1', visibility: 'hidden' }}>
             {renderMiniRow(printer, { bare: true })}
           </div>
         ))}
-        <div key={`mini-active-${rotatingMiniPrinter.dev_id}`} style={{ gridArea: '1 / 1' }}>
-          {renderMiniRow(rotatingMiniPrinter, { bare: true })}
+        <div key={`mini-active-${miniDisplayPrinter.dev_id}`} style={{ gridArea: '1 / 1' }}>
+          {renderMiniRow(miniDisplayPrinter, { bare: true })}
         </div>
       </div>
     );
@@ -1865,68 +1950,35 @@ export default function PrinterWidget({
       onQuit={() => electronWindow.quit()}
     >
       <div
-        ref={widgetRef}
         className="monitor-legacy-surface"
         style={{
-        position: 'relative',
-        width: '100%',
-        height: '100%',
-        minWidth: 0,
-        minHeight: 0,
-        maxHeight: '100%',
-        padding: isMini ? '9px 10px' : (isCompact ? '12px 14px' : '18px 18px 14px'),
-        boxSizing: 'border-box',
-        display: 'flex',
-        flexDirection: 'column',
-        borderRadius: 0,
-        background: 'transparent',
-        boxShadow: 'none',
-        color: '#fff',
-        cursor: 'default',
-        WebkitAppRegion: 'no-drag',
-        overflow: settingsOpen || ipDialog || isFullPanel ? 'hidden' : 'auto',
-      }}
-    >
+          position: 'relative',
+          width: '100%',
+          height: '100%',
+          minWidth: 0,
+          minHeight: 0,
+          maxHeight: '100%',
+          padding: isMini ? '2px 6px' : (isCompact ? '12px 14px' : '18px 18px 14px'),
+          boxSizing: 'border-box',
+          display: 'flex',
+          flexDirection: 'column',
+          borderRadius: 0,
+          background: 'transparent',
+          boxShadow: 'none',
+          color: '#fff',
+          cursor: 'default',
+          WebkitAppRegion: 'no-drag',
+          overflow: settingsOpen || ipDialog || isFullPanel || isMini ? 'hidden' : 'auto',
+        }}
+      >
       {cameraOpen ? renderCameraView() : isMini ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
-            <div
-              className="legacy-window-drag-region legacy-mini-drag-region"
-              title="拖动窗口"
-              style={{
-                width: 38,
-                height: 24,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderRadius: 8,
-                color: 'rgba(226,238,255,0.48)',
-                background: 'rgba(255,255,255,0.045)',
-                border: '1px solid rgba(255,255,255,0.06)',
-                flex: '0 0 auto',
-              }}
-            >
-              <GripHorizontal size={14} />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 5, WebkitAppRegion: 'no-drag' }}>
-            <button type="button" onClick={() => setViewMode('compact')} title="返回紧凑模式" style={{ ...interactive, width: 24, height: 24, borderRadius: 8, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
-              <Maximize2 size={12} />
-            </button>
-            {renderCameraButton(24)}
-            {renderTopButton(24)}
-            {renderSettingsButton(24)}
-            </div>
-          </div>
-
+        <div className="legacy-mini-surface">
           {printers.length === 0 ? (
-            <div style={{ padding: '10px 9px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 12, background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
+            <div className="legacy-mini-empty">
               正在同步设备...
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {finishedPrinters.map((printer) => renderMiniRow(printer))}
-              {renderMiniActiveSlot()}
-            </div>
+            renderMiniActiveSlot()
           )}
         </div>
       ) : isCompact ? (
@@ -2207,7 +2259,7 @@ export default function PrinterWidget({
       )}
 
       {settingsOpen ? (
-        <div className="monitor-modal-backdrop monitor-settings-backdrop" role="dialog" aria-modal="true" aria-label="设置" style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.62)', backdropFilter: 'blur(14px)', borderRadius: 0, WebkitAppRegion: 'no-drag', overflowY: 'auto' }}>
+        <div ref={settingsDialogRef} className="monitor-modal-backdrop monitor-settings-backdrop" role="dialog" aria-modal="true" aria-label="设置" tabIndex={-1} style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.62)', backdropFilter: 'blur(14px)', borderRadius: 0, WebkitAppRegion: 'no-drag', overflowY: 'auto' }}>
           <div style={{ minHeight: '100%', display: 'flex', flexDirection: 'column', gap: 14, padding: 18, borderRadius: 8, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(10,16,27,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 20px 52px rgba(0,0,0,0.38)' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
               <div>
@@ -2221,6 +2273,8 @@ export default function PrinterWidget({
               </div>
               <button
                 type="button"
+                aria-label="关闭设置"
+                title="关闭设置"
                 onClick={() => setSettingsOpen(false)}
                 style={{ ...interactive, width: 32, height: 32, borderRadius: 10, color: 'rgba(246,250,255,0.78)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}
               >
@@ -2408,7 +2462,7 @@ export default function PrinterWidget({
       ) : null}
 
       {ipDialog ? (
-        <div className="monitor-modal-backdrop monitor-ip-backdrop" role="dialog" aria-modal="true" aria-label="设置打印机 IP" style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.58)', backdropFilter: 'blur(12px)', borderRadius: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', WebkitAppRegion: 'no-drag' }}>
+        <div ref={ipDialogRef} className="monitor-modal-backdrop monitor-ip-backdrop" role="dialog" aria-modal="true" aria-label="设置打印机 IP" tabIndex={-1} style={{ position: 'absolute', inset: 0, padding: 18, background: 'rgba(5,8,15,0.58)', backdropFilter: 'blur(12px)', borderRadius: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', WebkitAppRegion: 'no-drag' }}>
           <form onSubmit={submitIpDialog} style={{ width: '100%', maxWidth: 320, padding: 18, borderRadius: 8, background: 'linear-gradient(180deg, rgba(18,28,44,0.98), rgba(11,18,30,0.98))', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 18px 42px rgba(0,0,0,0.38)' }}>
             <div style={{ fontSize: 15, fontWeight: 600, color: '#f7fbff' }}>设置打印机 IP</div>
             <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(203,217,239,0.68)', lineHeight: 1.5 }}>
@@ -2420,7 +2474,6 @@ export default function PrinterWidget({
             </div>
 
             <input
-              autoFocus
               type="text"
               value={ipDialog.value}
               onChange={(event) => {
@@ -2438,6 +2491,7 @@ export default function PrinterWidget({
             <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
               <button
                 type="button"
+                aria-label="取消设置打印机 IP"
                 onClick={closeIpDialog}
                 disabled={submittingIp}
                 style={{ ...interactive, height: 36, padding: '0 14px', borderRadius: 10, color: 'rgba(229,239,255,0.8)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   Camera,
   Lock,
@@ -32,34 +32,72 @@ export default function MonitorShell({
   children,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuFocusIndex, setMenuFocusIndex] = useState(0);
   const menuId = useId();
   const menuAreaRef = useRef(null);
   const menuButtonRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const focusMenuItem = useCallback((requestedIndex) => {
+    const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])];
+    if (items.length === 0) return;
+    const index = (requestedIndex + items.length) % items.length;
+    setMenuFocusIndex(index);
+    items[index].focus();
+  }, []);
+
+  const closeMenu = useCallback((restoreFocus = false) => {
+    setMenuOpen(false);
+    if (restoreFocus) menuButtonRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (!menuOpen) return undefined;
 
     const closeOnOutsidePointer = (event) => {
-      if (!menuAreaRef.current?.contains(event.target)) setMenuOpen(false);
+      if (!menuAreaRef.current?.contains(event.target)) closeMenu(false);
     };
-    const closeOnEscape = (event) => {
-      if (event.key !== 'Escape') return;
-      setMenuOpen(false);
-      menuButtonRef.current?.focus();
+    const handleMenuKeyDown = (event) => {
+      if (event.key === 'Escape' || event.key === 'Tab') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        closeMenu(true);
+        return;
+      }
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])];
+      const currentIndex = Math.max(0, items.indexOf(document.activeElement));
+      if (event.key === 'Home') focusMenuItem(0);
+      else if (event.key === 'End') focusMenuItem(items.length - 1);
+      else focusMenuItem(currentIndex + (event.key === 'ArrowDown' ? 1 : -1));
     };
 
+    const focusFrame = requestAnimationFrame(() => focusMenuItem(0));
     document.addEventListener('pointerdown', closeOnOutsidePointer);
-    document.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('keydown', handleMenuKeyDown, true);
     return () => {
+      cancelAnimationFrame(focusFrame);
       document.removeEventListener('pointerdown', closeOnOutsidePointer);
-      document.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('keydown', handleMenuKeyDown, true);
     };
-  }, [menuOpen]);
+  }, [closeMenu, focusMenuItem, menuOpen]);
 
   const choose = (callback) => {
-    setMenuOpen(false);
+    closeMenu(true);
     callback?.();
   };
+
+  const menuItems = [
+    { label: '紧凑模式', icon: <Rows3 size={14} aria-hidden="true" />, action: () => onChangeMode('compact') },
+    { label: '超迷你模式', icon: <Minimize2 size={14} aria-hidden="true" />, action: () => onChangeMode('mini') },
+    { label: isLocked ? '解除穿透' : '锁定穿透', icon: <Lock size={14} aria-hidden="true" />, action: onToggleLock },
+    { label: '设置', icon: <Settings size={14} aria-hidden="true" />, action: onOpenSettings },
+    { label: '重置窗口大小', icon: <RotateCcw size={14} aria-hidden="true" />, action: onResetSize },
+    { label: '退出', icon: <Power size={14} aria-hidden="true" />, action: onQuit, danger: true },
+  ];
 
   return (
     <main
@@ -100,37 +138,33 @@ export default function MonitorShell({
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               aria-controls={menuOpen ? menuId : undefined}
-              onClick={() => setMenuOpen((open) => !open)}
+              onClick={() => {
+                if (menuOpen) closeMenu(true);
+                else {
+                  setMenuFocusIndex(0);
+                  setMenuOpen(true);
+                }
+              }}
             >
               <MoreHorizontal size={16} aria-hidden="true" />
             </button>
 
             {menuOpen ? (
-              <div className="monitor-menu" id={menuId} role="menu" aria-label="更多操作">
-                <button type="button" role="menuitem" onClick={() => choose(() => onChangeMode('compact'))}>
-                  <Rows3 size={14} aria-hidden="true" />
-                  <span>紧凑模式</span>
-                </button>
-                <button type="button" role="menuitem" onClick={() => choose(() => onChangeMode('mini'))}>
-                  <Minimize2 size={14} aria-hidden="true" />
-                  <span>超迷你模式</span>
-                </button>
-                <button type="button" role="menuitem" onClick={() => choose(onToggleLock)}>
-                  <Lock size={14} aria-hidden="true" />
-                  <span>{isLocked ? '解除穿透' : '锁定穿透'}</span>
-                </button>
-                <button type="button" role="menuitem" onClick={() => choose(onOpenSettings)}>
-                  <Settings size={14} aria-hidden="true" />
-                  <span>设置</span>
-                </button>
-                <button type="button" role="menuitem" onClick={() => choose(onResetSize)}>
-                  <RotateCcw size={14} aria-hidden="true" />
-                  <span>重置窗口大小</span>
-                </button>
-                <button type="button" role="menuitem" className="is-danger" onClick={() => choose(onQuit)}>
-                  <Power size={14} aria-hidden="true" />
-                  <span>退出</span>
-                </button>
+              <div ref={menuRef} className="monitor-menu" id={menuId} role="menu" aria-label="更多操作">
+                {menuItems.map(({ label, icon, action, danger }, index) => (
+                  <button
+                    key={label}
+                    type="button"
+                    role="menuitem"
+                    tabIndex={menuFocusIndex === index ? 0 : -1}
+                    className={danger ? 'is-danger' : undefined}
+                    onFocus={() => setMenuFocusIndex(index)}
+                    onClick={() => choose(action)}
+                  >
+                    {icon}
+                    <span>{label}</span>
+                  </button>
+                ))}
               </div>
             ) : null}
           </div>

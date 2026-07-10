@@ -282,6 +282,29 @@
   min-height: 0;
 }
 
+.legacy-mini-surface {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.legacy-mini-surface > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.legacy-mini-empty {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .legacy-full-heading,
 .legacy-camera-heading,
 .legacy-monitor-hint {
