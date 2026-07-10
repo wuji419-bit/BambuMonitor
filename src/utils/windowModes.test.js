@@ -40,6 +40,42 @@ test('falls back to the full configuration for an unknown mode', () => {
   assert.deepEqual(getWindowModeConfig('unknown'), getWindowModeConfig('full'));
 });
 
+test('falls back to the full configuration for inherited property names', () => {
+  const fullConfig = getWindowModeConfig('full');
+
+  for (const mode of ['toString', 'constructor', '__proto__']) {
+    assert.deepEqual(getWindowModeConfig(mode), fullConfig);
+  }
+});
+
+test('prevents callers from mutating canonical mode configuration', () => {
+  const config = getWindowModeConfig('full');
+  const snapshot = {
+    defaultSize: { ...config.defaultSize },
+    minSize: { ...config.minSize },
+  };
+
+  try {
+    const mutations = [
+      () => { config.defaultSize.width = 1; },
+      () => { config.minSize.height = 1; },
+    ];
+
+    for (const mutate of mutations) {
+      try {
+        mutate();
+      } catch (error) {
+        assert.ok(error instanceof TypeError);
+      }
+    }
+
+    assert.deepEqual(getWindowModeConfig('full'), snapshot);
+  } finally {
+    if (!Object.isFrozen(config.defaultSize)) Object.assign(config.defaultSize, snapshot.defaultSize);
+    if (!Object.isFrozen(config.minSize)) Object.assign(config.minSize, snapshot.minSize);
+  }
+});
+
 test('rejects non-finite and non-positive saved sizes', () => {
   const invalidSizes = [
     undefined,
@@ -51,6 +87,13 @@ test('rejects non-finite and non-positive saved sizes', () => {
 
   for (const size of invalidSizes) {
     assert.equal(normalizeSavedWindowSize('full', size), null);
+  }
+});
+
+test('rejects non-number saved dimensions without coercion', () => {
+  for (const value of [true, '720', [720]]) {
+    assert.equal(normalizeSavedWindowSize('full', { width: value, height: 620 }), null);
+    assert.equal(normalizeSavedWindowSize('full', { width: 720, height: value }), null);
   }
 });
 
@@ -91,9 +134,10 @@ test('updates one mode without changing other saved modes', () => {
 
 test('ignores an invalid window size update', () => {
   const current = { full: { width: 700, height: 600 } };
+  const snapshot = { full: { ...current.full } };
+  const updated = updateWindowSizeMap(current, 'mini', { width: 0, height: 92 });
 
-  assert.deepEqual(
-    updateWindowSizeMap(current, 'mini', { width: 0, height: 92 }),
-    current,
-  );
+  assert.deepEqual(updated, snapshot);
+  assert.notStrictEqual(updated, current);
+  assert.deepEqual(current, snapshot);
 });
