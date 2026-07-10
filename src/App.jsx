@@ -10,6 +10,7 @@ import { getRemovedPrinterIds, reconcilePrinterInventory } from './utils/deviceI
 import { buildDeviceSyncSnapshot, mergePrinterState } from './utils/printerSync';
 import { acceptsConnectionGeneration, beginConnectionGeneration } from './utils/sessionGeneration';
 import { cachePrinterAddress, isValidPrinterAddress, normalizePrinterAddress } from './utils/printerAddress';
+import { runGenerationBoundScan } from './utils/generationBoundScan';
 
 const isTokenInvalidError = (errorText) => (
   /expired|invalid|unauthorized|forbidden|401|token/i.test(String(errorText || ''))
@@ -152,7 +153,7 @@ function TitleBar({ isElectron }) {
   );
 }
 
-function ConnectionScreen({ onConnect, isElectron, suppressAutoLogin = false, sessionWarning = '' }) {
+function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron, suppressAutoLogin = false, sessionWarning = '' }) {
   const [isPasswordMode, setIsPasswordMode] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [account, setAccount] = useState('');
@@ -234,18 +235,16 @@ function ConnectionScreen({ onConnect, isElectron, suppressAutoLogin = false, se
   };
 
   const refreshLanDevicesInBackground = async (cloudDevices, expectedGeneration) => {
-    let scannedPrinters = [];
-    try {
-      scannedPrinters = await scanPrinters();
-    } catch (scanErr) {
-      console.error('LAN scan failed:', scanErr);
-      return;
-    }
-
-    const { devicesWithIp, initialPrinters } = buildDeviceSync(cloudDevices, scannedPrinters);
-    if (devicesWithIp.some((device) => device.ip)) {
-      onConnect(initialPrinters, null, expectedGeneration);
-    }
+    await runGenerationBoundScan({
+      scan: scanPrinters,
+      expectedGeneration,
+      isCurrent: isConnectionGenerationCurrent,
+      buildSnapshot: (scannedPrinters) => buildDeviceSync(cloudDevices, scannedPrinters),
+      mergeSnapshot: ({ devicesWithIp, initialPrinters }) => {
+        if (devicesWithIp.some((device) => device.ip)) onConnect(initialPrinters, null, expectedGeneration);
+      },
+      onError: (scanErr) => console.error('LAN scan failed:', scanErr),
+    });
   };
 
   const clearSavedLogin = async () => {
@@ -927,7 +926,7 @@ function App() {
   };
 
   if (!isConnected) {
-    return <ConnectionScreen onConnect={handleConnect} isElectron={isElectron} suppressAutoLogin={suppressAutoLogin} sessionWarning={sessionWarning} />;
+    return <ConnectionScreen onConnect={handleConnect} isConnectionGenerationCurrent={(generation) => deviceSyncGenerationRef.current === generation} isElectron={isElectron} suppressAutoLogin={suppressAutoLogin} sessionWarning={sessionWarning} />;
   }
 
   return (

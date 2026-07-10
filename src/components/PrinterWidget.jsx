@@ -50,6 +50,7 @@ import {
   sendTestNotification,
 } from '../services/notifications';
 import { isValidPrinterAddress, normalizePrinterAddress } from '../utils/printerAddress';
+import { applySettingsTransaction } from '../utils/settingsTransaction';
 
 const statusMap = {
   no_ip: ['云端概览', '#8cc8ff', 'rgba(102, 178, 255, 0.14)', 'rgba(102, 178, 255, 0.22)'],
@@ -1047,29 +1048,45 @@ export default function PrinterWidget({
   const applySettingsDraft = async (draft) => {
     setNotificationFeedback('');
     setCameraFeedback('');
-    setIsAlwaysOnTop(Boolean(draft.isAlwaysOnTop));
-    updateWindowOpacity(draft.windowOpacity);
-    if (Boolean(draft.startupEnabled) !== startupEnabled) {
-      const result = await electronApp.setStartupEnabled({ enabled: Boolean(draft.startupEnabled) });
+    const original = { isAlwaysOnTop, windowOpacity, startupEnabled, cameraConfig, notificationConfig };
+    const next = {
+      isAlwaysOnTop: Boolean(draft.isAlwaysOnTop),
+      windowOpacity: Math.min(1, Math.max(0.5, Number(draft.windowOpacity) || 1)),
+      startupEnabled: Boolean(draft.startupEnabled),
+      cameraConfig: draft.cameraConfig || createDefaultCameraConfig(),
+      notificationConfig: draft.notificationConfig || createDefaultNotificationConfig(),
+    };
+    const setStartup = async (enabled) => {
+      const result = await electronApp.setStartupEnabled({ enabled });
       if (!result?.success) throw new Error(result?.error || '设置开机启动失败');
       setStartupEnabledState(Boolean(result.enabled));
-    }
-    const nextCameraConfig = draft.cameraConfig || createDefaultCameraConfig();
-    saveCameraConfig(nextCameraConfig);
-    setCameraConfig(nextCameraConfig);
-    const nextNotificationConfig = draft.notificationConfig || createDefaultNotificationConfig();
-    saveNotificationConfig(nextNotificationConfig);
-    setNotificationConfig(nextNotificationConfig);
-    if (nextCameraConfig.autoOpen) openCameraWorkspace();
+    };
+    await applySettingsTransaction({
+      startupChanged: next.startupEnabled !== original.startupEnabled,
+      applyStartup: () => setStartup(next.startupEnabled),
+      commitLocal: () => {
+        saveCameraConfig(next.cameraConfig);
+        saveNotificationConfig(next.notificationConfig);
+        setIsAlwaysOnTop(next.isAlwaysOnTop);
+        setWindowOpacityState(next.windowOpacity);
+        setCameraConfig(next.cameraConfig);
+        setNotificationConfig(next.notificationConfig);
+        if (next.cameraConfig.autoOpen) openCameraWorkspace();
+      },
+      rollbackStartup: () => setStartup(original.startupEnabled),
+      rollbackLocal: () => {
+        saveCameraConfig(original.cameraConfig);
+        saveNotificationConfig(original.notificationConfig);
+        setIsAlwaysOnTop(original.isAlwaysOnTop);
+        setWindowOpacityState(original.windowOpacity);
+        setCameraConfig(original.cameraConfig);
+        setNotificationConfig(original.notificationConfig);
+      },
+    });
   };
 
   const toggleAlwaysOnTop = () => {
     setIsAlwaysOnTop((prev) => !prev);
-  };
-
-  const updateWindowOpacity = (value) => {
-    const next = Math.min(1, Math.max(0.5, Number(value) || 1));
-    setWindowOpacityState(next);
   };
 
   const toggleMousePassthrough = () => {

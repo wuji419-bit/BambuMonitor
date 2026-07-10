@@ -5,7 +5,8 @@ import { getCustomCameraUrl, getPrinterCameraKey } from '../../services/camera';
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
 export default function SettingsSheet({ dialogRef, printers, baseline, testingTargetId, externalFeedback, onClose, onSignOut, onCopyIntegration, onTestNotification, onSave }) {
-  const [draft, setDraft] = useState(() => clone(baseline));
+  const [openedBaseline] = useState(() => clone(baseline));
+  const [draft, setDraft] = useState(() => clone(openedBaseline));
   const [busyAction, setBusyAction] = useState('');
   const [feedback, setFeedback] = useState('');
   const patch = (next) => setDraft((current) => ({ ...current, ...next }));
@@ -16,7 +17,7 @@ export default function SettingsSheet({ dialogRef, printers, baseline, testingTa
   const run = async (action, callback) => {
     if (busyAction) return;
     setBusyAction(action); setFeedback('');
-    try { await callback(); if (action === 'save') setFeedback('设置已保存'); }
+    try { await callback(); if (action === 'save') setFeedback('设置已保存；还原会回到本次打开设置时的内容'); }
     catch (error) { setFeedback(error?.message || `${action === 'save' ? '保存' : '退出'}失败`); }
     finally { setBusyAction(''); }
   };
@@ -35,7 +36,7 @@ export default function SettingsSheet({ dialogRef, printers, baseline, testingTa
         <section className="settings-section settings-account"><h2>账号</h2><button type="button" className="settings-signout" disabled={disabled} onClick={() => run('signout', onSignOut)}><LogOut size={15} />{busyAction === 'signout' ? '退出中' : '退出账号'}</button></section>
         {feedback || externalFeedback ? <p className="settings-feedback" role={/失败/.test(feedback || externalFeedback) ? 'alert' : 'status'}>{feedback || externalFeedback}</p> : null}
       </div>
-      <footer className="settings-sheet__footer"><button type="button" disabled={disabled} onClick={() => { setDraft(clone(baseline)); setFeedback('已还原为打开设置时的内容'); }}>还原</button><button type="button" className="is-primary" disabled={disabled} onClick={() => run('save', () => onSave(draft))}>{busyAction === 'save' ? '保存中' : '保存设置'}</button></footer>
+      <footer className="settings-sheet__footer"><button type="button" disabled={disabled} onClick={() => { setDraft(clone(openedBaseline)); setFeedback('已还原为打开设置时的内容'); }}>还原</button><button type="button" className="is-primary" disabled={disabled} onClick={() => run('save', () => onSave(draft))}>{busyAction === 'save' ? '保存中' : '保存设置'}</button></footer>
     </div>
   </div>;
 }
