@@ -590,6 +590,8 @@ function App() {
   const lastPrinterStatusRef = useRef(new Map());
   const authSessionRef = useRef(null);
   const deviceSyncBusyRef = useRef(false);
+  const deviceSyncGenerationRef = useRef(0);
+  const deviceSyncBusyGenerationRef = useRef(null);
   const refreshDevicesRef = useRef(null);
 
   useEffect(() => {
@@ -603,6 +605,9 @@ function App() {
 
   const handleConnect = (initialPrinters = [], session = null) => {
     if (session?.accessToken) {
+      deviceSyncGenerationRef.current += 1;
+      deviceSyncBusyRef.current = false;
+      deviceSyncBusyGenerationRef.current = null;
       authSessionRef.current = session;
       setLastDeviceSyncAt(Date.now());
       setDeviceSyncError('');
@@ -644,7 +649,11 @@ function App() {
     }
     if (!isElectron || deviceSyncBusyRef.current) return;
 
+    const generation = deviceSyncGenerationRef.current + 1;
+    deviceSyncGenerationRef.current = generation;
+    const isCurrentGeneration = () => deviceSyncGenerationRef.current === generation;
     deviceSyncBusyRef.current = true;
+    deviceSyncBusyGenerationRef.current = generation;
     setIsRefreshingDevices(true);
     setDeviceSyncError('');
 
@@ -652,6 +661,7 @@ function App() {
       let session = authSessionRef.current;
       if (!session?.accessToken) {
         const saved = await electronAuth.getSavedSession();
+        if (!isCurrentGeneration()) return;
         session = saved?.session || null;
         if (session?.accessToken) authSessionRef.current = session;
       }
@@ -660,6 +670,7 @@ function App() {
       }
 
       const result = await electronAuth.getDeviceList({ accessToken: session.accessToken });
+      if (!isCurrentGeneration()) return;
       if (!result?.success) {
         throw new Error(result?.error || '同步设备失败');
       }
@@ -668,6 +679,7 @@ function App() {
       const snapshot = syncCloudDeviceSnapshot(cloudDevices);
       const removedIds = getRemovedPrinterIds(bambuClient.getAllPrinters(), snapshot.initialPrinters);
       await Promise.allSettled(removedIds.map((serialNumber) => bambuClient.disconnect(serialNumber)));
+      if (!isCurrentGeneration()) return;
 
       setPrinters((current) => reconcilePrinterInventory(current, snapshot.initialPrinters));
       authSessionRef.current = {
@@ -680,48 +692,64 @@ function App() {
       if (includeLan) {
         scanPrinters()
           .then((scannedPrinters) => {
+            if (!isCurrentGeneration()) return;
             const lanSnapshot = syncCloudDeviceSnapshot(cloudDevices, scannedPrinters);
             setPrinters((current) => reconcilePrinterInventory(current, lanSnapshot.initialPrinters));
           })
           .catch((error) => {
+            if (!isCurrentGeneration()) return;
             console.warn('Background LAN refresh failed:', error);
           });
       }
     } catch (error) {
+      if (!isCurrentGeneration()) return;
       setDeviceSyncError(error?.message || '同步设备失败');
     } finally {
-      deviceSyncBusyRef.current = false;
-      setIsRefreshingDevices(false);
+      if (isCurrentGeneration() && deviceSyncBusyGenerationRef.current === generation) {
+        deviceSyncBusyRef.current = false;
+        deviceSyncBusyGenerationRef.current = null;
+        setIsRefreshingDevices(false);
+      }
     }
   };
 
   refreshDevicesRef.current = refreshDeviceInventory;
 
   const handleSignOut = async () => {
+    const signOutGeneration = deviceSyncGenerationRef.current + 1;
+    deviceSyncGenerationRef.current = signOutGeneration;
+    deviceSyncBusyRef.current = false;
+    deviceSyncBusyGenerationRef.current = null;
+    setIsRefreshingDevices(false);
     let disconnectError = null;
     try {
-      await Promise.all(bambuClient.getAllPrinters().map((printer) => bambuClient.disconnect(printer.dev_id)));
+      await bambuClient.disconnect();
     } catch (error) {
       disconnectError = error;
       console.warn('Disconnect during sign-out failed:', error);
     } finally {
-      if (isElectron) {
-        try {
-          await electronAuth.clearSavedSession();
-        } catch (error) {
-          console.warn('Clear saved session during sign-out failed:', error);
+      if (deviceSyncGenerationRef.current === signOutGeneration) {
+        if (isElectron) {
+          try {
+            await electronAuth.clearSavedSession();
+          } catch (error) {
+            console.warn('Clear saved session during sign-out failed:', error);
+          }
+        }
+        if (deviceSyncGenerationRef.current === signOutGeneration) {
+          localStorage.removeItem('bambu_account');
+          localStorage.removeItem('bambu_token');
+          authSessionRef.current = null;
+          lastPrinterStatusRef.current.clear();
+          deviceSyncBusyRef.current = false;
+          deviceSyncBusyGenerationRef.current = null;
+          setPrinters([]);
+          setIsRefreshingDevices(false);
+          setLastDeviceSyncAt(0);
+          setDeviceSyncError(disconnectError ? '退出时断开设备失败，本地登录信息已清除' : '');
+          setIsConnected(false);
         }
       }
-      localStorage.removeItem('bambu_account');
-      localStorage.removeItem('bambu_token');
-      authSessionRef.current = null;
-      lastPrinterStatusRef.current.clear();
-      deviceSyncBusyRef.current = false;
-      setPrinters([]);
-      setIsRefreshingDevices(false);
-      setLastDeviceSyncAt(0);
-      setDeviceSyncError(disconnectError ? '退出时断开设备失败，本地登录信息已清除' : '');
-      setIsConnected(false);
     }
   };
 
