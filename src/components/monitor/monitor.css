@@ -1,0 +1,333 @@
+.monitor-shell {
+  --surface-0: #0b1017;
+  --surface-1: #111923;
+  --surface-2: #17212c;
+  --surface-hover: #1c2835;
+  --line: rgba(150, 174, 202, 0.18);
+  --line-strong: rgba(150, 174, 202, 0.3);
+  --text: #edf5ff;
+  --muted: #8192a8;
+  --mint: #75e7b5;
+  --blue: #74bfe9;
+  --amber: #ffd17d;
+  --danger: #ef7772;
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--surface-0);
+  letter-spacing: 0;
+  isolation: isolate;
+}
+
+.monitor-shell,
+.monitor-shell * {
+  box-sizing: border-box;
+  letter-spacing: 0;
+}
+
+.monitor-appbar {
+  flex: 0 0 auto;
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 8px;
+  padding: 7px 9px 7px 12px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--line);
+  -webkit-app-region: no-drag;
+}
+
+.monitor-drag-region {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  cursor: move;
+  -webkit-app-region: drag;
+}
+
+.monitor-shell.is-locked .monitor-drag-region {
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+
+.monitor-identity {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  line-height: 1.15;
+  pointer-events: none;
+}
+
+.monitor-identity strong,
+.monitor-identity span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-identity strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.monitor-identity span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.monitor-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  -webkit-app-region: no-drag;
+}
+
+.monitor-actions > button,
+.monitor-menu-area > button {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: #cad7e6;
+  background: var(--surface-2);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.monitor-actions > button:hover,
+.monitor-actions > button:focus-visible,
+.monitor-menu-area > button:hover,
+.monitor-menu-area > button:focus-visible {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+  outline: none;
+}
+
+.monitor-actions > button.is-active {
+  color: var(--mint);
+  border-color: rgba(117, 231, 181, 0.32);
+  background: rgba(117, 231, 181, 0.1);
+}
+
+.monitor-menu-area {
+  position: relative;
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+
+.monitor-menu {
+  position: absolute;
+  z-index: 100;
+  top: calc(100% + 7px);
+  right: 0;
+  width: 194px;
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #141d27;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.38);
+  -webkit-app-region: no-drag;
+}
+
+.monitor-menu button {
+  width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  color: #dce7f3;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  -webkit-app-region: no-drag;
+}
+
+.monitor-menu button:hover,
+.monitor-menu button:focus-visible {
+  color: #ffffff;
+  background: var(--surface-hover);
+  outline: none;
+}
+
+.monitor-menu button.is-danger {
+  color: #ffaaa5;
+}
+
+.monitor-menu button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-tabs {
+  flex: 0 0 40px;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 4px 10px 0;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--line);
+  -webkit-app-region: no-drag;
+}
+
+.monitor-tabs button {
+  min-width: 76px;
+  min-height: 35px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  -webkit-app-region: no-drag;
+}
+
+.monitor-tabs button:hover,
+.monitor-tabs button:focus-visible {
+  color: var(--text);
+  background: rgba(116, 191, 233, 0.07);
+  outline: none;
+}
+
+.monitor-tabs button.is-active {
+  color: #dff4ff;
+  border-bottom-color: var(--blue);
+  background: rgba(116, 191, 233, 0.1);
+}
+
+.monitor-sync-copy {
+  min-width: 0;
+  margin-left: auto;
+  align-self: center;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+}
+
+.monitor-content {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface-0);
+  -webkit-app-region: no-drag;
+}
+
+.monitor-content,
+.monitor-content * {
+  -webkit-app-region: no-drag;
+}
+
+.monitor-legacy-surface {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.legacy-full-heading,
+.legacy-camera-heading,
+.legacy-monitor-hint {
+  display: none !important;
+}
+
+.monitor-resize-grip {
+  position: absolute;
+  z-index: 120;
+  right: 3px;
+  bottom: 3px;
+  width: 13px;
+  height: 13px;
+  border-right: 2px solid rgba(116, 191, 233, 0.52);
+  border-bottom: 2px solid rgba(117, 231, 181, 0.52);
+  border-radius: 0 0 3px 0;
+  pointer-events: none;
+}
+
+.monitor-shell--compact .monitor-appbar {
+  min-height: 46px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.monitor-shell--mini .monitor-appbar {
+  min-height: 38px;
+  padding: 3px 6px 3px 9px;
+}
+
+.monitor-shell--mini .monitor-identity span {
+  display: none;
+}
+
+.monitor-shell--mini .monitor-actions {
+  gap: 4px;
+}
+
+.monitor-shell--mini .monitor-actions > button,
+.monitor-shell--mini .monitor-menu-area > button {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+}
+
+@media (max-width: 359px) {
+  .monitor-appbar {
+    padding-left: 9px;
+  }
+
+  .monitor-actions {
+    gap: 4px;
+  }
+
+  .monitor-actions > button,
+  .monitor-menu-area > button {
+    width: 32px;
+    height: 32px;
+    flex-basis: 32px;
+  }
+
+  .monitor-tabs {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+
+  .monitor-tabs button {
+    min-width: 68px;
+    padding: 0 8px;
+  }
+}

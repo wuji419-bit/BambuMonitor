@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Camera, Copy, GripHorizontal, LayoutGrid, Lock, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
+import MonitorShell from './monitor/MonitorShell';
 import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
 import {
   cameraCompatibilityNote,
@@ -15,7 +16,8 @@ import { buildCameraFrameUrl } from '../utils/cameraFrame';
 import { buildCameraZoomState } from '../utils/cameraZoom';
 import { mapWithConcurrency } from '../utils/asyncPool';
 import { hasCloudStatus, shouldPromptForPrinterIp } from '../utils/printerIpPrompt';
-import { dragRegionStyle, noDragRegionStyle } from '../utils/windowDragRegions';
+import { noDragRegionStyle } from '../utils/windowDragRegions';
+import { getWindowModeConfig, readWindowSizeMap, WINDOW_SIZE_STORAGE_KEY } from '../utils/windowModes';
 import {
   getPrinterConnectionState,
   getPrinterJobStatus,
@@ -1242,6 +1244,38 @@ export default function PrinterWidget({
     electronWindow.setIgnoreMouseEvents(true);
   };
 
+  const toggleMousePassthrough = () => {
+    const nextLocked = !isLocked;
+    setIsLocked(nextLocked);
+    electronWindow.setIgnoreMouseEvents(nextLocked);
+  };
+
+  const changeViewMode = (mode) => {
+    setCameraZoomKey('');
+    setCameraOpen(false);
+    setSettingsOpen(false);
+    setViewMode(mode);
+  };
+
+  const changeWorkspaceTab = (tab) => {
+    setCameraZoomKey('');
+    setCameraOpen(tab === 'cameras');
+  };
+
+  const resetCurrentWindowSize = () => {
+    const storedMode = ['full', 'compact', 'mini'].includes(viewMode) ? viewMode : 'full';
+    const mode = cameraZoomKey ? 'zoom' : (cameraOpen ? 'full' : storedMode);
+    const { defaultSize, minSize } = getWindowModeConfig(mode);
+    const savedSizes = readWindowSizeMap(localStorage.getItem(WINDOW_SIZE_STORAGE_KEY));
+    delete savedSizes[mode];
+    localStorage.setItem(WINDOW_SIZE_STORAGE_KEY, JSON.stringify(savedSizes));
+    electronWindow.setModeSize({
+      ...defaultSize,
+      minWidth: minSize.width,
+      minHeight: minSize.height,
+    });
+  };
+
   const renderTopButton = (size = 34) => (
     <button
       type="button"
@@ -1515,7 +1549,7 @@ export default function PrinterWidget({
           background: 'linear-gradient(180deg, rgba(8,12,19,0.98), rgba(3,7,13,0.98))',
           border: '1px solid rgba(255,255,255,0.1)',
           boxShadow: '0 28px 80px rgba(0,0,0,0.58)',
-          ...dragRegionStyle(isLocked),
+          ...noDragRegionStyle(),
         }}
       >
         <div
@@ -1525,7 +1559,7 @@ export default function PrinterWidget({
             alignItems: 'center',
             justifyContent: 'space-between',
             gap: 12,
-            ...dragRegionStyle(isLocked),
+            ...noDragRegionStyle(),
           }}
         >
           <div style={{ minWidth: 0 }}>
@@ -1602,7 +1636,7 @@ export default function PrinterWidget({
 
   const renderCameraView = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minHeight: 390 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 }}>
+      <div className="legacy-camera-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 800, color: '#f7fbff' }}>
             <Camera size={17} />
@@ -1776,30 +1810,49 @@ export default function PrinterWidget({
     </div>
   );
 
+  const shellMode = cameraOpen ? 'full' : viewMode;
+  const identityCopy = printers.length > 0
+    ? `${onlineCount}/${printers.length} 台在线${reconnectingCount > 0 ? ` · ${reconnectingCount} 台重连中` : ''}`
+    : '正在同步设备';
+
   return (
-    <div
-      ref={widgetRef}
-      style={{
+    <MonitorShell
+      mode={shellMode}
+      activeTab={cameraOpen ? 'cameras' : 'devices'}
+      identityCopy={identityCopy}
+      syncCopy={deviceSyncCopy}
+      isAlwaysOnTop={isAlwaysOnTop}
+      isLocked={isLocked}
+      onTabChange={changeWorkspaceTab}
+      onRefresh={() => onRefreshDevices?.()}
+      onToggleTop={toggleAlwaysOnTop}
+      onOpenSettings={() => setSettingsOpen(true)}
+      onChangeMode={changeViewMode}
+      onToggleLock={toggleMousePassthrough}
+      onResetSize={resetCurrentWindowSize}
+      onQuit={() => electronWindow.quit()}
+    >
+      <div
+        ref={widgetRef}
+        className="monitor-legacy-surface"
+        style={{
         position: 'relative',
-        width: miniAutoSize ? 'fit-content' : `min(${panelWidth}px, 100vw)`,
-        minWidth: miniAutoSize ? 0 : (isCompact ? 360 : 220),
-        minHeight: settingsOpen
-          ? 'min(640px, 100vh)'
-          : (cameraOpen
-              ? `min(${cameraZoomKey ? 640 : 420}px, 100vh)`
-              : (ipDialog ? 'min(240px, 100vh)' : undefined)),
-        maxHeight: miniAutoSize ? undefined : '100vh',
+        width: '100%',
+        height: '100%',
+        minWidth: 0,
+        minHeight: 0,
+        maxHeight: '100%',
         padding: isMini ? '9px 10px' : (isCompact ? '12px 14px' : '18px 18px 14px'),
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
         borderRadius: 0,
-        background: 'linear-gradient(90deg, rgba(126,240,196,0.14) 0 5px, transparent 5px), linear-gradient(160deg, rgba(18,22,29,0.98) 0%, rgba(13,17,24,0.97) 48%, rgba(8,10,16,0.99) 100%)',
-        boxShadow: '0 22px 54px rgba(0,0,0,0.46), inset 0 1px 0 rgba(255,255,255,0.08), inset 0 0 0 1px rgba(255,255,255,0.06)',
+        background: 'transparent',
+        boxShadow: 'none',
         color: '#fff',
-        cursor: isLocked ? 'default' : 'move',
-        WebkitAppRegion: isLocked ? 'no-drag' : 'drag',
-        overflow: cameraOpen || settingsOpen || ipDialog || isFullPanel ? 'hidden' : 'visible',
+        cursor: 'default',
+        WebkitAppRegion: 'no-drag',
+        overflow: settingsOpen || ipDialog || isFullPanel ? 'hidden' : 'auto',
       }}
     >
       {cameraOpen ? renderCameraView() : isMini ? (
@@ -1808,7 +1861,7 @@ export default function PrinterWidget({
             <div
               title="拖动窗口"
               style={{
-                WebkitAppRegion: isLocked ? 'no-drag' : 'drag',
+                WebkitAppRegion: 'no-drag',
                 width: 38,
                 height: 24,
                 display: 'inline-flex',
@@ -1948,7 +2001,7 @@ export default function PrinterWidget({
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0, flex: '1 1 auto', overflow: 'hidden' }}>
           <div style={{ display: 'grid', gap: 12, flex: '0 0 auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 }}>
+            <div className="legacy-full-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 }}>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 10, lineHeight: 1.2, letterSpacing: 0, textTransform: 'uppercase', color: 'rgba(202,213,228,0.58)', marginBottom: 7, fontWeight: 800 }}>
                   Bambu Monitor
@@ -2115,7 +2168,7 @@ export default function PrinterWidget({
             </div>
           )}
 
-          <div style={{ flex: '0 0 auto', textAlign: 'center', color: 'rgba(203,217,239,0.48)', fontSize: 10 }}>
+          <div className="legacy-monitor-hint" style={{ flex: '0 0 auto', textAlign: 'center', color: 'rgba(203,217,239,0.48)', fontSize: 10 }}>
             Ctrl+Shift+L 切换穿透 · {isLocked ? '当前已锁定鼠标穿透' : '可拖拽移动窗口'}
           </div>
         </div>
@@ -2370,6 +2423,7 @@ export default function PrinterWidget({
           </form>
         </div>
       ) : null}
-    </div>
+      </div>
+    </MonitorShell>
   );
 }
