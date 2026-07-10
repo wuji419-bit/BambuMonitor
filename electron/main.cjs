@@ -12,7 +12,11 @@ const {
   writeAuthSession,
 } = require('./auth-session.cjs');
 const { buildMqttConnectionOptions, extractBambuUsername } = require('./mqtt-options.cjs');
-const { clampWindowSize, getMainWindowOptions } = require('./window-bounds.cjs');
+const {
+  clampWindowSize,
+  getMainWindowOptions,
+  withCurrentWindowSize,
+} = require('./window-bounds.cjs');
 const {
   ChamberImageStream,
   buildBambuRtspUrl,
@@ -39,6 +43,7 @@ let isMouseLocked = false;
 let isAlwaysOnTop = true;
 let windowOpacity = 1;
 let windowBoundsTimer = null;
+let pendingWindowBounds = null;
 const OPACITY_PRESETS = [1, 0.95, 0.9, 0.85, 0.8];
 
 const mqttConnections = new Map();
@@ -62,18 +67,56 @@ function clearWindowBoundsTimer() {
   windowBoundsTimer = null;
 }
 
+function clearWindowBoundsState() {
+  clearWindowBoundsTimer();
+  pendingWindowBounds = null;
+}
+
+function getWindowContentBounds(win) {
+  if (!win || win.isDestroyed()) return null;
+  try {
+    const [width, height] = win.getContentSize();
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) return null;
+    if (width <= 0 || height <= 0) return null;
+    return { width, height };
+  } catch {
+    return null;
+  }
+}
+
+function sendWindowBoundsChanged(win, bounds) {
+  if (!bounds || !win || win.isDestroyed()) return false;
+  try {
+    const webContents = win.webContents;
+    if (!webContents || webContents.isDestroyed()) return false;
+    webContents.send('window-bounds-changed', bounds);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function scheduleWindowBoundsChanged(win) {
+  const bounds = getWindowContentBounds(win);
+  if (!bounds) return;
+
+  pendingWindowBounds = bounds;
   clearWindowBoundsTimer();
   windowBoundsTimer = setTimeout(() => {
     windowBoundsTimer = null;
-    if (!win || win.isDestroyed()) return;
-
-    const webContents = win.webContents;
-    if (!webContents || webContents.isDestroyed()) return;
-
-    const [width, height] = win.getContentSize();
-    webContents.send('window-bounds-changed', { width, height });
+    const boundsToSend = pendingWindowBounds;
+    pendingWindowBounds = null;
+    sendWindowBoundsChanged(win, boundsToSend);
   }, 120);
+}
+
+function flushWindowBoundsChanged(win) {
+  if (!windowBoundsTimer || !pendingWindowBounds) return;
+
+  const bounds = getWindowContentBounds(win) || pendingWindowBounds;
+  sendWindowBoundsChanged(win, bounds);
+  clearWindowBoundsTimer();
+  pendingWindowBounds = null;
 }
 
 function clearMqttDisconnectTimer(entry) {
@@ -697,12 +740,19 @@ function createWindow() {
   });
 
   const windowForBoundsEvents = mainWindow;
-  mainWindow.on('resize', () => {
+  const handleWindowResize = () => {
     scheduleWindowBoundsChanged(windowForBoundsEvents);
-  });
+  };
+  const handleWindowClose = () => {
+    flushWindowBoundsChanged(windowForBoundsEvents);
+  };
+  mainWindow.on('resize', handleWindowResize);
+  mainWindow.on('close', handleWindowClose);
 
-  mainWindow.on('closed', () => {
-    clearWindowBoundsTimer();
+  mainWindow.once('closed', () => {
+    windowForBoundsEvents.removeListener('resize', handleWindowResize);
+    windowForBoundsEvents.removeListener('close', handleWindowClose);
+    clearWindowBoundsState();
     if (mainWindow === windowForBoundsEvents) {
       mainWindow = null;
     }
@@ -748,7 +798,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
-  clearWindowBoundsTimer();
+  clearWindowBoundsState();
   globalShortcut.unregisterAll();
   safelyCloseSocket(global.listenSocket);
   safelyCloseSocket(global.searchSocket);
@@ -786,12 +836,19 @@ ipcMain.on('resize-me', (event, bounds) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed()) return;
 
-  const display = screen.getDisplayMatching(win.getBounds());
-  const workArea = display?.workAreaSize || screen.getPrimaryDisplay().workAreaSize;
-  const { width, height, minWidth, minHeight } = clampWindowSize(bounds, workArea);
+  try {
+    const currentSize = win.getContentSize();
+    const display = screen.getDisplayMatching(win.getBounds());
+    const workArea = display?.workAreaSize || screen.getPrimaryDisplay().workAreaSize;
+    const resizeBounds = withCurrentWindowSize(bounds, currentSize);
+    const { width, height, minWidth, minHeight } = clampWindowSize(resizeBounds, workArea);
 
-  win.setMinimumSize(minWidth, minHeight);
-  win.setContentSize(width, height, true);
+    win.setMinimumSize(minWidth, minHeight);
+    win.setContentSize(width, height, true);
+  } catch (error) {
+    console.warn('Unable to apply window bounds:', error?.message || error);
+    return;
+  }
   if (isAlwaysOnTop) {
     bringWindowToFront({ focus: false });
   }

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   clampWindowSize,
   getMainWindowOptions,
+  withCurrentWindowSize,
 } = require('./window-bounds.cjs');
 const packageJson = require('../package.json');
 
@@ -74,6 +75,42 @@ test('uses custom minimums, hard floors, and rounded requested dimensions', () =
   );
 });
 
+test('ceils fractional minimums before clamping rounded dimensions', () => {
+  const result = clampWindowSize(
+    { width: 320.1, height: 260.1, minWidth: 320.2, minHeight: 260.8 },
+    { width: 1000, height: 800 },
+  );
+
+  assert.deepEqual(result, {
+    width: 321,
+    height: 261,
+    minWidth: 321,
+    minHeight: 261,
+  });
+  assert.ok(result.width >= result.minWidth);
+  assert.ok(result.height >= result.minHeight);
+});
+
+test('caps unsafe and huge renderer dimensions to safe work area integers', () => {
+  const result = clampWindowSize(
+    {
+      width: Number.MAX_VALUE,
+      height: Number.MAX_SAFE_INTEGER + 1,
+      minWidth: Number.MAX_VALUE,
+      minHeight: Number.MAX_SAFE_INTEGER + 1,
+    },
+    { width: 1920, height: 1080 },
+  );
+
+  assert.deepEqual(result, {
+    width: 1896,
+    height: 1056,
+    minWidth: 1896,
+    minHeight: 1056,
+  });
+  assert.ok(Object.values(result).every(Number.isSafeInteger));
+});
+
 test('falls back safely for malformed bounds and work areas', () => {
   const result = clampWindowSize(
     {
@@ -97,12 +134,46 @@ test('falls back safely for malformed bounds and work areas', () => {
   assert.ok(Object.values(result).every(Number.isFinite));
 });
 
-test('never lowers maximum dimensions below the requested minimums', () => {
+test('treats unsafe work area dimensions as malformed', () => {
+  assert.deepEqual(
+    clampWindowSize(
+      { width: Number.MAX_VALUE, height: Number.MAX_VALUE },
+      { width: Number.MAX_VALUE, height: Number.MAX_SAFE_INTEGER + 1 },
+    ),
+    { width: 320, height: 300, minWidth: 320, minHeight: 300 },
+  );
+});
+
+test('caps minimums to small work areas without crossing absolute floors', () => {
   assert.deepEqual(
     clampWindowSize(
       { width: 900, height: 700, minWidth: 400, minHeight: 320 },
       { width: 300, height: 200 },
     ),
-    { width: 400, height: 320, minWidth: 400, minHeight: 320 },
+    { width: 276, height: 176, minWidth: 276, minHeight: 176 },
+  );
+  assert.deepEqual(
+    clampWindowSize(
+      { width: 900, height: 700, minWidth: 400, minHeight: 320 },
+      { width: 80, height: 40 },
+    ),
+    { width: 96, height: 56, minWidth: 96, minHeight: 56 },
+  );
+});
+
+test('fills only omitted resize axes from the current content size', () => {
+  assert.deepEqual(
+    clampWindowSize(
+      withCurrentWindowSize(
+        { height: 700, minWidth: 320, minHeight: 300 },
+        [640, 480],
+      ),
+      { width: 1920, height: 1080 },
+    ),
+    { width: 640, height: 700, minWidth: 320, minHeight: 300 },
+  );
+  assert.deepEqual(
+    withCurrentWindowSize({ width: 'invalid' }, [640, 480]),
+    { width: 'invalid', height: 480 },
   );
 });
