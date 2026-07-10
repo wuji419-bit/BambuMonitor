@@ -12,6 +12,7 @@ const {
   writeAuthSession,
 } = require('./auth-session.cjs');
 const { buildMqttConnectionOptions, extractBambuUsername } = require('./mqtt-options.cjs');
+const { clampWindowSize, getMainWindowOptions } = require('./window-bounds.cjs');
 const {
   ChamberImageStream,
   buildBambuRtspUrl,
@@ -37,6 +38,7 @@ let tray = null;
 let isMouseLocked = false;
 let isAlwaysOnTop = true;
 let windowOpacity = 1;
+let windowBoundsTimer = null;
 const OPACITY_PRESETS = [1, 0.95, 0.9, 0.85, 0.8];
 
 const mqttConnections = new Map();
@@ -52,6 +54,26 @@ function sendRendererEvent(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+function clearWindowBoundsTimer() {
+  if (!windowBoundsTimer) return;
+  clearTimeout(windowBoundsTimer);
+  windowBoundsTimer = null;
+}
+
+function scheduleWindowBoundsChanged(win) {
+  clearWindowBoundsTimer();
+  windowBoundsTimer = setTimeout(() => {
+    windowBoundsTimer = null;
+    if (!win || win.isDestroyed()) return;
+
+    const webContents = win.webContents;
+    if (!webContents || webContents.isDestroyed()) return;
+
+    const [width, height] = win.getContentSize();
+    webContents.send('window-bounds-changed', { width, height });
+  }, 120);
 }
 
 function clearMqttDisconnectTimer(entry) {
@@ -626,19 +648,13 @@ function createWindow() {
   const isDev = !app.isPackaged;
 
   mainWindow = new BrowserWindow({
-    width: 400,
-    height: 580,
-    x: Math.round(width / 2 - 200),
-    y: Math.round(height / 2 - 290),
-    frame: false,
-    transparent: true,
-    hasShadow: false,
+    ...getMainWindowOptions({
+      width: 400,
+      height: 580,
+      x: Math.round(width / 2 - 200),
+      y: Math.round(height / 2 - 290),
+    }),
     alwaysOnTop: isAlwaysOnTop,
-    resizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    autoHideMenuBar: true,
-    useContentSize: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
@@ -680,8 +696,16 @@ function createWindow() {
     setMouseLock(false);
   });
 
+  const windowForBoundsEvents = mainWindow;
+  mainWindow.on('resize', () => {
+    scheduleWindowBoundsChanged(windowForBoundsEvents);
+  });
+
   mainWindow.on('closed', () => {
-    mainWindow = null;
+    clearWindowBoundsTimer();
+    if (mainWindow === windowForBoundsEvents) {
+      mainWindow = null;
+    }
   });
 
   if (!tray) {
@@ -724,6 +748,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  clearWindowBoundsTimer();
   globalShortcut.unregisterAll();
   safelyCloseSocket(global.listenSocket);
   safelyCloseSocket(global.searchSocket);
@@ -759,19 +784,14 @@ ipcMain.on('set-window-opacity', (_event, opacity) => {
 
 ipcMain.on('resize-me', (event, bounds) => {
   const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) return;
+  if (!win || win.isDestroyed()) return;
 
-  const currentSize = win.getContentSize();
   const display = screen.getDisplayMatching(win.getBounds());
   const workArea = display?.workAreaSize || screen.getPrimaryDisplay().workAreaSize;
-  const minWidth = Math.max(96, Number(bounds.minWidth) || 1);
-  const minHeight = Math.max(56, Number(bounds.minHeight) || 1);
-  const maxWidth = Math.max(minWidth, workArea.width - 24);
-  const maxHeight = Math.max(minHeight, workArea.height - 24);
-  const newHeight = Math.min(maxHeight, Math.max(minHeight, Number(bounds.height) || currentSize[1]));
-  const newWidth = Math.min(maxWidth, Math.max(minWidth, Number(bounds.width) || currentSize[0]));
+  const { width, height, minWidth, minHeight } = clampWindowSize(bounds, workArea);
 
-  win.setContentSize(newWidth, newHeight, true);
+  win.setMinimumSize(minWidth, minHeight);
+  win.setContentSize(width, height, true);
   if (isAlwaysOnTop) {
     bringWindowToFront({ focus: false });
   }

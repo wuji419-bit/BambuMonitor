@@ -99,6 +99,9 @@ export const electronWindow = {
   resize(bounds) {
     getElectronApi()?.window.resize(bounds);
   },
+  setModeSize(bounds) {
+    getElectronApi()?.window.setModeSize(bounds);
+  },
   setIgnoreMouseEvents(ignore) {
     getElectronApi()?.window.setIgnoreMouseEvents(ignore);
   },
@@ -122,6 +125,9 @@ export const electronEvents = {
   },
   onWindowOpacityChanged(callback) {
     return getElectronApi()?.events.onWindowOpacityChanged(callback) || noOp;
+  },
+  onWindowBoundsChanged(callback) {
+    return getElectronApi()?.events.onWindowBoundsChanged(callback) || noOp;
   },
   onMqttData(callback) {
     return getElectronApi()?.events.onMqttData(callback) || noOp;
