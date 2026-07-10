@@ -1,9 +1,11 @@
 import { GripVertical, Maximize2, Pin, PinOff } from 'lucide-react';
+import { getPrinterJobStatus } from '../../utils/printerPresentation';
 
 export default function MiniMonitor({ finishedPrinters, activePrinter, presentation, isAlwaysOnTop, onToggleTop, onReturnFull }) {
   const { infoLine, progressPalette, safeProgress, statusText } = presentation;
   const progress = activePrinter ? safeProgress(activePrinter.progress) : 0;
-  const palette = progressPalette(activePrinter?.status || 'idle');
+  const resolvedStatus = activePrinter ? getPrinterJobStatus(activePrinter) : 'idle';
+  const palette = progressPalette(resolvedStatus || 'idle');
   const meta = activePrinter ? infoLine(activePrinter) : null;
   const fallback = finishedPrinters.length > 0 ? `${finishedPrinters.length} 台已完成` : '暂无活动任务';
   const progressCopy = activePrinter && Number.isFinite(Number(activePrinter.progress)) ? `${progress}%${activePrinter.timeLeft && activePrinter.timeLeft !== '--' ? ` · ${activePrinter.timeLeft}` : ''}` : (meta?.right || '空闲');

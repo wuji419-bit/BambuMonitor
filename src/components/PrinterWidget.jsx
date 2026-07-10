@@ -631,7 +631,9 @@ export default function PrinterWidget({
   const reconnectingCount = summary.reconnecting;
   const cloudOverviewCount = displayPrinters.filter((printer) => isCloudOverview(printer)).length;
   const finishedPrinters = displayPrinters.filter((printer) => isFinishedPrinter(printer));
-  const activeMiniPrinters = displayPrinters.filter((printer) => !isFinishedPrinter(printer));
+  const activeMiniPrinters = displayPrinters.filter((printer) => (
+    ['printing', 'drying', 'preparing'].includes(getPrinterJobStatus(printer))
+  ));
   const rotatingMiniPrinter = activeMiniPrinters.length > 0
     ? activeMiniPrinters[miniActiveIndex % activeMiniPrinters.length]
     : null;

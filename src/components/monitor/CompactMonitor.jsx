@@ -29,12 +29,15 @@ export default function CompactMonitor({ printers, summary, presentation, render
         const hasAms = Boolean(ams.text || ams.trays.length);
         const detailsId = `compact-ams-${id.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
         const palette = progressPalette(status);
+        const progressKnown = printer.progress !== null && printer.progress !== '' && Number.isFinite(Number(printer.progress));
+        const progressProps = progressKnown ? { 'aria-valuenow': progress } : { 'aria-valuetext': `${statusText(printer)}，进度未知` };
         return <article className="compact-row" key={id} data-connection={getPrinterConnectionState(printer)}>
-          <div className="compact-row__head"><div className="compact-row__identity"><strong title={printer.name}>{printer.name || '未命名打印机'}</strong><span>{printer.model || printer.modelCode || '机型未知'} · {connectionCopy(printer)}</span></div><span className="compact-row__action">{renderAction(printer, true)}</span></div>
-          <div className="compact-row__task"><span title={meta.left}>{meta.left}</span><strong>{Number.isFinite(Number(printer.progress)) ? `${progress}%` : statusText(printer)}</strong></div>
-          <div className="compact-progress" role="progressbar" aria-label="打印进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow={progress} style={{ '--progress': `${progress}%`, '--progress-fill': palette.fill }}><span /></div>
-          <div className="compact-row__facts"><span title={meta.right}>{meta.right}</span><span>{temperatureText(printer)}</span></div>
-          {hasAms ? <button className="compact-ams-toggle" type="button" aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpandedPrinterId(expanded ? '' : id)}>{expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}<span>AMS</span></button> : null}
+          <div className="compact-row__main">
+            <div className="compact-row__identity"><strong title={printer.name}>{printer.name || '未命名打印机'}</strong><span title={`${printer.model || printer.modelCode || '机型未知'} · ${connectionCopy(printer)} · ${meta.left}`}>{printer.model || printer.modelCode || '机型未知'} · {connectionCopy(printer)} · {meta.left}</span></div>
+            <div className="compact-row__progress"><strong>{progressKnown ? `${progress}%` : statusText(printer)}</strong><span title={printer.timeLeft && printer.timeLeft !== '--' ? `剩余 ${printer.timeLeft}` : meta.right}>{printer.timeLeft && printer.timeLeft !== '--' ? printer.timeLeft : meta.right}</span><div className="compact-progress" role="progressbar" aria-label="打印进度" aria-valuemin="0" aria-valuemax="100" {...progressProps} style={{ '--progress': `${progress}%`, '--progress-fill': palette.fill }}><span /></div></div>
+            <div className="compact-row__telemetry"><span title={meta.right}>{meta.right}</span><span title={temperatureText(printer)}>{temperatureText(printer)}</span></div>
+            <div className="compact-row__controls"><span className="compact-row__action">{renderAction(printer, true)}</span>{hasAms ? <button className="compact-ams-toggle" type="button" aria-label={`${printer.name || '打印机'} AMS 详情`} aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpandedPrinterId(expanded ? '' : id)}>{expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button> : null}</div>
+          </div>
           {expanded && hasAms ? <div className="compact-ams-details" id={detailsId}>{ams.text ? <span title={ams.text}>{ams.text}</span> : null}<div className="compact-trays">{ams.trays.slice(0, 8).map((tray) => <i key={tray.slotId} title={`${tray.remain ?? '--'}%`} style={{ background: tray.color }} />)}</div></div> : null}
         </article>;
       })}
