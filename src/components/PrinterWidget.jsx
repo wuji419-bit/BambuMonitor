@@ -4,6 +4,8 @@ import MonitorShell from './monitor/MonitorShell';
 import DeviceWorkspace from './monitor/DeviceWorkspace';
 import CompactMonitor from './monitor/CompactMonitor';
 import MiniMonitor from './monitor/MiniMonitor';
+import CameraWorkspace from './monitor/CameraWorkspace';
+import CameraZoom from './monitor/CameraZoom';
 import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
 import {
   cameraCompatibilityNote,
@@ -1356,6 +1358,17 @@ export default function PrinterWidget({
 
     if (!zoomState.canZoom) return null;
 
+    if (zoomState) return (
+      <CameraZoom
+        zoomState={zoomState}
+        imageKey={cameraZoomKey}
+        imageState={cameraImageStates[cameraZoomKey]}
+        cameraConfig={cameraConfig}
+        onClose={() => setCameraZoomKey('')}
+        onImageStateChange={setCameraImageStates}
+      />
+    );
+
     return (
       <div
         role="presentation"
@@ -1457,7 +1470,7 @@ export default function PrinterWidget({
     );
   };
 
-  const renderCameraView = () => (
+  const renderLegacyCameraView = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minHeight: 390 }}>
       <div className="legacy-camera-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 }}>
         <div style={{ minWidth: 0 }}>
@@ -1629,6 +1642,24 @@ export default function PrinterWidget({
           })}
         </div>
       )}
+      {renderZoomOverlay()}
+    </div>
+  );
+
+  void renderLegacyCameraView;
+
+  const renderCameraView = () => (
+    <div className="camera-workspace">
+      {cameraFeedback ? <div className="camera-feedback" role="status">{cameraFeedback}</div> : null}
+      <CameraWorkspace
+        printers={displayPrinters}
+        streams={cameraStreams}
+        imageStates={cameraImageStates}
+        cameraConfig={cameraConfig}
+        onRetry={retryCamera}
+        onZoom={setCameraZoomKey}
+        onImageStateChange={setCameraImageStates}
+      />
       {renderZoomOverlay()}
     </div>
   );
