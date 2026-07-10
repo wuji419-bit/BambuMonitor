@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Copy, Lock, Maximize2, Minimize2, Pin, PinOff, RefreshCw, Rows3, Send, Settings } from 'lucide-react';
+import { Camera, Copy, Lock, RefreshCw, Send, Settings } from 'lucide-react';
 import MonitorShell from './monitor/MonitorShell';
 import DeviceWorkspace from './monitor/DeviceWorkspace';
 import CompactMonitor from './monitor/CompactMonitor';
@@ -8,7 +8,6 @@ import CameraWorkspace from './monitor/CameraWorkspace';
 import CameraZoom from './monitor/CameraZoom';
 import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
 import {
-  cameraCompatibilityNote,
   createDefaultCameraConfig,
   getCameraTransport,
   getCameraConfig,
@@ -17,11 +16,9 @@ import {
   isAutoCameraSupported,
   saveCameraConfig,
 } from '../services/camera';
-import { buildCameraFrameUrl } from '../utils/cameraFrame';
 import { buildCameraZoomState } from '../utils/cameraZoom';
 import { mapWithConcurrency } from '../utils/asyncPool';
 import { hasCloudStatus, shouldPromptForPrinterIp } from '../utils/printerIpPrompt';
-import { noDragRegionStyle } from '../utils/windowDragRegions';
 import {
   getWindowModeConfig,
   normalizeSavedWindowSize,
@@ -402,139 +399,6 @@ function ProgressBar({ progress, status = 'idle', compact = false }) {
         ) : null}
       </div>
     </div>
-  );
-}
-
-async function decodeCameraFrame(blob) {
-  if (typeof createImageBitmap === 'function') {
-    return createImageBitmap(blob);
-  }
-
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(blob);
-    const image = new Image();
-    image.onload = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(image);
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error('camera frame decode failed'));
-    };
-    image.src = objectUrl;
-  });
-}
-
-function drawCameraFrame(canvas, image) {
-  const context = canvas.getContext('2d');
-  if (!context) return;
-
-  const rect = canvas.getBoundingClientRect();
-  const pixelRatio = window.devicePixelRatio || 1;
-  const width = Math.max(1, Math.round((canvas.clientWidth || rect.width || 320) * pixelRatio));
-  const height = Math.max(1, Math.round((canvas.clientHeight || rect.height || 200) * pixelRatio));
-
-  if (canvas.width !== width || canvas.height !== height) {
-    canvas.width = width;
-    canvas.height = height;
-  }
-
-  const sourceWidth = image.width || image.naturalWidth || width;
-  const sourceHeight = image.height || image.naturalHeight || height;
-  const scale = Math.max(width / sourceWidth, height / sourceHeight);
-  const drawWidth = sourceWidth * scale;
-  const drawHeight = sourceHeight * scale;
-  const drawX = (width - drawWidth) / 2;
-  const drawY = (height - drawHeight) / 2;
-
-  context.clearRect(0, 0, width, height);
-  context.drawImage(image, drawX, drawY, drawWidth, drawHeight);
-}
-
-function ChamberSnapshotCanvas({ snapshotUrl, imageKey, alt, isReady, setCameraImageStates }) {
-  const canvasRef = useRef(null);
-
-  useEffect(() => {
-    if (!snapshotUrl || !imageKey) return undefined;
-
-    let stopped = false;
-    let frame = 0;
-    let timer = 0;
-    let activeController = null;
-
-    const markReady = () => {
-      setCameraImageStates((prev) => {
-        if (prev[imageKey]?.status === 'ready') return prev;
-        return {
-          ...prev,
-          [imageKey]: { status: 'ready' },
-        };
-      });
-    };
-
-    const markWaiting = () => {
-      setCameraImageStates((prev) => {
-        if (prev[imageKey]?.status === 'ready') return prev;
-        return {
-          ...prev,
-          [imageKey]: {
-            status: 'loading',
-            message: '正在等待摄像头画面...',
-          },
-        };
-      });
-    };
-
-    const paintNextFrame = async () => {
-      activeController = new AbortController();
-      const requestUrl = buildCameraFrameUrl(snapshotUrl, frame += 1);
-
-      try {
-        const response = await fetch(requestUrl, {
-          cache: 'no-store',
-          headers: { accept: 'image/jpeg' },
-          signal: activeController.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(`camera frame request failed: ${response.status}`);
-        }
-
-        const blob = await response.blob();
-        const image = await decodeCameraFrame(blob);
-
-        if (!stopped && canvasRef.current) {
-          drawCameraFrame(canvasRef.current, image);
-          markReady();
-        }
-
-        if (typeof image.close === 'function') image.close();
-      } catch (error) {
-        if (!stopped && error?.name !== 'AbortError') {
-          markWaiting();
-        }
-      } finally {
-        activeController = null;
-        if (!stopped) timer = window.setTimeout(paintNextFrame, 700);
-      }
-    };
-
-    paintNextFrame();
-
-    return () => {
-      stopped = true;
-      window.clearTimeout(timer);
-      if (activeController) activeController.abort();
-    };
-  }, [imageKey, setCameraImageStates, snapshotUrl]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      role="img"
-      aria-label={alt}
-      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', opacity: isReady ? 1 : 0.35, transition: 'opacity 0.2s ease' }}
-    />
   );
 }
 
@@ -1249,44 +1113,6 @@ export default function PrinterWidget({
     });
   };
 
-  const renderTopButton = (size = 34) => (
-    <button
-      type="button"
-      onClick={toggleAlwaysOnTop}
-      title={isAlwaysOnTop ? '取消置顶' : '窗口置顶'}
-      style={{
-        ...interactive,
-        width: size,
-        height: size,
-        borderRadius: size <= 28 ? 8 : (size <= 30 ? 10 : 11),
-        color: isAlwaysOnTop ? '#8df0c0' : 'rgba(246,250,255,0.88)',
-        background: isAlwaysOnTop ? 'rgba(86,226,168,0.15)' : 'rgba(255,255,255,0.08)',
-        border: isAlwaysOnTop ? '1px solid rgba(86,226,168,0.26)' : '1px solid rgba(255,255,255,0.1)',
-      }}
-    >
-      {isAlwaysOnTop ? <PinOff size={size <= 24 ? 12 : (size <= 30 ? 13 : 15)} /> : <Pin size={size <= 24 ? 12 : (size <= 30 ? 13 : 15)} />}
-    </button>
-  );
-
-  const renderSettingsButton = (size = 34) => (
-    <button
-      type="button"
-      onClick={() => setSettingsOpen(true)}
-      title="设置"
-      style={{
-        ...interactive,
-        width: size,
-        height: size,
-        borderRadius: size <= 28 ? 8 : (size <= 30 ? 10 : 11),
-        color: notificationConfig.enabled ? '#8df0c0' : 'rgba(246,250,255,0.88)',
-        background: notificationConfig.enabled ? 'rgba(86,226,168,0.14)' : 'rgba(255,255,255,0.08)',
-        border: notificationConfig.enabled ? '1px solid rgba(86,226,168,0.24)' : '1px solid rgba(255,255,255,0.1)',
-      }}
-    >
-      <Settings size={size <= 24 ? 12 : (size <= 30 ? 14 : 16)} />
-    </button>
-  );
-
   const renderOpacityControl = () => (
     <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 10, alignItems: 'center', padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.07)' }}>
       <div style={{ fontSize: 12, color: 'rgba(203,217,239,0.72)', fontWeight: 700 }}>窗口透明度</div>
@@ -1345,325 +1171,19 @@ export default function PrinterWidget({
     return <StatusBadge printer={printer} compact={compact} />;
   };
 
-  const renderZoomOverlay = () => {
-    if (!cameraZoomKey) return null;
-
-    const zoomPrinter = printers.find((printer) => getPrinterCameraKey(printer) === cameraZoomKey);
-    const zoomState = buildCameraZoomState({
-      key: cameraZoomKey,
-      printer: zoomPrinter,
-      stream: cameraStreams[cameraZoomKey],
-      imageState: cameraImageStates[cameraZoomKey],
-    });
-
-    if (!zoomState.canZoom) return null;
-
-    if (zoomState) return (
-      <CameraZoom
-        zoomState={zoomState}
-        imageKey={cameraZoomKey}
-        imageState={cameraImageStates[cameraZoomKey]}
-        cameraConfig={cameraConfig}
-        onClose={() => setCameraZoomKey('')}
-        onImageStateChange={setCameraImageStates}
-      />
-    );
-
-    return (
-      <div
-        role="presentation"
-        onClick={() => setCameraZoomKey('')}
-        style={{
-          position: 'absolute',
-          inset: 12,
-          zIndex: 40,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 12,
-          padding: 14,
-          borderRadius: 8,
-          background: 'linear-gradient(180deg, rgba(8,12,19,0.98), rgba(3,7,13,0.98))',
-          border: '1px solid rgba(255,255,255,0.1)',
-          boxShadow: '0 28px 80px rgba(0,0,0,0.58)',
-          ...noDragRegionStyle(),
-        }}
-      >
-        <div
-          className="legacy-window-drag-region legacy-zoom-drag-region"
-          onClick={(event) => event.stopPropagation()}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-          }}
-        >
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 15, fontWeight: 850, color: '#f7fbff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {zoomState.title}
-            </div>
-            <div style={{ marginTop: 4, fontSize: 11, color: 'rgba(203,217,239,0.62)' }}>
-              {zoomState.ip ? `IP ${zoomState.ip}` : '实时摄像头预览'}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              setCameraZoomKey('');
-            }}
-            title="关闭放大预览"
-            style={{ ...interactive, width: 36, height: 36, borderRadius: 10, color: 'rgba(246,250,255,0.9)', background: 'rgba(255,255,255,0.09)', border: '1px solid rgba(255,255,255,0.12)' }}
-          >
-            <Minimize2 size={17} />
-          </button>
-        </div>
-
-        <div
-          onClick={(event) => event.stopPropagation()}
-          style={{
-            flex: 1,
-            minHeight: 0,
-            borderRadius: 8,
-            overflow: 'hidden',
-            background: 'rgba(3,8,16,0.82)',
-            border: '1px solid rgba(255,255,255,0.08)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            position: 'relative',
-            ...noDragRegionStyle(),
-          }}
-        >
-          {zoomState.isSnapshotStream ? (
-            <ChamberSnapshotCanvas
-              snapshotUrl={zoomState.imageUrl}
-              imageKey={cameraZoomKey}
-              alt={`${zoomState.title} 摄像头放大预览`}
-              isReady={zoomState.isReady}
-              setCameraImageStates={setCameraImageStates}
-            />
-          ) : (
-            <img
-              src={zoomState.imageUrl}
-              alt={`${zoomState.title} 摄像头放大预览`}
-              onLoad={() => {
-                setCameraImageStates((prev) => ({
-                  ...prev,
-                  [cameraZoomKey]: { status: 'ready' },
-                }));
-              }}
-              onError={() => {
-                setCameraImageStates((prev) => ({
-                  ...prev,
-                  [cameraZoomKey]: {
-                    status: 'error',
-                    message: '摄像头暂时无法打开',
-                  },
-                }));
-              }}
-              style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
-            />
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  const renderLegacyCameraView = () => (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minHeight: 390 }}>
-      <div className="legacy-camera-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 800, color: '#f7fbff' }}>
-            <Camera size={17} />
-            摄像头墙
-          </div>
-          <div style={{ marginTop: 5, fontSize: 11, color: 'rgba(203,217,239,0.62)', lineHeight: 1.5 }}>
-            H2D/X1/P2S 走 RTSPS；A1/P1/A2 会自动尝试 6000 端口 JPEG 流，统一转成浏览器可显示的 MJPEG。
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: 8, WebkitAppRegion: 'no-drag' }}>
-          <button type="button" onClick={() => changeWorkspaceTab('devices')} title="返回监控面板" style={{ ...interactive, width: 34, height: 34, borderRadius: 10, color: 'rgba(246,250,255,0.88)', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}>
-            <Rows3 size={16} />
-          </button>
-          {renderSettingsButton(34)}
-          {renderTopButton(34)}
-        </div>
-      </div>
-
-      {cameraFeedback ? (
-        <div style={{ padding: '9px 11px', borderRadius: 8, background: 'rgba(255,183,77,0.12)', border: '1px solid rgba(255,183,77,0.18)', color: '#ffdca2', fontSize: 12, lineHeight: 1.5 }}>
-          {cameraFeedback}
-        </div>
-      ) : null}
-
-      {printers.length === 0 ? (
-        <div style={{ padding: '24px 18px', textAlign: 'center', color: 'rgba(225,234,248,0.68)', fontSize: 13, background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
-          正在等待打印机列表...
-        </div>
-      ) : (
-        <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gridAutoRows: 'max-content', alignContent: 'start', gap: 12, overflowY: 'auto', paddingRight: 2 }}>
-          {displayPrinters.map((printer) => {
-            const key = getPrinterCameraKey(printer);
-            const stream = cameraStreams[key];
-            const customUrl = getCustomCameraUrl(cameraConfig, printer);
-            const note = cameraCompatibilityNote(printer);
-            const imageState = cameraImageStates[key];
-            const zoomState = buildCameraZoomState({ key, printer, stream, imageState });
-            const isSnapshotStream = zoomState.isSnapshotStream;
-            const imageUrl = zoomState.imageUrl;
-            const showImage = zoomState.canZoom;
-            const isImageReady = imageState?.status === 'ready';
-            const isCameraPending = stream?.pending || imageState?.status === 'loading';
-            const cameraStatusLabel = isImageReady
-              ? (customUrl ? '自定义' : '有画面')
-              : (imageState?.status === 'manual' ? '需配置' : (imageState?.status === 'error' ? '无画面' : (isCameraPending || stream?.success ? '连接中' : '待连接')));
-            const cameraStatusColor = isImageReady
-              ? '#8df0c0'
-              : (imageState?.status === 'manual' ? '#ffd08a' : (imageState?.status === 'error' ? '#ffd08a' : 'rgba(203,217,239,0.62)'));
-            const cameraMessage = imageState?.message || stream?.error || '正在打开摄像头...';
-
-            return (
-              <section
-                key={`camera-${key}`}
-                role={zoomState.canZoom ? 'button' : undefined}
-                tabIndex={zoomState.canZoom ? 0 : undefined}
-                title={zoomState.canZoom ? '点击放大预览' : undefined}
-                onClick={() => {
-                  if (zoomState.canZoom) setCameraZoomKey(key);
-                }}
-                onKeyDown={(event) => {
-                  if (!zoomState.canZoom) return;
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    setCameraZoomKey(key);
-                  }
-                }}
-                style={{
-                  overflow: 'hidden',
-                  borderRadius: 8,
-                  background: 'linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.035))',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  cursor: zoomState.canZoom ? 'zoom-in' : 'default',
-                  WebkitAppRegion: 'no-drag',
-                }}
-              >
-                <div style={{ aspectRatio: '16 / 10', background: 'rgba(3,8,16,0.72)', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}>
-                  {showImage ? (
-                    <>
-                      {isSnapshotStream ? (
-                        <ChamberSnapshotCanvas
-                          snapshotUrl={imageUrl}
-                          imageKey={key}
-                          alt={`${printer.name || '打印机'} 摄像头`}
-                          isReady={isImageReady}
-                          setCameraImageStates={setCameraImageStates}
-                        />
-                      ) : (
-                        <img
-                          src={imageUrl}
-                          alt={`${printer.name || '打印机'} 摄像头`}
-                          onLoad={() => {
-                            setCameraImageStates((prev) => ({
-                              ...prev,
-                              [key]: { status: 'ready' },
-                            }));
-                          }}
-                          onError={() => {
-                            setCameraImageStates((prev) => ({
-                              ...prev,
-                              [key]: {
-                                status: 'error',
-                                message: customUrl ? '自定义摄像头地址无法显示' : '摄像头暂时无法打开',
-                              },
-                            }));
-                          }}
-                          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', opacity: isImageReady ? 1 : 0.35, transition: 'opacity 0.2s ease' }}
-                        />
-                      )}
-                      {!isImageReady ? (
-                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14, background: 'rgba(3,8,16,0.48)', color: 'rgba(226,238,255,0.74)', fontSize: 12, lineHeight: 1.45, textAlign: 'center' }}>
-                          等待摄像头画面...
-                        </div>
-                      ) : null}
-                      {isImageReady ? (
-                        <div style={{ position: 'absolute', top: 8, right: 8, width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, color: 'rgba(246,250,255,0.88)', background: 'rgba(3,8,16,0.42)', border: '1px solid rgba(255,255,255,0.12)', backdropFilter: 'blur(10px)' }}>
-                          <Maximize2 size={14} />
-                        </div>
-                      ) : null}
-                    </>
-                  ) : (
-                    <div style={{ padding: 14, textAlign: 'center', color: 'rgba(226,238,255,0.62)', fontSize: 12, lineHeight: 1.45 }}>
-                      <Camera size={24} style={{ marginBottom: 6, opacity: 0.72 }} />
-                      <div>{cameraMessage}</div>
-                      {note ? <div style={{ marginTop: 6, color: 'rgba(255,220,162,0.82)' }}>{note}</div> : null}
-                      {imageState?.status === 'error' ? (
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            retryCamera(printer);
-                          }}
-                          style={{
-                            ...interactive,
-                            height: 30,
-                            margin: '10px auto 0',
-                            padding: '0 11px',
-                            borderRadius: 9,
-                            color: '#dff2ff',
-                            background: 'rgba(91,177,255,0.14)',
-                            border: '1px solid rgba(91,177,255,0.24)',
-                            fontSize: 11,
-                            fontWeight: 700,
-                          }}
-                        >
-                          <RefreshCw size={12} />
-                          重试
-                        </button>
-                      ) : null}
-                    </div>
-                  )}
-                </div>
-                <div style={{ padding: '10px 11px', display: 'grid', gap: 5 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                    <div style={{ minWidth: 0, fontSize: 12, fontWeight: 800, color: '#f7fbff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {printer.name || '未命名打印机'}
-                    </div>
-                    <span style={{ flex: '0 0 auto', fontSize: 10, color: cameraStatusColor }}>
-                      {cameraStatusLabel}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 10, color: 'rgba(203,217,239,0.58)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {printer.ip ? `IP ${printer.ip}` : '需要本地 IP 才能自动打开'}
-                  </div>
-                </div>
-              </section>
-            );
-          })}
-        </div>
-      )}
-      {renderZoomOverlay()}
-    </div>
-  );
-
-  void renderLegacyCameraView;
-
+  const zoomPrinter = cameraZoomKey ? printers.find((printer) => getPrinterCameraKey(printer) === cameraZoomKey) : null;
+  const zoomState = cameraZoomKey ? buildCameraZoomState({ key: cameraZoomKey, printer: zoomPrinter, stream: cameraStreams[cameraZoomKey], imageState: cameraImageStates[cameraZoomKey] }) : null;
+  const zoomCustomUrl = zoomPrinter ? getCustomCameraUrl(cameraConfig, zoomPrinter) : '';
   const renderCameraView = () => (
     <div className="camera-workspace">
       {cameraFeedback ? <div className="camera-feedback" role="status">{cameraFeedback}</div> : null}
-      <CameraWorkspace
-        printers={displayPrinters}
-        streams={cameraStreams}
-        imageStates={cameraImageStates}
-        cameraConfig={cameraConfig}
-        onRetry={retryCamera}
-        onZoom={setCameraZoomKey}
-        onImageStateChange={setCameraImageStates}
-      />
-      {renderZoomOverlay()}
+      {zoomState?.canZoom ? (
+        <CameraZoom key={cameraZoomKey} zoomState={zoomState} imageKey={cameraZoomKey} imageState={cameraImageStates[cameraZoomKey]} customUrl={zoomCustomUrl} onClose={() => setCameraZoomKey('')} onImageStateChange={setCameraImageStates} />
+      ) : (
+        <CameraWorkspace printers={displayPrinters} streams={cameraStreams} imageStates={cameraImageStates} cameraConfig={cameraConfig} onRetry={retryCamera} onZoom={setCameraZoomKey} onImageStateChange={setCameraImageStates} />
+      )}
     </div>
   );
-
   const shellMode = cameraOpen ? 'full' : viewMode;
   const identityCopy = printers.length > 0
     ? `${onlineCount}/${printers.length} 台在线${reconnectingCount > 0 ? ` · ${reconnectingCount} 台重连中` : ''}`

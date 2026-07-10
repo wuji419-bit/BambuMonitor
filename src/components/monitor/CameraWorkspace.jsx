@@ -3,6 +3,7 @@ import { Camera, Maximize2, RefreshCw } from 'lucide-react';
 import { cameraCompatibilityNote, getCustomCameraUrl, getPrinterCameraKey } from '../../services/camera';
 import { buildCameraFrameUrl } from '../../utils/cameraFrame';
 import { buildCameraZoomState } from '../../utils/cameraZoom';
+import { buildCameraCardPresentation, cameraRetryLabel } from '../../utils/cameraPresentation';
 
 async function decodeCameraFrame(blob) {
   if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
@@ -69,24 +70,24 @@ export function CameraMedia({ zoomState, imageKey, title, imageState, customUrl,
   return <img className="camera-media__image" src={zoomState.imageUrl} alt={`${title} 摄像头`} style={{ objectFit: fit, opacity: ready ? 1 : 0.35 }} onLoad={() => onImageStateChange((prev) => ({ ...prev, [imageKey]: { status: 'ready' } }))} onError={() => onImageStateChange((prev) => ({ ...prev, [imageKey]: { status: 'error', message: customUrl ? '自定义摄像头地址无法显示' : '摄像头暂时无法打开' } }))} />;
 }
 
-export default function CameraWorkspace({ printers, streams, imageStates, cameraConfig, onRetry, onZoom, onImageStateChange }) {
+export default function CameraWorkspace({ printers = [], streams = {}, imageStates = {}, cameraConfig = {}, onRetry, onZoom, onImageStateChange }) {
   if (!printers.length) return <div className="camera-empty">正在等待打印机列表...</div>;
   return <div className="camera-grid" data-testid="camera-grid">
     {printers.map((printer) => {
       const key = getPrinterCameraKey(printer); const stream = streams[key]; const state = imageStates[key];
       const customUrl = getCustomCameraUrl(cameraConfig, printer); const zoomState = buildCameraZoomState({ key, printer, stream, imageState: state });
-      const ready = state?.status === 'ready'; const pending = stream?.pending || state?.status === 'loading';
-      const label = ready ? (customUrl ? '自定义' : '有画面') : state?.status === 'manual' ? '需配置' : state?.status === 'error' ? '无画面' : pending || stream?.success ? '连接中' : '待连接';
-      const message = state?.message || stream?.error || (printer.ip ? '正在打开摄像头...' : '需要本地 IP 才能自动打开');
+      const ready = state?.status === 'ready';
+      const presentation = buildCameraCardPresentation({ imageState: state, stream, customUrl, hasIp: Boolean(printer.ip) });
+      const note = cameraCompatibilityNote(printer);
       const activate = () => { if (zoomState.canZoom) onZoom(key); };
       return <section key={`camera-${key}`} className={`camera-card${zoomState.canZoom ? ' is-ready' : ''}`} data-camera-card={key} role={zoomState.canZoom ? 'button' : undefined} tabIndex={zoomState.canZoom ? 0 : undefined} onClick={activate} onKeyDown={(event) => { if (zoomState.canZoom && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); activate(); } }}>
         <div className="camera-media">
           <CameraMedia zoomState={zoomState} imageKey={key} title={printer.name || '未命名打印机'} imageState={state} customUrl={customUrl} onImageStateChange={onImageStateChange} />
           {zoomState.canZoom && !ready ? <div className="camera-media__waiting">等待摄像头画面...</div> : null}
           {ready ? <span className="camera-media__zoom" aria-hidden="true"><Maximize2 size={14} /></span> : null}
-          {!zoomState.canZoom ? <div className="camera-placeholder"><Camera size={24} /><span>{message}</span>{cameraCompatibilityNote(printer) ? <small>{cameraCompatibilityNote(printer)}</small> : null}{state?.status === 'error' ? <button type="button" onClick={(event) => { event.stopPropagation(); onRetry(printer); }}><RefreshCw size={12} />重试</button> : null}</div> : null}
+          {!zoomState.canZoom ? <div className="camera-placeholder"><Camera size={24} /><span>{presentation.message}</span>{note ? <small>{note}</small> : null}{presentation.showRetry ? <button type="button" aria-label={cameraRetryLabel(printer)} onClick={(event) => { event.stopPropagation(); onRetry?.(printer); }}><RefreshCw size={12} />重试</button> : null}</div> : null}
         </div>
-        <footer className="camera-card__footer"><div><strong>{printer.name || '未命名打印机'}</strong><span>{printer.ip ? `IP ${printer.ip}` : '暂无本地 IP'}</span></div><b data-state={state?.status || 'idle'}>{label}</b></footer>
+        <footer className="camera-card__footer"><div><strong>{printer.name || '未命名打印机'}</strong><span>{printer.ip ? `IP ${printer.ip}` : '暂无本地 IP'}</span></div><b data-state={state?.status || 'idle'}>{presentation.label}</b></footer>
       </section>;
     })}
   </div>;
