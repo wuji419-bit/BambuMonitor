@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCameraCardPresentation, cameraRetryLabel, nextCameraFit } from './cameraPresentation.js';
+import { buildCameraCardPresentation, cameraFitReducer, cameraRetryLabel, nextCameraFit } from './cameraPresentation.js';
 
 test('presents ready custom and automatic cameras truthfully', () => {
   assert.deepEqual(buildCameraCardPresentation({ imageState: { status: 'ready' }, customUrl: 'http://camera' }), { label: '自定义', message: '', showRetry: false });
@@ -23,4 +23,15 @@ test('toggles fit and resets unknown values to contain', () => {
   assert.equal(nextCameraFit('contain'), 'cover');
   assert.equal(nextCameraFit('cover'), 'contain');
   assert.equal(nextCameraFit('unexpected'), 'contain');
+});
+
+test('preserves fit for the same camera and resets it for a new camera', () => {
+  const cameraA = { imageKey: 'camera-a', fit: 'cover' };
+  assert.equal(cameraFitReducer(cameraA, { type: 'sync', imageKey: 'camera-a' }), cameraA);
+  assert.deepEqual(cameraFitReducer(cameraA, { type: 'sync', imageKey: 'camera-b' }), { imageKey: 'camera-b', fit: 'contain' });
+});
+
+test('camera fit reducer toggles contain and cover', () => {
+  assert.deepEqual(cameraFitReducer({ imageKey: 'camera-a', fit: 'contain' }, { type: 'toggle' }), { imageKey: 'camera-a', fit: 'cover' });
+  assert.deepEqual(cameraFitReducer({ imageKey: 'camera-a', fit: 'cover' }, { type: 'toggle' }), { imageKey: 'camera-a', fit: 'contain' });
 });

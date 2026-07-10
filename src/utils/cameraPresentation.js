@@ -12,3 +12,15 @@ export function cameraRetryLabel(printer = {}) {
 export function nextCameraFit(current) {
   return current === 'contain' ? 'cover' : 'contain';
 }
+
+export function cameraFitReducer(state, action) {
+  if (action?.type === 'sync') {
+    return action.imageKey === state.imageKey
+      ? state
+      : { imageKey: action.imageKey, fit: 'contain' };
+  }
+  if (action?.type === 'toggle') {
+    return { ...state, fit: nextCameraFit(state.fit) };
+  }
+  return state;
+}

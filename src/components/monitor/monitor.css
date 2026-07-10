@@ -640,7 +640,6 @@
 .mini-actions button { display: inline-flex; width: 27px; height: 27px; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--line); border-radius: 7px; color: #d8e5f5; background: rgba(255,255,255,.06); cursor: pointer; -webkit-app-region: no-drag; }
 
 .legacy-full-heading,
-.legacy-camera-heading,
 .legacy-monitor-hint {
   display: none !important;
 }
