@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCameraCardPresentation, cameraFitReducer, cameraRetryLabel, nextCameraFit } from './cameraPresentation.js';
+import { buildCameraCardPresentation, cameraFitReducer, cameraRetryLabel, nextCameraFit, shouldClearCameraZoom } from './cameraPresentation.js';
 
 test('presents ready custom and automatic cameras truthfully', () => {
   assert.deepEqual(buildCameraCardPresentation({ imageState: { status: 'ready' }, customUrl: 'http://camera' }), { label: '自定义', message: '', showRetry: false });
@@ -34,4 +34,17 @@ test('preserves fit for the same camera and resets it for a new camera', () => {
 test('camera fit reducer toggles contain and cover', () => {
   assert.deepEqual(cameraFitReducer({ imageKey: 'camera-a', fit: 'contain' }, { type: 'toggle' }), { imageKey: 'camera-a', fit: 'cover' });
   assert.deepEqual(cameraFitReducer({ imageKey: 'camera-a', fit: 'cover' }, { type: 'toggle' }), { imageKey: 'camera-a', fit: 'contain' });
+});
+
+test('clears selected zoom when key or printer is missing', () => {
+  assert.equal(shouldClearCameraZoom({ selectedKey: '', printer: null, zoomState: null }), false);
+  assert.equal(shouldClearCameraZoom({ selectedKey: 'camera-a', printer: null, zoomState: null }), true);
+});
+
+test('clears selected zoom when its image becomes non-zoomable', () => {
+  assert.equal(shouldClearCameraZoom({ selectedKey: 'camera-a', printer: {}, zoomState: { canZoom: false } }), true);
+});
+
+test('retains a valid selected zoom', () => {
+  assert.equal(shouldClearCameraZoom({ selectedKey: 'camera-a', printer: {}, zoomState: { canZoom: true } }), false);
 });

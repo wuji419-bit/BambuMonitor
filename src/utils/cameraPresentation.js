@@ -24,3 +24,7 @@ export function cameraFitReducer(state, action) {
   }
   return state;
 }
+
+export function shouldClearCameraZoom({ selectedKey, printer, zoomState } = {}) {
+  return Boolean(selectedKey) && (!printer || !zoomState?.canZoom);
+}

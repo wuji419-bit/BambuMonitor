@@ -17,6 +17,7 @@ import {
   saveCameraConfig,
 } from '../services/camera';
 import { buildCameraZoomState } from '../utils/cameraZoom';
+import { shouldClearCameraZoom } from '../utils/cameraPresentation';
 import { mapWithConcurrency } from '../utils/asyncPool';
 import { hasCloudStatus, shouldPromptForPrinterIp } from '../utils/printerIpPrompt';
 import {
@@ -480,6 +481,7 @@ export default function PrinterWidget({
   const cameraWallOpenRef = useRef(false);
   const cameraRetryAttemptsRef = useRef({});
   const cameraRetryTimersRef = useRef({});
+  const cameraZoomOriginKeyRef = useRef('');
   const restartCameraRef = useRef(null);
   const nativeModeRef = useRef(viewMode);
   const submittingIpRef = useRef(submittingIp);
@@ -488,7 +490,10 @@ export default function PrinterWidget({
 
   const isCompact = viewMode === 'compact';
   const isMini = viewMode === 'mini';
-  const nativeMode = cameraZoomKey ? 'zoom' : (cameraOpen ? 'full' : viewMode);
+  const zoomPrinter = cameraZoomKey ? printers.find((printer) => getPrinterCameraKey(printer) === cameraZoomKey) : null;
+  const zoomState = cameraZoomKey ? buildCameraZoomState({ key: cameraZoomKey, printer: zoomPrinter, stream: cameraStreams[cameraZoomKey], imageState: cameraImageStates[cameraZoomKey] }) : null;
+  const isCameraZoomActive = Boolean(zoomState?.canZoom);
+  const nativeMode = isCameraZoomActive ? 'zoom' : (cameraOpen ? 'full' : viewMode);
   const activeDialog = ipDialog ? 'ip' : (settingsOpen ? 'settings' : '');
   const isFullPanel = !cameraOpen && !settingsOpen && !ipDialog && !isMini && !isCompact;
   const displayPrinters = sortPrintersForDisplay(printers);
@@ -613,6 +618,12 @@ export default function PrinterWidget({
     restartCameraRef.current?.(key);
   };
 
+  const closeCameraZoom = useCallback(() => setCameraZoomKey(''), []);
+  const openCameraZoom = useCallback((key) => {
+    cameraZoomOriginKeyRef.current = key;
+    setCameraZoomKey(key);
+  }, []);
+
   const openCameraWorkspace = useCallback(() => {
     setViewMode('full');
     setCameraOpen(true);
@@ -707,21 +718,38 @@ export default function PrinterWidget({
 
   useEffect(() => {
     if (cameraOpen) return;
-    setCameraZoomKey('');
-  }, [cameraOpen]);
+    closeCameraZoom();
+  }, [cameraOpen, closeCameraZoom]);
 
   useEffect(() => {
-    if (!cameraZoomKey || activeDialog) return undefined;
+    if (!shouldClearCameraZoom({ selectedKey: cameraZoomKey, printer: zoomPrinter, zoomState })) return;
+    closeCameraZoom();
+  }, [cameraZoomKey, closeCameraZoom, zoomPrinter, zoomState]);
+
+  useEffect(() => {
+    if (isCameraZoomActive || !cameraOpen || !cameraZoomOriginKeyRef.current) return undefined;
+    const originKey = cameraZoomOriginKeyRef.current;
+    const frame = requestAnimationFrame(() => {
+      const cards = document.querySelectorAll('[data-camera-card]');
+      const card = [...cards].find((element) => element.getAttribute('data-camera-card') === originKey);
+      if (card instanceof HTMLElement) card.focus();
+      cameraZoomOriginKeyRef.current = '';
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [cameraOpen, isCameraZoomActive]);
+
+  useEffect(() => {
+    if (!isCameraZoomActive || activeDialog) return undefined;
 
     const closeOnEscape = (event) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
       event.preventDefault();
-      setCameraZoomKey('');
+      closeCameraZoom();
     };
 
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [activeDialog, cameraZoomKey]);
+  }, [activeDialog, closeCameraZoom, isCameraZoomActive]);
 
   useEffect(() => {
     if (!activeDialog) return undefined;
@@ -1081,7 +1109,7 @@ export default function PrinterWidget({
   };
 
   const changeViewMode = (mode) => {
-    setCameraZoomKey('');
+    closeCameraZoom();
     setCameraOpen(false);
     setSettingsOpen(false);
     setIpDialog(null);
@@ -1090,7 +1118,7 @@ export default function PrinterWidget({
   };
 
   const changeWorkspaceTab = (tab) => {
-    setCameraZoomKey('');
+    closeCameraZoom();
     setViewMode('full');
     if (tab === 'cameras') {
       openCameraWorkspace();
@@ -1101,7 +1129,7 @@ export default function PrinterWidget({
 
   const resetCurrentWindowSize = () => {
     const storedMode = ['full', 'compact', 'mini'].includes(viewMode) ? viewMode : 'full';
-    const mode = cameraZoomKey ? 'zoom' : (cameraOpen ? 'full' : storedMode);
+    const mode = isCameraZoomActive ? 'zoom' : (cameraOpen ? 'full' : storedMode);
     const { defaultSize, minSize } = getWindowModeConfig(mode);
     const savedSizes = readWindowSizeMap(localStorage.getItem(WINDOW_SIZE_STORAGE_KEY));
     delete savedSizes[mode];
@@ -1171,16 +1199,14 @@ export default function PrinterWidget({
     return <StatusBadge printer={printer} compact={compact} />;
   };
 
-  const zoomPrinter = cameraZoomKey ? printers.find((printer) => getPrinterCameraKey(printer) === cameraZoomKey) : null;
-  const zoomState = cameraZoomKey ? buildCameraZoomState({ key: cameraZoomKey, printer: zoomPrinter, stream: cameraStreams[cameraZoomKey], imageState: cameraImageStates[cameraZoomKey] }) : null;
   const zoomCustomUrl = zoomPrinter ? getCustomCameraUrl(cameraConfig, zoomPrinter) : '';
   const renderCameraView = () => (
     <div className="camera-workspace">
       {cameraFeedback ? <div className="camera-feedback" role="status">{cameraFeedback}</div> : null}
-      {zoomState?.canZoom ? (
-        <CameraZoom key={cameraZoomKey} zoomState={zoomState} imageKey={cameraZoomKey} imageState={cameraImageStates[cameraZoomKey]} customUrl={zoomCustomUrl} onClose={() => setCameraZoomKey('')} onImageStateChange={setCameraImageStates} />
+      {isCameraZoomActive ? (
+        <CameraZoom key={cameraZoomKey} zoomState={zoomState} imageKey={cameraZoomKey} imageState={cameraImageStates[cameraZoomKey]} customUrl={zoomCustomUrl} onClose={closeCameraZoom} onImageStateChange={setCameraImageStates} />
       ) : (
-        <CameraWorkspace printers={displayPrinters} streams={cameraStreams} imageStates={cameraImageStates} cameraConfig={cameraConfig} onRetry={retryCamera} onZoom={setCameraZoomKey} onImageStateChange={setCameraImageStates} />
+        <CameraWorkspace printers={displayPrinters} streams={cameraStreams} imageStates={cameraImageStates} cameraConfig={cameraConfig} onRetry={retryCamera} onZoom={openCameraZoom} onImageStateChange={setCameraImageStates} />
       )}
     </div>
   );
