@@ -34,6 +34,7 @@
     "files": [
       "dist/**/*",
       "electron/main.cjs",
+      "electron/window-bounds.cjs",
       "electron/preload.cjs",
       "electron/auth-session.cjs",
       "electron/camera-stream.cjs",

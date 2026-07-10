@@ -5,6 +5,11 @@ const {
   clampWindowSize,
   getMainWindowOptions,
 } = require('./window-bounds.cjs');
+const packageJson = require('../package.json');
+
+test('packages the native window bounds helper with the Electron main process', () => {
+  assert.ok(packageJson.build.files.includes('electron/window-bounds.cjs'));
+});
 
 test('builds native resizable window options while preserving supplied bounds', () => {
   const bounds = {
