@@ -4,6 +4,7 @@ import { cameraCompatibilityNote, getCustomCameraUrl, getPrinterCameraKey } from
 import { buildCameraFrameUrl } from '../../utils/cameraFrame';
 import { buildCameraZoomState } from '../../utils/cameraZoom';
 import { buildCameraCardPresentation, cameraRetryLabel } from '../../utils/cameraPresentation';
+import { isPublicCaptureSearch, publicCameraAddress } from '../../utils/publicCapture';
 
 async function decodeCameraFrame(blob) {
   if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
@@ -71,6 +72,7 @@ export function CameraMedia({ zoomState, imageKey, title, imageState, customUrl,
 }
 
 export default function CameraWorkspace({ printers = [], streams = {}, imageStates = {}, cameraConfig = {}, onRetry, onZoom, onImageStateChange }) {
+  const isPublicCapture = typeof window !== 'undefined' && isPublicCaptureSearch(window.location.search);
   return <div className="camera-grid" data-testid="camera-grid" role="region" aria-label="摄像头列表" tabIndex={-1}>
     {!printers.length ? <div className="camera-empty" role="status">正在等待打印机列表...</div> : null}
     {printers.map((printer) => {
@@ -87,7 +89,7 @@ export default function CameraWorkspace({ printers = [], streams = {}, imageStat
           {ready ? <span className="camera-media__zoom" aria-hidden="true"><Maximize2 size={14} /></span> : null}
           {!zoomState.canZoom ? <div className="camera-placeholder"><Camera size={24} /><span>{presentation.message}</span>{note ? <small>{note}</small> : null}{presentation.showRetry ? <button type="button" aria-label={cameraRetryLabel(printer)} onClick={(event) => { event.stopPropagation(); onRetry?.(printer); }}><RefreshCw size={12} />重试</button> : null}</div> : null}
         </div>
-        <footer className="camera-card__footer"><div><strong>{printer.name || '未命名打印机'}</strong><span>{printer.ip ? `IP ${printer.ip}` : '暂无本地 IP'}</span></div><b data-state={state?.status || 'idle'}>{presentation.label}</b></footer>
+        <footer className="camera-card__footer"><div><strong>{printer.name || '未命名打印机'}</strong><span>{publicCameraAddress(printer.ip, isPublicCapture)}</span></div><b data-state={state?.status || 'idle'}>{presentation.label}</b></footer>
       </section>;
     })}
   </div>;
