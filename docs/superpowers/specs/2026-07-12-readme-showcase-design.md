@@ -1,43 +1,43 @@
-# README Product Showcase Design
+# README 产品展示改版方案
 
-## Goal
+## 目标
 
-Turn the repository README into a concise product showcase that explains BambuMonitor at a glance, demonstrates the current desktop experience, and still gives developers accurate installation, networking, licensing, and build information.
+把项目 README 改成更有吸引力的产品展示页，让用户打开 GitHub 后能快速看懂 BambuMonitor 是什么、能解决什么问题，并保留准确的安装方式、网络限制、开源协议和开发说明。
 
-## Audience And Tone
+## 面向用户与文案风格
 
-The first screen targets Bambu Lab users who operate several printers and want a lightweight always-visible monitor. Copy should be confident, concrete, and promotional without claiming unsupported remote-control capabilities.
+主要面向同时使用多台拓竹打印机、希望在桌面持续查看设备状态的用户。文案采用简洁、有吸引力的宣传风格，但不会宣传项目目前不支持的公网远程控制能力。
 
-## README Structure
+## README 内容结构
 
-1. Product name and a one-sentence value proposition.
-2. A primary full-workspace screenshot.
-3. Four short product benefits: multi-printer telemetry, responsive window modes, camera wall, and cloud-status plus LAN/VPN camera connectivity.
-4. A visual gallery covering the main desktop surfaces.
-5. Installation and release links.
-6. Accurate cloud, LAN, VPN, camera, privacy, and security limitations.
-7. Development, packaging, AGPLv3, and non-affiliation information.
+1. 项目名称和一句话核心介绍。
+2. 一张完整监控工作区主图。
+3. 四项核心优势：多设备状态、响应式窗口模式、摄像头墙、云端状态与局域网摄像头连接。
+4. 展示主要桌面界面的截图画廊。
+5. Windows 与 macOS 安装包下载说明。
+6. 云端、局域网、VPN、摄像头、隐私和安全限制。
+7. 开发、打包、AGPLv3 协议以及非官方项目声明。
 
-## Screenshot Set
+## 截图清单
 
-Produce six current screenshots with a consistent dark presentation:
+重新制作六张当前版本截图，统一使用现有深色界面风格：
 
-- Full workspace with demo printer telemetry.
-- Compact workspace with demo printer telemetry.
-- Mini workspace with demo printer telemetry.
-- Camera wall using real camera frames where available.
-- Enlarged camera preview using a real camera frame.
-- Settings sheet showing responsive controls.
+- 完整工作区：使用演示打印机状态数据。
+- 紧凑窗口：使用演示打印机状态数据。
+- 迷你窗口：使用演示打印机状态数据。
+- 摄像头墙：尽量使用真实打印机摄像头画面。
+- 摄像头放大预览：使用真实摄像头画面。
+- 设置面板：展示当前响应式设置界面。
 
-Status screenshots use deterministic demo data. Camera screenshots may use real printer imagery, but all private LAN addresses, account names, tokens, and other identifiers must be hidden or cropped. Screenshots must show the application itself without unrelated desktop windows.
+状态类截图使用固定演示数据，避免泄露真实设备信息。摄像头截图可以保留真实打印场景，但必须隐藏或裁掉局域网 IP、账号、访问令牌和其他私人信息。截图中只保留应用本身，不出现无关桌面窗口。
 
-## Verification
+## 检查标准
 
-- Capture from the current `1.0.12` interface rather than reusing older images.
-- Check every image for readable text, complete controls, and no overlap or clipping.
-- Verify README image links and Markdown rendering.
-- Run tests, lint, build, and `git diff --check` before publishing.
+- 所有截图必须来自当前 `1.0.12` 界面，不复用旧版图片。
+- 检查文字是否清晰，按钮和控件是否完整，不得出现重叠或裁切。
+- 检查 README 内所有图片链接和 Markdown 排版。
+- 发布前运行测试、代码检查、生产构建和 Git 差异检查。
 
-## Delivery
+## 最终交付
 
-Replace the existing screenshots, add the missing gallery images, rewrite README content in Chinese with a concise English summary, commit the result, and push it to `codex/resizable-workspace-ui`.
+替换现有旧截图，补齐缺少的界面图片，重写中文 README，并保留一段简短英文介绍。完成后提交并推送到 `codex/resizable-workspace-ui` 分支。
