@@ -1,0 +1,2 @@
+import React from 'react';import {Composition} from 'remotion';import {Promo} from './Composition';
+export const RemotionRoot:React.FC=()=> <><Composition id="BambuPromoZH" component={Promo} defaultProps={{lang:'zh'}} durationInFrames={1860} fps={30} width={1920} height={1080}/><Composition id="BambuPromoEN" component={Promo} defaultProps={{lang:'en'}} durationInFrames={1860} fps={30} width={1920} height={1080}/></>;
