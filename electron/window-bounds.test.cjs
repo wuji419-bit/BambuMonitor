@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const {
   clampWindowSize,
@@ -12,6 +14,12 @@ const packageJson = require('../package.json');
 
 test('packages the native window bounds helper with the Electron main process', () => {
   assert.ok(packageJson.build.files.includes('electron/window-bounds.cjs'));
+});
+
+test('keeps the sandboxed preload free of local CommonJS imports', () => {
+  const preload = fs.readFileSync(path.join(__dirname, 'preload.cjs'), 'utf8');
+  assert.doesNotMatch(preload, /require\(['"]\.\//);
+  assert.match(preload, /contextBridge\.exposeInMainWorld\(['"]bambuApi['"]/);
 });
 
 test('builds native resizable window options while preserving supplied bounds', () => {

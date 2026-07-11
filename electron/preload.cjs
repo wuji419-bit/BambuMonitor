@@ -1,5 +1,16 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const { createWindowBoundsSaveRequestHandler } = require('./window-bounds.cjs');
+
+function createWindowBoundsSaveRequestHandler(callback, acknowledge) {
+  return async (payload) => {
+    try {
+      await callback(payload);
+    } catch {
+      // Closing must continue even if renderer-side persistence fails.
+    } finally {
+      acknowledge(payload?.requestId);
+    }
+  };
+}
 
 function subscribe(channel) {
   return (callback) => {
