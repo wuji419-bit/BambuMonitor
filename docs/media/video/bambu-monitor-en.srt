@@ -1,0 +1,23 @@
+1
+00:00:00,000 --> 00:00:03,800
+Managing several Bambu Lab printers should not mean watching several windows.
+
+2
+00:00:03,800 --> 00:00:09,500
+BambuMonitor brings progress, temperatures, filament, and alerts into one desktop workspace.
+
+3
+00:00:09,500 --> 00:00:15,500
+Switch between full, compact, and mini views, resize freely, and keep the monitor on top.
+
+4
+00:00:15,500 --> 00:00:21,500
+Watch multiple cameras together, then open any live view for a closer look.
+
+5
+00:00:21,500 --> 00:00:26,300
+Cloud status stays in sync, while LAN cameras remain direct and responsive.
+
+6
+00:00:26,300 --> 00:00:29,800
+BambuMonitor is now open source on GitHub under AGPL version three.
