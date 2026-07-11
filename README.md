@@ -1,67 +1,122 @@
 # BambuMonitor
 
-BambuMonitor 是一款面向 Bambu Lab / 拓竹打印机的 Windows 与 macOS 桌面悬浮监控工具。它会同步账号下已绑定的设备，通过云端 MQTT 获取在线状态与打印遥测；在局域网或 VPN 可达时，也可以连接打印机本地 MQTT 与摄像头。
+> 把多台拓竹打印机的进度、温度、耗材与摄像头，集中到一个可以自由缩放的桌面工作区。
 
-它不是切片软件，也不会替代 Bambu Studio；它更像一个常驻桌面的轻量监控面板，适合多台机器同时打印时快速查看状态。
+![BambuMonitor 完整监控工作区](./docs/screenshots/dashboard.png)
 
-## 截图
+BambuMonitor 是一款面向 Bambu Lab / 拓竹打印机的轻量桌面监控工具。它适合同时管理多台设备的工作室、创客空间和个人用户：不用反复切换窗口，就能快速判断哪台正在打印、哪台需要关注，以及每个任务还要多久完成。
 
-![登录页面](./docs/screenshots/login.png)
+[下载最新版本](https://github.com/wuji419-bit/BambuMonitor/releases) · [查看源码](https://github.com/wuji419-bit/BambuMonitor) · AGPLv3 开源
 
-![监控面板](./docs/screenshots/dashboard.png)
+## 为什么使用 BambuMonitor
 
-![超迷你模式](./docs/screenshots/mini.png)
+- **一屏查看多台设备**：集中显示进度、剩余时间、层数、温度、速度、任务和 AMS 耗材。
+- **窗口真正自由缩放**：完整、紧凑、迷你和摄像头放大模式分别记忆大小与位置。
+- **摄像头墙**：同时查看多台打印机，点击画面即可放大，并支持填充或完整显示。
+- **云端状态与本地画面结合**：状态可通过云端 MQTT 同步；摄像头与低延迟连接走局域网或 VPN。
+- **为长期运行设计**：连接状态和打印状态分开显示，支持有限重试、异常提醒与会话恢复。
+- **保持在手边**：窗口置顶、鼠标穿透锁定、透明度、开机启动和托盘控制。
+
+## 界面一览
+
+### 完整工作区
+
+适合同时比较多台设备。需要关注和正在工作的设备会优先排列，云端设备不再强制要求填写本地 IP。
+
+![完整工作区](./docs/screenshots/dashboard.png)
+
+### 紧凑与迷你模式
+
+紧凑模式保留关键状态，适合放在屏幕侧边；迷你模式只显示当前最重要的任务，可作为桌面常驻进度条。
+
+| 紧凑模式 | 迷你模式 |
+| --- | --- |
+| ![紧凑模式](./docs/screenshots/compact.png) | ![迷你模式](./docs/screenshots/mini.png) |
+
+### 摄像头墙与放大预览
+
+H2D、X1、P2S 等机型优先通过本机转换 RTSPS；A1、A1 mini、P1、A2 系列尝试设备的本地 JPEG 摄像头协议。也可以为单台设备填写自定义 MJPEG 或快照地址。
+
+| 摄像头墙 | 放大预览 |
+| --- | --- |
+| ![摄像头墙](./docs/screenshots/camera-wall.png) | ![摄像头放大预览](./docs/screenshots/camera-zoom.png) |
+
+### 设置
+
+设置面板集中管理窗口、开机启动、摄像头和通知集成；修改内容只有保存后才会生效。
+
+![设置面板](./docs/screenshots/settings.png)
 
 ## 下载安装
 
-Windows 与 macOS 安装包在 GitHub Release 中提供：
+Windows 与 macOS 安装包通过 GitHub Releases 提供：
 
-[前往 Releases 下载](https://github.com/wuji419-bit/BambuMonitor/releases)
+**[前往 Releases 下载](https://github.com/wuji419-bit/BambuMonitor/releases)**
 
-源码仓库不会提交 `release/`、`dist/`、`node_modules/` 或本地调试文件。
+- Windows：下载 `.exe` 安装包。
+- macOS：下载 `.dmg` 安装包。首次发布的未签名版本可能需要在系统设置中确认打开。
+- 仓库不会提交 `node_modules/`、`dist/` 或本地调试文件。
 
-## 功能
+## 连接方式
 
-- 多台 Bambu Lab / 拓竹打印机同时监控
-- 完整模式、紧凑模式和超迷你模式
-- 窗口置顶、鼠标穿透锁定和透明度调节
-- 账号密码登录和验证码登录
-- 自动局域网扫描，扫不到时可手动设置 IP
-- 手动刷新设备列表，并每 5 分钟自动同步一次账号下新增、移除或改名的设备
-- 将打印任务状态与连接状态分开显示，重连时不再把“打印中”错误覆盖掉
-- 实时显示进度、剩余时间、层数、温度、风扇、速度和 AMS 信息
-- 局域网实时模式会按本地遥测时间继续倒计时，避免剩余时间长时间停留在旧值
-- 摄像头墙：限制并发启动、失败自动退避重试，也可单独手动重试；支持为每台打印机填写自定义 MJPEG / 快照 URL
-- 登录会话使用 Electron 系统安全存储加密保存，旧版明文会话会在读取后自动迁移
-- Windows 托盘菜单：显示/隐藏、锁定、布局切换、透明度调节和退出
-- OpenClaw、Hermes 或其他 Webhook 自动化通知
+### 云端状态
 
-## 云端状态与本地连接
+登录 Bambu Lab / MakerWorld 账号后，BambuMonitor 可以同步账号下已绑定的设备，并通过拓竹云端 MQTT 获取在线状态、打印进度、温度、AMS 和层数等信息。因此，只查看状态时不要求每台设备都填写本地 IP。
 
-BambuMonitor 可以通过拓竹云端 MQTT 获取设备状态与打印遥测，因此只查看进度、温度、AMS、层数等信息时，不要求每台设备都填写本地 IP。云端数据可能受网络质量、服务限流或同步延迟影响；应用会保留最后一次有效数据，并独立显示“连接中、重连中、离线”等连接状态。
+云端数据可能受网络质量、服务限流或同步延迟影响。应用会保留最后一次有效数据，并单独显示“连接中、重连中、离线”等连接状态，避免把短暂重连误报成打印任务异常。
 
-本地 IP 仍有明确用途：摄像头、本地 MQTT 直连以及局域网低延迟更新都需要电脑能够访问打印机所在网络。应用会自动扫描局域网，也允许为 VPN 场景手动填写可达 IP。
+### 局域网、VPN 与摄像头
 
-本项目是非官方社区工具，不提供拓竹官方 App 的远程控制能力。登录仅用于用户主动发起的设备同步与云端 MQTT 连接；如需官方远程视图或控制，请使用 Bambu Connect、Bambu Studio 或 Bambu Handy。
+摄像头、本地 MQTT 和低延迟更新需要运行 BambuMonitor 的电脑能直接访问打印机所在网络。应用会尝试扫描局域网；在外网使用时，可以先通过 Tailscale、ZeroTier、WireGuard 或路由器 VPN 返回设备所在网络，再填写隧道内可访问的打印机 IP。
 
-本项目不会打包、读取或逆向提取 Bambu networking plugin 的私有数据。
+**本项目不会自动穿透公网，也不建议把打印机 MQTT 或摄像头端口直接映射到互联网。** 如果需要官方远程控制，请使用 Bambu Connect、Bambu Studio 或 Bambu Handy。
 
-## 关于外网连接
+## 摄像头稳定性
 
-状态与打印遥测可以走云端 MQTT，不需要暴露家里或工作室的打印机端口。摄像头与本地直连不会自动穿透公网；人在外面时，需要先通过 Tailscale、ZeroTier、WireGuard 或路由器 VPN 连回打印机所在网络，再填写隧道内可访问的打印机 IP。
+- 自动摄像头采用受限并发启动，避免多台设备同时抢占连接。
+- 启动失败后执行有限次数、带退避的重试，不会无限重连。
+- 单台设备可以手动重试，也可以使用外部 MJPEG / 快照 URL。
+- 点击任意可用画面进入放大预览，支持完整显示和填充画面切换。
+- 摄像头依赖局域网或 VPN；云端状态在线不代表本地摄像头一定可达。
 
-不要把打印机的 MQTT 或摄像头端口直接映射到公网。云端 MQTT 的可用性依赖拓竹服务，未来接口变化时也可能需要适配。
+## 通知与集成
 
-## 摄像头说明
+BambuMonitor 可以在任务完成、设备断开和恢复连接时触发通知，并支持 OpenClaw、Hermes 或通用 Webhook 集成。相同事件带有冷却时间，避免连接抖动造成重复提醒。
 
-摄像头功能已经加入桌面版界面。点击面板上的摄像头按钮可以打开“摄像头墙”；在设置中也可以开启“连接后自动打开摄像头墙”。
+## 隐私与安全
 
-自动摄像头模式依赖局域网或 VPN。H2D / X1 / P2S 等机型会优先通过本机 `ffmpeg` 将 RTSPS 画面转换为浏览器可显示的 MJPEG；A1 / A1 mini / P1 / A2 系列会尝试本地 `6000` 端口 JPEG 摄像头协议，并在界面中用快照帧刷新。应用一次最多启动两路摄像头，失败后会有限次退避重试，避免五台设备同时抢占连接导致整面画面反复重连；也可以对单台设备手动重试。
+- 登录会话通过 Electron 系统安全存储加密保存，退出账号时会清除本地会话。
+- 密码、验证码和访问令牌不会写入项目仓库。
+- 本项目不会打包、读取或逆向提取 Bambu networking plugin 的私有数据。
+- BambuMonitor 是非官方社区项目，与 Bambu Lab / 拓竹官方无隶属或背书关系。
 
 ## 快捷键
 
-- `Ctrl + Shift + L`：锁定/解锁鼠标穿透
-- `Ctrl + Shift + H`：切换横向/纵向布局
+- `Ctrl + Shift + L`：锁定或解锁鼠标穿透。
+- `Ctrl + Shift + H`：切换横向或纵向布局。
+
+## 本地开发
+
+```bash
+npm install
+npm run electron:dev
+```
+
+运行检查：
+
+```bash
+npm test
+npm run lint
+npm run build
+```
+
+生成安装包：
+
+```bash
+npm run electron:build
+```
+
+Windows 安装包需要在 Windows 构建；macOS DMG 需要在 macOS 或仓库配置的 GitHub Actions macOS runner 中构建。
 
 ## 技术栈
 
@@ -69,32 +124,13 @@ BambuMonitor 可以通过拓竹云端 MQTT 获取设备状态与打印遥测，�
 - React 19
 - Vite 7
 - MQTT over TLS
-- Bambu Cloud API + 局域网 SSDP 扫描
+- Bambu Cloud API
+- 局域网 SSDP、RTSPS、JPEG 摄像头协议与 FFmpeg
 
-## 开发
+## 开源协议
 
-```bash
-npm install
-npm run electron:dev
-```
-
-## 打包
-
-```bash
-npm run build
-npm run electron:build
-```
-
-打包后的安装包会输出到 `release/`。macOS 安装包必须在 macOS 环境或对应的 GitHub Actions runner 中构建。
-
-## 版本规则
-
-后续只有应用代码、图标或安装包内容发生实际变化时，才递增一个小版号并重新打包，例如：`1.0.6` -> `1.0.7`。
+本项目使用 **GNU Affero General Public License v3.0 or later（AGPL-3.0-or-later）**，详情见 [LICENSE](./LICENSE)。修改后发布或通过网络提供修改版服务时，需要按照 AGPLv3 提供对应源代码。
 
 ## English
 
-BambuMonitor is a Windows and macOS floating monitor for Bambu Lab printers. It synchronizes bound devices and telemetry through cloud MQTT, while LAN or VPN connectivity enables local MQTT and camera previews.
-
-## License
-
-GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See [LICENSE](./LICENSE).
+BambuMonitor is a responsive desktop workspace for monitoring multiple Bambu Lab printers. It combines cloud MQTT telemetry with LAN or VPN camera access, provides full, compact, mini, and camera views, and remembers each window mode independently. The project is unofficial and licensed under AGPL-3.0-or-later.
