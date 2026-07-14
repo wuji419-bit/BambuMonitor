@@ -1,20 +1,77 @@
 import React from 'react';
 import {AbsoluteFill, Audio, Img, Sequence, interpolate, staticFile, useCurrentFrame} from 'remotion';
 
-type Lang='zh'|'en';
-const copy={
- zh:{tag:'五台打印机，一个工作区',sub:'专注打印，不再切换窗口',devices:'总设备',online:'在线',printing:'打印中',attention:'需关注',cloud:'云端状态',local:'本地连接',full:'完整',compact:'紧凑',mini:'迷你',wall:'摄像头墙',settings:'一处设置，统一管理',open:'Windows + macOS · AGPLv3 开源',cta:'现已在 GitHub 开源'},
- en:{tag:'Five printers. One workspace.',sub:'Focus on printing, not window switching.',devices:'Total',online:'Online',printing:'Printing',attention:'Attention',cloud:'Cloud status',local:'Local connection',full:'Full',compact:'Compact',mini:'Mini',wall:'Camera Wall',settings:'One place for every setting',open:'Windows + macOS · Open source under AGPLv3',cta:'Now open source on GitHub'}
+type Lang = 'zh' | 'en';
+
+const text = {
+  zh: {
+    title: '五台打印机，一个工作区',
+    lead: '设备状态、打印进度、温度与 AMS 耗材，集中呈现。',
+    modes: '完整、紧凑、迷你，三种真实窗口形态。',
+    cameras: '同时查看多台摄像头，点击即可放大。',
+    settings: '窗口、启动、摄像头与通知，在一处统一管理。',
+    end: 'BambuMonitor · Windows + macOS · AGPLv3 开源',
+  },
+  en: {
+    title: 'Five printers. One workspace.',
+    lead: 'Device status, print progress, temperatures, and AMS filament in one view.',
+    modes: 'Full, compact, and mini: three real window layouts.',
+    cameras: 'Watch multiple camera feeds and enlarge any view.',
+    settings: 'Manage windows, startup, cameras, and notifications in one place.',
+    end: 'BambuMonitor · Windows + macOS · Open source under AGPLv3',
+  },
 };
-const printers=[['A1mini',68,'2h 08m'],['A2L01',42,'3h 51m'],['A2L02',100,'Completed'],['H2D',31,'12h 40m'],['P1SC',76,'48m']];
-const Fade:React.FC<React.PropsWithChildren<{start?:number}>>=({children,start=0})=>{const f=useCurrentFrame();return <div style={{opacity:interpolate(f,[start,start+18],[0,1],{extrapolateLeft:'clamp',extrapolateRight:'clamp'}),transform:`translateY(${interpolate(f,[start,start+20],[28,0],{extrapolateLeft:'clamp',extrapolateRight:'clamp'})}px)`}}>{children}</div>};
-const Header:React.FC=()=><div className="header"><div className="brand"><b>BM</b><span><strong>BambuMonitor</strong><small>PRINT OPERATIONS</small></span></div><div className="icons">↗ ◉ ⚙ ⌖</div></div>;
-const Stats:React.FC<{l:Lang}>=({l})=><div className="stats">{[[copy[l].devices,5],[copy[l].online,5],[copy[l].printing,3],[copy[l].attention,1]].map(([a,b],i)=><div className={'stat s'+i} key={String(a)}><small>{a}</small><b>{b}</b></div>)}</div>;
-const Card:React.FC<{p:string[];i:number}>=({p,i})=><div className={'card '+(i===3?'warn':'')}><div className="cardtop"><span className="badge">{p[0].slice(0,2)}</span><div><b>{p[0]}</b><small>192.168.199.{92+i*17}</small></div><em>{p[1]}% · {p[2]}</em></div><div className="job">0.2mm Standard · PLA Basic</div><div className="bar"><i style={{width:p[1]+'%'}}/></div><div className="meta"><span>Layer {Math.round(Number(p[1])*3)}/300</span><span>Nozzle 220° · Bed 55°</span></div></div>;
-const Dashboard:React.FC<{l:Lang}>=({l})=><AbsoluteFill className="screen"><Header/><Stats l={l}/><div className="cards">{printers.map((p,i)=><Fade start={i*5} key={p[0]}><Card p={p as string[]} i={i}/></Fade>)}</div></AbsoluteFill>;
-const Hero:React.FC<{l:Lang}>=({l})=>{const f=useCurrentFrame();return <AbsoluteFill className="hero"><Img src={staticFile('printer-hero.png')} style={{transform:`scale(${1+f/3000})`}}/><div className="shade"/><div className="heroText"><Fade><div className="eyebrow">BAMBU MONITOR</div><h1>{copy[l].tag}</h1><p>{copy[l].sub}</p></Fade></div></AbsoluteFill>};
-const Modes:React.FC<{l:Lang}>=({l})=><AbsoluteFill className="section"><div className="kicker">RESPONSIVE WORKSPACE</div><h2>{copy[l].full} · {copy[l].compact} · {copy[l].mini}</h2><div className="modes">{[copy[l].full,copy[l].compact,copy[l].mini].map((x,i)=><Fade start={i*10}><div className={'mode m'+i}><div className="dots"/><strong>{x}</strong>{printers.slice(0,4-i).map((p,j)=><div className="tiny"><b>{p[0]}</b><i style={{width:(35+j*15)+'%'}}/></div>)}</div></Fade>)}</div></AbsoluteFill>;
-const Cameras:React.FC<{l:Lang}>=({l})=><AbsoluteFill className="section cameras"><div className="kicker">LIVE VIEW</div><h2>{copy[l].wall}</h2><div className="grid"><div className="cam big"><Img src={staticFile('printer-detail.png')}/><span>H2D · LIVE</span></div><div className="cam"><Img src={staticFile('printer-hero.png')}/><span>A1mini · LIVE</span></div><div className="cam ui"><b>5</b><small>{copy[l].online}</small></div></div></AbsoluteFill>;
-const Settings:React.FC<{l:Lang}>=({l})=><AbsoluteFill className="section"><div className="kicker">CONTROL</div><h2>{copy[l].settings}</h2><div className="settings"><div className="nav">GENERAL<br/>CAMERAS<br/>NOTIFICATIONS<br/>APPEARANCE</div><div className="panel">{['Launch at startup','Window opacity','Camera quality','Notification integration'].map((x,i)=><div className="row"><span>{l==='zh'?['开机自启','窗口透明度','摄像头质量','通知集成'][i]:x}</span><i className={i===1?'slider':'toggle'}/></div>)}</div></div></AbsoluteFill>;
-const Outro:React.FC<{l:Lang}>=({l})=><AbsoluteFill className="outro"><div className="mark">BM</div><h1>BambuMonitor</h1><p>{copy[l].open}</p><strong>{copy[l].cta}</strong></AbsoluteFill>;
-export const Promo:React.FC<{lang:Lang}>=({lang})=><AbsoluteFill className="root"><Audio src={staticFile(lang==='zh'?'voice-zh.mp3':'voice-en.mp3')}/><Sequence durationInFrames={210}><Hero l={lang}/></Sequence><Sequence from={210} durationInFrames={450}><Dashboard l={lang}/></Sequence><Sequence from={660} durationInFrames={360}><Modes l={lang}/></Sequence><Sequence from={1020} durationInFrames={330}><Cameras l={lang}/></Sequence><Sequence from={1350} durationInFrames={300}><Settings l={lang}/></Sequence><Sequence from={1650} durationInFrames={210}><Outro l={lang}/></Sequence></AbsoluteFill>;
+
+const ease = (frame:number, start:number, end:number) => interpolate(frame, [start, end], [0, 1], {extrapolateLeft:'clamp', extrapolateRight:'clamp'});
+
+const Caption:React.FC<{children:React.ReactNode}> = ({children}) => (
+  <div className="caption"><span>{children}</span></div>
+);
+
+const RealScreenshot:React.FC<{src:string; fit?:'contain'|'cover'; zoom?:number; x?:number; y?:number}> = ({src, fit='contain', zoom=1.02, x=0, y=0}) => {
+  const frame = useCurrentFrame();
+  const scale = interpolate(frame, [0, 300], [1, zoom], {extrapolateRight:'clamp'});
+  return <div className="shot"><Img src={staticFile(src)} style={{objectFit:fit, transform:`translate(${x}px, ${y}px) scale(${scale})`}} /></div>;
+};
+
+const Intro:React.FC<{lang:Lang}> = ({lang}) => {
+  const frame = useCurrentFrame();
+  return <AbsoluteFill className="intro">
+    <Img src={staticFile('ui-dashboard.png')} className="intro-bg" />
+    <div className="intro-shade" />
+    <div className="intro-copy" style={{opacity:ease(frame, 8, 28), transform:`translateY(${interpolate(ease(frame,8,28),[0,1],[24,0])}px)`}}>
+      <div className="logo">BM</div><small>BAMBU MONITOR</small><h1>{text[lang].title}</h1>
+    </div>
+  </AbsoluteFill>;
+};
+
+const Dashboard:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="stage"><RealScreenshot src="ui-dashboard.png" zoom={1.035}/><Caption>{text[lang].lead}</Caption></AbsoluteFill>;
+
+const Modes:React.FC<{lang:Lang}> = ({lang}) => {
+  const frame=useCurrentFrame();
+  return <AbsoluteFill className="stage modes-real">
+    <div className="window w-full" style={{opacity:ease(frame,0,16),transform:`translateY(${interpolate(ease(frame,0,20),[0,1],[28,0])}px)`}}><Img src={staticFile('ui-dashboard.png')}/></div>
+    <div className="window w-compact" style={{opacity:ease(frame,18,34),transform:`translateY(${interpolate(ease(frame,18,38),[0,1],[28,0])}px)`}}><Img src={staticFile('ui-compact.png')}/></div>
+    <div className="window w-mini" style={{opacity:ease(frame,36,52),transform:`translateY(${interpolate(ease(frame,36,56),[0,1],[28,0])}px)`}}><Img src={staticFile('ui-mini.png')}/></div>
+    <Caption>{text[lang].modes}</Caption>
+  </AbsoluteFill>;
+};
+
+const Cameras:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="stage camera-real"><div className="camera-wall"><Img src={staticFile('ui-camera-wall.png')}/></div><div className="camera-zoom"><Img src={staticFile('ui-camera-zoom.png')}/></div><Caption>{text[lang].cameras}</Caption></AbsoluteFill>;
+
+const Settings:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="stage"><RealScreenshot src="ui-settings.png" zoom={1.025}/><Caption>{text[lang].settings}</Caption></AbsoluteFill>;
+
+const Outro:React.FC<{lang:Lang}> = ({lang}) => {
+  const frame=useCurrentFrame();
+  return <AbsoluteFill className="outro"><div className="outro-ui"><Img src={staticFile('ui-dashboard.png')}/></div><div className="outro-shade"/><div className="outro-copy" style={{opacity:ease(frame,5,25)}}><div className="logo">BM</div><h1>BambuMonitor</h1><p>{text[lang].end}</p></div></AbsoluteFill>;
+};
+
+export const Promo:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="root">
+  <Audio src={staticFile(lang==='zh'?'voice-zh.mp3':'voice-en.mp3')} />
+  <Sequence durationInFrames={210}><Intro lang={lang}/></Sequence>
+  <Sequence from={210} durationInFrames={450}><Dashboard lang={lang}/></Sequence>
+  <Sequence from={660} durationInFrames={360}><Modes lang={lang}/></Sequence>
+  <Sequence from={1020} durationInFrames={330}><Cameras lang={lang}/></Sequence>
+  <Sequence from={1350} durationInFrames={300}><Settings lang={lang}/></Sequence>
+  <Sequence from={1650} durationInFrames={210}><Outro lang={lang}/></Sequence>
+</AbsoluteFill>;
