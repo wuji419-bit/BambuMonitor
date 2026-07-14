@@ -45,19 +45,31 @@ const Intro:React.FC<{lang:Lang}> = ({lang}) => {
   </AbsoluteFill>;
 };
 
-const Dashboard:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="stage"><RealScreenshot src="ui-dashboard.png" zoom={1.035}/><Caption>{text[lang].lead}</Caption></AbsoluteFill>;
+const Dashboard:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="stage"><RealScreenshot src="ui-dashboard-focus.png" zoom={1.035}/><Caption>{text[lang].lead}</Caption></AbsoluteFill>;
 
-const Modes:React.FC<{lang:Lang}> = ({lang}) => {
+const ModeShot:React.FC<{src:string;label:string;note:string;compact?:boolean;mini?:boolean}> = ({src,label,note,compact,mini}) => {
   const frame=useCurrentFrame();
-  return <AbsoluteFill className="stage modes-real">
-    <div className="window w-full" style={{opacity:ease(frame,0,16),transform:`translateY(${interpolate(ease(frame,0,20),[0,1],[28,0])}px)`}}><Img src={staticFile('ui-dashboard.png')}/></div>
-    <div className="window w-compact" style={{opacity:ease(frame,18,34),transform:`translateY(${interpolate(ease(frame,18,38),[0,1],[28,0])}px)`}}><Img src={staticFile('ui-compact.png')}/></div>
-    <div className="window w-mini" style={{opacity:ease(frame,36,52),transform:`translateY(${interpolate(ease(frame,36,56),[0,1],[28,0])}px)`}}><Img src={staticFile('ui-mini.png')}/></div>
-    <Caption>{text[lang].modes}</Caption>
-  </AbsoluteFill>;
+  const enter=ease(frame,0,18);
+  return <AbsoluteFill className="mode-shot" style={{opacity:enter}}><div className={`mode-image ${compact?'is-compact':''} ${mini?'is-mini':''}`} style={{transform:`translateX(${interpolate(enter,[0,1],[70,0])}px) scale(${interpolate(frame,[0,119],[1,1.025])})`}}><Img src={staticFile(src)}/></div><div className="mode-label"><small>WINDOW MODE</small><strong>{label}</strong><span>{note}</span></div></AbsoluteFill>;
 };
 
-const Cameras:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="stage camera-real"><div className="camera-wall"><Img src={staticFile('ui-camera-wall.png')}/></div><div className="camera-zoom"><Img src={staticFile('ui-camera-zoom.png')}/></div><Caption>{text[lang].cameras}</Caption></AbsoluteFill>;
+const Modes:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="stage modes-real">
+  <Sequence durationInFrames={120}><ModeShot src="ui-dashboard-focus.png" label={lang==='zh'?'完整窗口':'FULL'} note="1200 × 430"/></Sequence>
+  <Sequence from={120} durationInFrames={120}><ModeShot src="ui-compact-focus.png" label={lang==='zh'?'紧凑窗口':'COMPACT'} note="520 × 315" compact/></Sequence>
+  <Sequence from={240} durationInFrames={120}><ModeShot src="ui-mini.png" label={lang==='zh'?'迷你窗口':'MINI'} note="320 × 180" mini/></Sequence>
+  <Caption>{text[lang].modes}</Caption>
+</AbsoluteFill>;
+
+const CameraShot:React.FC<{src:string;wall?:boolean}> = ({src,wall}) => {
+  const frame=useCurrentFrame();
+  return <AbsoluteFill className="camera-shot"><Img className="camera-backdrop" src={staticFile(src)}/><div className={wall?'camera-frame is-wall':'camera-frame'} style={{transform:`scale(${interpolate(frame,[0,164],[1,1.025])})`}}><Img src={staticFile(src)}/></div></AbsoluteFill>;
+};
+
+const Cameras:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="stage camera-real">
+  <Sequence durationInFrames={165}><CameraShot src="ui-camera-wall-focus.png" wall/></Sequence>
+  <Sequence from={165} durationInFrames={165}><CameraShot src="ui-camera-zoom.png"/></Sequence>
+  <Caption>{text[lang].cameras}</Caption>
+</AbsoluteFill>;
 
 const Settings:React.FC<{lang:Lang}> = ({lang}) => <AbsoluteFill className="stage"><RealScreenshot src="ui-settings.png" zoom={1.025}/><Caption>{text[lang].settings}</Caption></AbsoluteFill>;
 
