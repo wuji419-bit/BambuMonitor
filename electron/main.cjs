@@ -6,6 +6,7 @@ const http = require('http');
 const { spawn } = require('child_process');
 const mqtt = require('mqtt');
 const { installSafeConsole } = require('./safe-console.cjs');
+const { enforceSingleInstance } = require('./single-instance.cjs');
 const {
   clearAuthSession,
   readAuthSession,
@@ -57,6 +58,10 @@ let cameraServer = null;
 let cameraServerPort = 0;
 const MQTT_RECONNECT_PERIOD_MS = 5000;
 const MQTT_RECONNECT_GRACE_MS = 45000;
+const ownsSingleInstanceLock = enforceSingleInstance(app, () => {
+  bringWindowToFront();
+  updateTrayMenu();
+});
 
 function sendRendererEvent(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -834,6 +839,7 @@ function createWindow() {
 }
 
 app.on('ready', () => {
+  if (!ownsSingleInstanceLock) return;
   createWindow();
 
   globalShortcut.register('CommandOrControl+Shift+L', () => {
