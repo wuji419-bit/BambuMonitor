@@ -1,0 +1,564 @@
+import assert from 'node:assert/strict';
+import { constants as fsConstants } from 'node:fs';
+import * as fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+
+import { createStorage } from './storage.js';
+
+async function makeTempDir(t, prefix = 'bambu-storage-') {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  t.after(async () => {
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+  return directory;
+}
+
+function modeBits(stat) {
+  return stat.mode & 0o777;
+}
+
+function tempFiles(entries, name) {
+  return entries.filter((entry) => entry.startsWith(`.${name}.`) && entry.endsWith('.tmp'));
+}
+
+function proxyHandle(handle, overrides = {}) {
+  return new Proxy(handle, {
+    get(target, property) {
+      if (Object.hasOwn(overrides, property)) return overrides[property];
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+function mutateBase64(value) {
+  const bytes = Buffer.from(value, 'base64');
+  bytes[0] ^= 0x01;
+  return bytes.toString('base64');
+}
+
+test('creates a private data directory and converges concurrent key initialization', async (t) => {
+  const root = await makeTempDir(t);
+  const dataDir = path.join(root, 'nested', 'data');
+
+  const stores = await Promise.all([
+    createStorage({ dataDir }),
+    createStorage({ dataDir }),
+    createStorage({ dataDir }),
+  ]);
+
+  const keyOnDisk = await fs.readFile(path.join(dataDir, 'secret.key'));
+  assert.equal(keyOnDisk.length, 32);
+  assert.deepEqual(stores.map((storage) => storage.getSecretKey()), [keyOnDisk, keyOnDisk, keyOnDisk]);
+  assert.equal(stores[0].dataDir, path.resolve(dataDir));
+
+  const callerCopy = stores[0].getSecretKey();
+  callerCopy.fill(0);
+  assert.deepEqual(stores[0].getSecretKey(), keyOnDisk);
+
+  if (process.platform !== 'win32') {
+    assert.equal(modeBits(await fs.stat(dataDir)), 0o700);
+    assert.equal(modeBits(await fs.stat(path.join(dataDir, 'secret.key'))), 0o600);
+  }
+});
+
+test('fails initialization when private permissions cannot be enforced', async (t) => {
+  await t.test('rejects a data directory chmod failure before creating a key', async (t) => {
+    const root = await makeTempDir(t);
+    const dataDir = path.join(root, 'data');
+    const failingFs = {
+      ...fs,
+      async chmod(target, mode) {
+        if (target === dataDir) {
+          const error = new Error('simulated data directory chmod failure');
+          error.code = 'EACCES';
+          throw error;
+        }
+        return fs.chmod(target, mode);
+      },
+    };
+
+    await assert.rejects(
+      createStorage({ dataDir, fsApi: failingFs }),
+      /simulated data directory chmod failure/,
+    );
+    await assert.rejects(fs.stat(path.join(dataDir, 'secret.key')), { code: 'ENOENT' });
+  });
+
+  await t.test('rejects an existing key chmod failure', async (t) => {
+    const dataDir = await makeTempDir(t);
+    const keyPath = path.join(dataDir, 'secret.key');
+    await fs.writeFile(keyPath, Buffer.alloc(32, 0xa7), { mode: 0o600 });
+    const failingFs = {
+      ...fs,
+      async chmod(target, mode) {
+        if (target === keyPath) {
+          const error = new Error('simulated secret key chmod failure');
+          error.code = 'EACCES';
+          throw error;
+        }
+        return fs.chmod(target, mode);
+      },
+    };
+
+    await assert.rejects(
+      createStorage({ dataDir, fsApi: failingFs }),
+      /simulated secret key chmod failure/,
+    );
+  });
+});
+
+test('keeps an existing valid key and rejects invalid key files without exposing bytes', async (t) => {
+  await t.test('keeps a valid key', async (t) => {
+    const dataDir = await makeTempDir(t);
+    const original = Buffer.alloc(32, 0xa7);
+    await fs.writeFile(path.join(dataDir, 'secret.key'), original, { mode: 0o600 });
+
+    const storage = await createStorage({ dataDir });
+
+    assert.deepEqual(storage.getSecretKey(), original);
+    assert.deepEqual(await fs.readFile(path.join(dataDir, 'secret.key')), original);
+  });
+
+  await t.test('rejects a key with the wrong length', async (t) => {
+    const dataDir = await makeTempDir(t);
+    const marker = 'DO_NOT_LEAK_KEY_BYTES';
+    await fs.writeFile(path.join(dataDir, 'secret.key'), marker, { mode: 0o600 });
+
+    await assert.rejects(
+      createStorage({ dataDir }),
+      (error) => error.message === 'Invalid secret key file: secret.key' && !error.message.includes(marker),
+    );
+  });
+
+  await t.test('rejects a non-file key target', async (t) => {
+    const dataDir = await makeTempDir(t);
+    await fs.mkdir(path.join(dataDir, 'secret.key'));
+
+    await assert.rejects(createStorage({ dataDir }), {
+      message: 'Invalid secret key file: secret.key',
+    });
+  });
+});
+
+test('reads and writes deep JSON values with a trailing newline', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  const fallback = { nested: { enabled: false } };
+
+  const missing = await storage.readJson('settings.json', fallback);
+  missing.nested.enabled = true;
+  assert.deepEqual(fallback, { nested: { enabled: false } });
+
+  const input = { nested: { enabled: true }, items: [1, 2, 3] };
+  await storage.writeJson('settings.json', input);
+  input.nested.enabled = false;
+
+  assert.deepEqual(await storage.readJson('settings.json', null), {
+    nested: { enabled: true },
+    items: [1, 2, 3],
+  });
+  const raw = await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8');
+  assert.equal(raw.endsWith('\n'), true);
+  assert.equal(raw.endsWith('\n\n'), false);
+
+  if (process.platform !== 'win32') {
+    assert.equal(modeBits(await fs.stat(path.join(dataDir, 'settings.json'))), 0o600);
+  }
+});
+
+test('rejects values that JSON cannot represent without loss', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  const cycle = {};
+  cycle.self = cycle;
+
+  await assert.rejects(storage.writeJson('root-undefined.json', undefined), {
+    message: 'Value for root-undefined.json is not JSON serializable',
+  });
+  await assert.rejects(storage.writeJson('root-function.json', () => {}), {
+    message: 'Value for root-function.json is not JSON serializable',
+  });
+  await assert.rejects(storage.writeJson('nested.json', { keep: true, missing: undefined }), {
+    message: 'Value for nested.json is not JSON serializable',
+  });
+  await assert.rejects(storage.writeJson('nested-function.json', { unsafe() {} }), {
+    message: 'Value for nested-function.json is not JSON serializable',
+  });
+  await assert.rejects(storage.writeJson('bigint.json', { value: 1n }), {
+    message: 'Value for bigint.json is not JSON serializable',
+  });
+  await assert.rejects(storage.writeJson('cycle.json', cycle), {
+    message: 'Value for cycle.json is not JSON serializable',
+  });
+});
+
+test('rejects managed names that are not simple basenames', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  const invalidNames = [
+    '',
+    '.',
+    '..',
+    'nested/file.json',
+    'nested\\file.json',
+    path.resolve(dataDir, '..', 'outside.json'),
+  ];
+
+  for (const name of invalidNames) {
+    await assert.rejects(storage.readJson(name, null), { message: 'Invalid storage name' });
+    await assert.rejects(storage.writeJson(name, {}), { message: 'Invalid storage name' });
+    await assert.rejects(storage.readEncrypted(name), { message: 'Invalid storage name' });
+    await assert.rejects(storage.writeEncrypted(name, {}), { message: 'Invalid storage name' });
+    await assert.rejects(storage.remove(name), { message: 'Invalid storage name' });
+    await assert.rejects(storage.backup(name, 'valid.bak'), { message: 'Invalid storage name' });
+    await assert.rejects(storage.backup('valid.json', name), { message: 'Invalid storage name' });
+  }
+});
+
+test('malformed JSON throws a stable filename-only error and non-ENOENT errors are not fallbacks', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  const marker = 'SENSITIVE_JSON_FRAGMENT';
+  await fs.writeFile(path.join(dataDir, 'broken.json'), `{${marker}`, { mode: 0o600 });
+
+  await assert.rejects(storage.readJson('broken.json', { fallback: true }), {
+    message: 'Invalid JSON in broken.json',
+  });
+
+  await fs.mkdir(path.join(dataDir, 'directory.json'));
+  await assert.rejects(storage.readJson('directory.json', { fallback: true }), {
+    message: 'Invalid storage file: directory.json',
+  });
+});
+
+test('remove deletes files and ignores missing targets', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  await storage.writeJson('remove-me.json', { present: true });
+
+  await storage.remove('remove-me.json');
+  await storage.remove('remove-me.json');
+
+  assert.equal(await storage.readJson('remove-me.json', null), null);
+});
+
+test('partial temp writes preserve the prior destination and clean the temp file', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const healthyStorage = await createStorage({ dataDir });
+  await healthyStorage.writeJson('state.json', { generation: 1 });
+  const priorBytes = await fs.readFile(path.join(dataDir, 'state.json'));
+  let tempWriteCalls = 0;
+
+  const failingFs = {
+    ...fs,
+    async open(target, ...args) {
+      const handle = await fs.open(target, ...args);
+      if (!path.basename(String(target)).startsWith('.state.json.')) return handle;
+      return proxyHandle(handle, {
+        write: async (buffer, offset = 0, length = buffer.length - offset, position = null) => {
+          tempWriteCalls += 1;
+          if (tempWriteCalls === 1) {
+            return handle.write(buffer, offset, Math.min(4, length), position);
+          }
+          const error = new Error('simulated partial write failure');
+          error.code = 'EIO';
+          throw error;
+        },
+      });
+    },
+  };
+  const failingStorage = await createStorage({ dataDir, fsApi: failingFs });
+
+  await assert.rejects(failingStorage.writeJson('state.json', { generation: 2 }), /simulated partial write failure/);
+
+  assert.deepEqual(await fs.readFile(path.join(dataDir, 'state.json')), priorBytes);
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'state.json'), []);
+});
+
+test('rename failures preserve the prior destination and clean the temp file', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const healthyStorage = await createStorage({ dataDir });
+  await healthyStorage.writeJson('state.json', { generation: 1 });
+  const priorBytes = await fs.readFile(path.join(dataDir, 'state.json'));
+
+  const failingFs = {
+    ...fs,
+    async rename(source, destination) {
+      if (destination === path.join(dataDir, 'state.json')) {
+        const error = new Error('simulated rename failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return fs.rename(source, destination);
+    },
+  };
+  const failingStorage = await createStorage({ dataDir, fsApi: failingFs });
+
+  await assert.rejects(failingStorage.writeJson('state.json', { generation: 2 }), /simulated rename failure/);
+
+  assert.deepEqual(await fs.readFile(path.join(dataDir, 'state.json')), priorBytes);
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'state.json'), []);
+});
+
+test('temp sync failures preserve the prior destination and clean the temp file', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const healthyStorage = await createStorage({ dataDir });
+  await healthyStorage.writeJson('state.json', { generation: 1 });
+  const priorBytes = await fs.readFile(path.join(dataDir, 'state.json'));
+
+  const failingFs = {
+    ...fs,
+    async open(target, ...args) {
+      const handle = await fs.open(target, ...args);
+      if (!path.basename(String(target)).startsWith('.state.json.')) return handle;
+      return proxyHandle(handle, {
+        sync: async () => {
+          const error = new Error('simulated temp sync failure');
+          error.code = 'EIO';
+          throw error;
+        },
+      });
+    },
+  };
+  const failingStorage = await createStorage({ dataDir, fsApi: failingFs });
+
+  await assert.rejects(failingStorage.writeJson('state.json', { generation: 2 }), /simulated temp sync failure/);
+
+  assert.deepEqual(await fs.readFile(path.join(dataDir, 'state.json')), priorBytes);
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'state.json'), []);
+});
+
+test('does not swallow arbitrary directory sync errors', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const healthyStorage = await createStorage({ dataDir });
+
+  const failingFs = {
+    ...fs,
+    async open(target, ...args) {
+      if (target === dataDir) {
+        const error = new Error('simulated directory sync failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return fs.open(target, ...args);
+    },
+  };
+  const failingStorage = await createStorage({ dataDir, fsApi: failingFs });
+
+  await assert.rejects(
+    failingStorage.writeJson('state.json', { generation: 2 }),
+    /simulated directory sync failure/,
+  );
+  assert.deepEqual(await healthyStorage.readJson('state.json', null), { generation: 2 });
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'state.json'), []);
+});
+
+test('concurrent writes use distinct same-directory temp paths', async (t) => {
+  const dataDir = await makeTempDir(t);
+  await createStorage({ dataDir });
+  const openedTemps = [];
+  const observingFs = {
+    ...fs,
+    async open(target, ...args) {
+      if (path.basename(String(target)).startsWith('.parallel.json.')) openedTemps.push(String(target));
+      return fs.open(target, ...args);
+    },
+  };
+  const storage = await createStorage({ dataDir, fsApi: observingFs });
+
+  await Promise.all([
+    storage.writeJson('parallel.json', { writer: 1 }),
+    storage.writeJson('parallel.json', { writer: 2 }),
+  ]);
+
+  assert.equal(openedTemps.length, 2);
+  assert.equal(new Set(openedTemps).size, 2);
+  assert.equal(openedTemps.every((tempPath) => path.dirname(tempPath) === dataDir), true);
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'parallel.json'), []);
+});
+
+test('backup is exclusive, byte-identical, and idempotent', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  const original = Buffer.from([0x00, 0xff, 0x41, 0x0a, 0x7f]);
+  await fs.writeFile(path.join(dataDir, 'source.bin'), original, { mode: 0o600 });
+
+  assert.equal(await storage.backup('source.bin', 'source.bin.bak'), true);
+  assert.deepEqual(await fs.readFile(path.join(dataDir, 'source.bin.bak')), original);
+
+  await fs.writeFile(path.join(dataDir, 'source.bin'), Buffer.from('replacement'));
+  assert.equal(await storage.backup('source.bin', 'source.bin.bak'), false);
+  assert.deepEqual(await fs.readFile(path.join(dataDir, 'source.bin.bak')), original);
+
+  if (process.platform !== 'win32') {
+    assert.equal(modeBits(await fs.stat(path.join(dataDir, 'source.bin.bak'))), 0o600);
+  }
+});
+
+test('rejects symlink key and every managed operation target when symlinks are available', async (t) => {
+  async function makeSymlink(target, linkPath) {
+    try {
+      await fs.symlink(target, linkPath, process.platform === 'win32' ? 'file' : undefined);
+      return true;
+    } catch (error) {
+      if (process.platform === 'win32' && ['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) return false;
+      throw error;
+    }
+  }
+
+  const root = await makeTempDir(t);
+  const keyDir = path.join(root, 'key-data');
+  await fs.mkdir(keyDir);
+  const externalKey = path.join(root, 'external.key');
+  await fs.writeFile(externalKey, Buffer.alloc(32, 0x11));
+  if (!await makeSymlink(externalKey, path.join(keyDir, 'secret.key'))) {
+    t.skip('Windows symlink privilege is unavailable');
+    return;
+  }
+
+  await assert.rejects(createStorage({ dataDir: keyDir }), {
+    message: 'Unsafe symbolic link: secret.key',
+  });
+
+  const dataDir = path.join(root, 'regular-data');
+  const storage = await createStorage({ dataDir });
+  const externalData = path.join(root, 'external-data');
+  await fs.writeFile(externalData, '{}');
+  for (const name of ['read.json', 'write.json', 'read.enc', 'write.enc', 'remove.json', 'source-link.bin', 'backup-link.bin']) {
+    await makeSymlink(externalData, path.join(dataDir, name));
+  }
+  await fs.writeFile(path.join(dataDir, 'regular-source.bin'), 'source', { mode: 0o600 });
+
+  await assert.rejects(storage.readJson('read.json', null), { message: 'Unsafe symbolic link: read.json' });
+  await assert.rejects(storage.writeJson('write.json', {}), { message: 'Unsafe symbolic link: write.json' });
+  await assert.rejects(storage.readEncrypted('read.enc'), { message: 'Unsafe symbolic link: read.enc' });
+  await assert.rejects(storage.writeEncrypted('write.enc', { token: 'not-in-errors' }), {
+    message: 'Unsafe symbolic link: write.enc',
+  });
+  await assert.rejects(storage.remove('remove.json'), { message: 'Unsafe symbolic link: remove.json' });
+  await assert.rejects(storage.backup('source-link.bin', 'copy.bin'), {
+    message: 'Unsafe symbolic link: source-link.bin',
+  });
+  await assert.rejects(storage.backup('regular-source.bin', 'backup-link.bin'), {
+    message: 'Unsafe symbolic link: backup-link.bin',
+  });
+});
+
+test('encrypts, reads, and restarts without storing plaintext', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const firstStorage = await createStorage({ dataDir });
+  const secret = {
+    account: 'private-account@example.test',
+    token: 'TOP_SECRET_SESSION_TOKEN',
+    nested: { accessCode: '13572468' },
+  };
+
+  assert.equal(await firstStorage.readEncrypted('session.enc'), null);
+  await firstStorage.writeEncrypted('session.enc', secret);
+
+  const bytes = await fs.readFile(path.join(dataDir, 'session.enc'));
+  const text = bytes.toString('utf8');
+  assert.equal(text.includes(secret.account), false);
+  assert.equal(text.includes(secret.token), false);
+  assert.equal(text.includes(secret.nested.accessCode), false);
+
+  const secondStorage = await createStorage({ dataDir });
+  assert.deepEqual(await secondStorage.readEncrypted('session.enc'), secret);
+
+  if (process.platform !== 'win32') {
+    assert.equal(modeBits(await fs.stat(path.join(dataDir, 'session.enc'))), 0o600);
+  }
+});
+
+test('uses a fresh 12-byte IV and different ciphertext for each encrypted write', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  const value = { token: 'same-value-each-time' };
+
+  await storage.writeEncrypted('session.enc', value);
+  const first = JSON.parse(await fs.readFile(path.join(dataDir, 'session.enc'), 'utf8'));
+  await storage.writeEncrypted('session.enc', value);
+  const second = JSON.parse(await fs.readFile(path.join(dataDir, 'session.enc'), 'utf8'));
+
+  assert.equal(Buffer.from(first.iv, 'base64').length, 12);
+  assert.equal(Buffer.from(second.iv, 'base64').length, 12);
+  assert.equal(Buffer.from(first.tag, 'base64').length, 16);
+  assert.notEqual(first.iv, second.iv);
+  assert.notEqual(first.ciphertext, second.ciphertext);
+});
+
+test('rejects altered ciphertext, tag, and filename AAD with a stable authentication error', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  await storage.writeEncrypted('session.enc', { token: 'AUTH_ERROR_MUST_NOT_LEAK_THIS' });
+  const envelopePath = path.join(dataDir, 'session.enc');
+  const originalBytes = await fs.readFile(envelopePath);
+  const original = JSON.parse(originalBytes.toString('utf8'));
+
+  for (const field of ['ciphertext', 'tag']) {
+    const altered = { ...original, [field]: mutateBase64(original[field]) };
+    await fs.writeFile(envelopePath, `${JSON.stringify(altered)}\n`, { mode: 0o600 });
+    await assert.rejects(
+      storage.readEncrypted('session.enc'),
+      (error) => error.message === 'Unable to authenticate encrypted file: session.enc'
+        && !error.message.includes(original[field]),
+    );
+  }
+
+  await fs.writeFile(path.join(dataDir, 'renamed.enc'), originalBytes, { mode: 0o600 });
+  await assert.rejects(storage.readEncrypted('renamed.enc'), {
+    message: 'Unable to authenticate encrypted file: renamed.enc',
+  });
+});
+
+test('strictly validates encrypted envelope fields and base64 lengths', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  const envelopePath = path.join(dataDir, 'session.enc');
+  await storage.writeEncrypted('session.enc', { token: 'hidden' });
+  const valid = JSON.parse(await fs.readFile(envelopePath, 'utf8'));
+
+  const cases = [
+    { ...valid, tag: undefined },
+    { ...valid, extra: true },
+    { ...valid, version: 2 },
+    { ...valid, algorithm: 'aes-128-gcm' },
+    { ...valid, iv: Buffer.alloc(11).toString('base64') },
+    { ...valid, iv: `${valid.iv}=` },
+    { ...valid, tag: Buffer.alloc(15).toString('base64') },
+    { ...valid, tag: valid.tag.replace(/=+$/, '') },
+    { ...valid, ciphertext: '' },
+    { ...valid, ciphertext: '***not-base64***' },
+  ];
+
+  for (const envelope of cases) {
+    await fs.writeFile(envelopePath, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
+    await assert.rejects(storage.readEncrypted('session.enc'), {
+      message: 'Invalid encrypted envelope: session.enc',
+    });
+  }
+
+  await fs.writeFile(envelopePath, '{malformed', { mode: 0o600 });
+  await assert.rejects(storage.readEncrypted('session.enc'), {
+    message: 'Invalid encrypted envelope: session.enc',
+  });
+});
+
+test('rejects an encrypted file read with the wrong key', async (t) => {
+  const root = await makeTempDir(t);
+  const firstDir = path.join(root, 'first');
+  const secondDir = path.join(root, 'second');
+  const firstStorage = await createStorage({ dataDir: firstDir });
+  const secondStorage = await createStorage({ dataDir: secondDir });
+  await firstStorage.writeEncrypted('session.enc', { token: 'WRONG_KEY_SECRET' });
+  await fs.copyFile(path.join(firstDir, 'session.enc'), path.join(secondDir, 'session.enc'), fsConstants.COPYFILE_EXCL);
+
+  await assert.rejects(
+    secondStorage.readEncrypted('session.enc'),
+    (error) => error.message === 'Unable to authenticate encrypted file: session.enc'
+      && !error.message.includes('WRONG_KEY_SECRET'),
+  );
+});
