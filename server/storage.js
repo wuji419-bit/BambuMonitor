@@ -17,7 +17,6 @@ const WINDOWS_UNSUPPORTED_DIRECTORY_FSYNC_ERRORS = new Set([
   'EBADF',
   'EINVAL',
   'ENOTSUP',
-  'EPERM',
   'UNKNOWN',
 ]);
 
@@ -216,6 +215,9 @@ function isUnsupportedWindowsDirectorySync(error, operation) {
 }
 
 async function syncDirectory(fsApi, directory) {
+  // Native Node directory handles cannot be fsynced on Windows; custom adapters may opt in.
+  if (process.platform === 'win32' && fsApi.supportsDirectoryFsync !== true) return;
+
   let handle;
   let operation = 'open';
   try {

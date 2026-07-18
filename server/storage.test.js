@@ -540,6 +540,7 @@ test('does not swallow arbitrary directory sync errors', async (t) => {
 
   const failingFs = {
     ...fs,
+    supportsDirectoryFsync: true,
     async open(target, ...args) {
       if (target === dataDir) {
         const error = new Error('simulated directory sync failure');
@@ -559,11 +560,12 @@ test('does not swallow arbitrary directory sync errors', async (t) => {
   assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'state.json'), []);
 });
 
-test('does not treat a generic Windows EPERM as an unsupported directory fsync', async (t) => {
+test('propagates a genuine Windows EPERM from directory fsync', async (t) => {
   const dataDir = await makeTempDir(t);
   const healthyStorage = await createStorage({ dataDir });
   const failingFs = {
     ...fs,
+    supportsDirectoryFsync: true,
     async open(target, ...args) {
       const handle = await fs.open(target, ...args);
       if (target !== dataDir) return handle;
@@ -571,6 +573,7 @@ test('does not treat a generic Windows EPERM as an unsupported directory fsync',
         sync: async () => {
           const error = new Error('simulated genuine directory EPERM');
           error.code = 'EPERM';
+          error.syscall = 'fsync';
           throw error;
         },
       });
