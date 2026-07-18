@@ -12,7 +12,9 @@ const {
   readAuthSession,
   writeAuthSession,
 } = require('./auth-session.cjs');
-const { buildMqttConnectionOptions, extractBambuUsername } = require('./mqtt-options.cjs');
+const { buildMqttConnectionOptions } = require('./mqtt-options.cjs');
+const { createBambuCloudClient } = require('../core/bambu-cloud.cjs');
+const { scanBambuPrinters } = require('../core/lan-discovery.cjs');
 const {
   clampWindowSize,
   createWindowBoundsCloseHandshake,
@@ -26,6 +28,7 @@ const {
 } = require('./camera-stream.cjs');
 
 installSafeConsole();
+const bambuCloud = createBambuCloudClient({ logger: console });
 
 function getAuthSessionProtection() {
   try {
@@ -169,15 +172,6 @@ function assertValidWebhookUrl(url) {
     throw new Error('Webhook URL must use http or https');
   }
   return parsed.toString();
-}
-
-function safelyCloseSocket(socket) {
-  if (!socket) return;
-  try {
-    socket.close();
-  } catch {
-    // Ignore cleanup failures for already-closed sockets.
-  }
 }
 
 function getLoginItemOptions(openAtLogin) {
@@ -867,10 +861,6 @@ app.on('will-quit', () => {
   clearWindowBoundsState();
   isAppQuitRequested = false;
   globalShortcut.unregisterAll();
-  safelyCloseSocket(global.listenSocket);
-  safelyCloseSocket(global.searchSocket);
-  global.listenSocket = null;
-  global.searchSocket = null;
   for (const [, conn] of mqttConnections) {
     conn.intentional = true;
     clearMqttDisconnectTimer(conn);
@@ -998,271 +988,16 @@ ipcMain.handle('camera-stop-all', async () => {
 });
 
 ipcMain.handle('scan-printers', async () => {
-  const dgram = require('dgram');
-  const foundPrinters = new Map();
-
-  safelyCloseSocket(global.listenSocket);
-  safelyCloseSocket(global.searchSocket);
-
   try {
-    const listenSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-    const searchSocket = dgram.createSocket('udp4');
-
-    global.listenSocket = listenSocket;
-    global.searchSocket = searchSocket;
-
-    const parseMessage = (msg, rinfo) => {
-      const message = msg.toString();
-
-      if (
-        message.includes('urn:bambulab-com:device:3dprinter')
-        || message.includes('DevModel.bambu.com')
-        || message.includes('DevName.bambu.com')
-      ) {
-        if (message.includes('M-SEARCH')) {
-          return;
-        }
-
-        const printer = {
-          ip: rinfo.address,
-          name: 'Bambu Printer',
-          model: 'Unknown',
-          serial: '',
-        };
-
-        const usnLineMatch = message.match(/^USN:\s*([^\r\n]+)/im);
-        if (usnLineMatch) {
-          const usnValue = usnLineMatch[1].trim();
-          const uuidMatch = usnValue.match(/uuid:([^:\s]+)(?:::|$)/i);
-          const tokenMatch = usnValue.match(/^([A-Za-z0-9_-]+)/);
-          printer.serial = (uuidMatch?.[1] || tokenMatch?.[1] || '').trim();
-        }
-
-        if (!printer.serial) {
-          const serialFieldMatch = message.match(/(?:DevSerialNumber|SerialNumber)\.bambu\.com:\s*([^\r\n]+)/i);
-          if (serialFieldMatch) {
-            printer.serial = serialFieldMatch[1].trim();
-          }
-        }
-
-        const modelMatch = message.match(/DevModel\.bambu\.com:\s*([^\r\n]+)/i);
-        if (modelMatch) {
-          const modelCode = modelMatch[1].trim();
-          const modelMap = {
-            C12: 'P1S',
-            C11: 'P1P',
-            '3DPrinter-X1-Carbon': 'X1 Carbon',
-            '3DPrinter-X1': 'X1',
-            N2S: 'A1',
-            N1: 'A1 Mini',
-            O1D: 'H2D',
-            O1: 'H2',
-            'BL-P001': 'P1P',
-            'BL-P002': 'P1S',
-            'BL-A001': 'A1',
-          };
-          printer.model = modelMap[modelCode] || modelCode;
-        }
-
-        const nameMatch = message.match(/DevName\.bambu\.com:\s*([^\r\n]+)/i);
-        if (nameMatch) {
-          printer.name = nameMatch[1].trim();
-        }
-
-        if (printer.serial || printer.ip) {
-          foundPrinters.set(printer.ip, printer);
-          console.log('Found Bambu printer:', printer);
-        }
-      }
-    };
-
-    listenSocket.on('message', parseMessage);
-    searchSocket.on('message', parseMessage);
-
-    listenSocket.on('error', (err) => {
-      console.error('Listen socket error:', err);
-    });
-
-    searchSocket.on('error', (err) => {
-      console.error('Search socket error:', err);
-    });
-
-    listenSocket.bind(2021, () => {
-      console.log('Listening for Bambu printer broadcasts on port 2021');
-    });
-
-    searchSocket.bind(() => {
-      searchSocket.setBroadcast(true);
-
-      const bambuSearch = Buffer.from(
-        'M-SEARCH * HTTP/1.1\r\n'
-        + 'HOST: 239.255.255.250:1900\r\n'
-        + 'MAN: "ssdp:discover"\r\n'
-        + 'MX: 3\r\n'
-        + 'ST: urn:bambulab-com:device:3dprinter:1\r\n'
-        + '\r\n',
-      );
-
-      const genericSearch = Buffer.from(
-        'M-SEARCH * HTTP/1.1\r\n'
-        + 'HOST: 239.255.255.250:1900\r\n'
-        + 'MAN: "ssdp:discover"\r\n'
-        + 'MX: 3\r\n'
-        + 'ST: ssdp:all\r\n'
-        + '\r\n',
-      );
-
-      const targets = [
-        { port: 1900, address: '239.255.255.250' },
-        { port: 2021, address: '255.255.255.255' },
-        { port: 1990, address: '255.255.255.255' },
-      ];
-
-      const sendSearchRequests = () => {
-        targets.forEach((target) => {
-          searchSocket.send(bambuSearch, 0, bambuSearch.length, target.port, target.address);
-          searchSocket.send(genericSearch, 0, genericSearch.length, target.port, target.address);
-        });
-      };
-
-      sendSearchRequests();
-      console.log('Sent SSDP M-SEARCH requests (round 1)');
-
-      setTimeout(() => {
-        sendSearchRequests();
-        console.log('Sent SSDP M-SEARCH requests (round 2)');
-      }, 1500);
-
-      setTimeout(() => {
-        sendSearchRequests();
-        console.log('Sent SSDP M-SEARCH requests (round 3)');
-      }, 3000);
-
-      setTimeout(() => {
-        sendSearchRequests();
-        console.log('Sent SSDP M-SEARCH requests (round 4)');
-      }, 4500);
-    });
-
-    return await new Promise((resolve) => {
-      setTimeout(() => {
-        safelyCloseSocket(listenSocket);
-        safelyCloseSocket(searchSocket);
-        global.listenSocket = null;
-        global.searchSocket = null;
-
-        const results = Array.from(foundPrinters.values());
-        console.log(`Scan complete. Found ${results.length} printer(s)`);
-        resolve(results);
-      }, 6000);
-    });
+    return await scanBambuPrinters({ logger: console });
   } catch (err) {
-    console.error('Scan error:', err);
     throw new Error(err.message || '扫描打印机失败');
   }
 });
 
-const BAMBU_API = {
-  LOGIN: 'https://api.bambulab.cn/v1/user-service/user/login',
-  EMAIL_CODE: 'https://api.bambulab.cn/v1/user-service/user/sendemail/code',
-  SMS_CODE: 'https://api.bambulab.cn/v1/user-service/user/sendsmscode',
-  BIND: 'https://api.bambulab.cn/v1/iot-service/api/user/bind',
-  PREFERENCE: 'https://api.bambulab.cn/v1/design-user-service/my/preference',
-};
-
-function getBambuHeaders() {
-  return {
-    'User-Agent': 'bambu_network_agent/01.09.05.01',
-    'X-BBL-Client-Name': 'OrcaSlicer',
-    'X-BBL-Client-Type': 'slicer',
-    'X-BBL-Client-Version': '01.09.05.51',
-    'X-BBL-Language': 'zh-CN',
-    'X-BBL-OS-Type': 'windows',
-    'X-BBL-OS-Version': '10.0',
-    'X-BBL-Agent-Version': '01.09.05.01',
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
-  };
-}
-
-async function getBambuCloudUsername(accessToken) {
-  const tokenUsername = extractBambuUsername(accessToken);
-  if (tokenUsername) return tokenUsername;
-
-  try {
-    const response = await fetch(BAMBU_API.PREFERENCE, {
-      method: 'GET',
-      headers: {
-        ...getBambuHeaders(),
-        Authorization: `Bearer ${accessToken}`,
-      },
-    });
-    const data = await response.json();
-    return data?.uid ? `u_${data.uid}` : '';
-  } catch (err) {
-    console.warn('Get Bambu username failed:', err.message);
-    return '';
-  }
-}
-
-function translateError(errorMsg) {
-  if (!errorMsg) return '';
-
-  const translations = {
-    'Incorrect password': '密码错误',
-    'incorrect password': '密码错误',
-    'This account is not registered': '此账号未注册',
-    'Account not found': '账号不存在',
-    'Code does not exist or has expired': '验证码已过期或不存在',
-    'Incorrect code': '验证码错误',
-    'Invalid phone number': '手机号格式错误',
-    'Enter a valid phone number': '请输入有效的手机号',
-    'Network error': '网络错误',
-    'Request failed': '请求失败',
-  };
-
-  if (translations[errorMsg]) {
-    return translations[errorMsg];
-  }
-
-  for (const eng of Object.keys(translations)) {
-    if (errorMsg.toLowerCase().includes(eng.toLowerCase())) {
-      return translations[eng];
-    }
-  }
-
-  return errorMsg;
-}
-
-ipcMain.handle('cloud-login', async (_event, { account, password }) => {
-  try {
-    const response = await fetch(BAMBU_API.LOGIN, {
-      method: 'POST',
-      headers: getBambuHeaders(),
-      body: JSON.stringify({ account, password, apiError: '' }),
-    });
-
-    const data = await response.json();
-    console.log(`Cloud login response received (${response.status})`);
-
-    if (data.accessToken) {
-      return { success: true, accessToken: data.accessToken };
-    }
-
-    if (data.loginType === 'verifyCode') {
-      return { success: false, needVerifyCode: true, message: '需要验证码' };
-    }
-
-    if (data.loginType === 'tfa') {
-      return { success: false, needTfa: true, tfaKey: data.tfaKey, message: '需要两步验证码' };
-    }
-
-    return { success: false, error: translateError(data.error) || '登录失败' };
-  } catch (err) {
-    console.error('Cloud login error:', err);
-    return { success: false, error: translateError(err.message) };
-  }
-});
+ipcMain.handle('cloud-login', async (_event, credentials) => (
+  bambuCloud.loginPassword(credentials)
+));
 
 ipcMain.handle('auth-session-get', async () => ({
   success: true,
@@ -1289,106 +1024,18 @@ ipcMain.handle('auth-session-clear', async () => {
   }
 });
 
-ipcMain.handle('request-verify-code', async (_event, { account }) => {
-  try {
-    account = account.toString().replace(/\s+/g, '');
+ipcMain.handle('request-verify-code', async (_event, payload) => (
+  bambuCloud.requestVerifyCode(payload)
+));
 
-    const isEmail = account.includes('@');
-    const url = isEmail ? BAMBU_API.EMAIL_CODE : BAMBU_API.SMS_CODE;
-    const body = isEmail
-      ? { email: account, type: 'codeLogin' }
-      : { phone: account, type: 'codeLogin' };
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: getBambuHeaders(),
-      body: JSON.stringify(body),
-    });
-
-    if (response.ok) {
-      return { success: true, message: isEmail ? '验证码已发送到您的邮箱' : '验证码已发送到您的手机' };
-    }
-
-    const data = await response.json();
-    return { success: false, error: translateError(data.error) || '发送验证码失败' };
-  } catch (err) {
-    console.error('Request verify code error:', err);
-    return { success: false, error: translateError(err.message) };
-  }
-});
-
-ipcMain.handle('cloud-login-code', async (_event, { account, code }) => {
-  try {
-    account = account.toString().replace(/\s+/g, '');
-
-    const isEmail = account.includes('@');
-    const body = { code };
-
-    if (isEmail) {
-      body.email = account;
-    } else {
-      body.account = account;
-      body.loginType = 'phone';
-    }
-
-    const response = await fetch(BAMBU_API.LOGIN, {
-      method: 'POST',
-      headers: getBambuHeaders(),
-      body: JSON.stringify(body),
-    });
-
-    const data = await response.json();
-
-    if (data.accessToken) {
-      return { success: true, accessToken: data.accessToken };
-    }
-
-    if (data.code === 1) {
-      return { success: false, codeExpired: true, error: '验证码已过期或无效' };
-    }
-
-    if (data.code === 2) {
-      return { success: false, error: '验证码错误' };
-    }
-
-    return { success: false, error: translateError(data.error || data.message) || '登录失败' };
-  } catch (err) {
-    console.error('Code login error:', err);
-    return { success: false, error: translateError(err.message) };
-  }
-});
+ipcMain.handle('cloud-login-code', async (_event, payload) => (
+  bambuCloud.loginCode(payload)
+));
 
 ipcMain.handle('get-device-list', async (_event, { accessToken }) => {
   try {
-    const response = await fetch(BAMBU_API.BIND, {
-      method: 'GET',
-      headers: {
-        ...getBambuHeaders(),
-        Authorization: `Bearer ${accessToken}`,
-      },
-    });
-
-    const data = await response.json();
-    console.log(`Device list response received (${response.status}, ${Array.isArray(data.devices) ? data.devices.length : 0} devices)`);
-
-    if (data.devices) {
-      const username = await getBambuCloudUsername(accessToken);
-      const devices = data.devices.map((d) => ({
-        id: d.dev_id,
-        name: d.name,
-        model: d.dev_product_name || d.dev_model_name,
-        modelCode: d.dev_model_name,
-        accessCode: d.dev_access_code,
-        online: d.online,
-        printStatus: d.print_status,
-        nozzle: d.nozzle_diameter,
-      }));
-      return { success: true, devices, username };
-    }
-
-    return { success: false, error: data.error || '获取设备列表失败' };
+    return await bambuCloud.listDevices(accessToken);
   } catch (err) {
-    console.error('Get device list error:', err);
     return { success: false, error: err.message };
   }
 });
