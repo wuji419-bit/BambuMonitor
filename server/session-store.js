@@ -130,11 +130,11 @@ function pruneSessions(state, timestamp) {
   };
 }
 
-function evictSessions(sessions) {
-  if (sessions.length <= MAX_SESSIONS) return sessions;
+function evictSessions(sessions, limit = MAX_SESSIONS) {
+  if (sessions.length <= limit) return sessions;
   const ordered = [...sessions].sort((left, right) => left.lastSeenAt - right.lastSeenAt
     || left.createdAt - right.createdAt || left.idHash.localeCompare(right.idHash));
-  const evicted = new Set(ordered.slice(0, sessions.length - MAX_SESSIONS).map(({ idHash }) => idHash));
+  const evicted = new Set(ordered.slice(0, sessions.length - limit).map(({ idHash }) => idHash));
   return sessions.filter(({ idHash }) => !evicted.has(idHash));
 }
 
@@ -178,6 +178,41 @@ export async function createSessionStore({
     const result = queue.then(operation, operation);
     queue = result.catch(() => {});
     return result;
+  }
+
+  async function reconcileAfterMutationError(originalError, knownState) {
+    try {
+      const loaded = await storage.readEncrypted(SESSION_NAME);
+      if (loaded === null) {
+        state = null;
+      } else {
+        const validated = validateState(loaded);
+        state = pruneSessions(validated, readTime(now)).state;
+      }
+    } catch {
+      state = knownState;
+    }
+    throw originalError;
+  }
+
+  async function persistState(candidate) {
+    const knownState = state;
+    try {
+      await storage.writeEncrypted(SESSION_NAME, candidate);
+    } catch (error) {
+      await reconcileAfterMutationError(error, knownState);
+    }
+    state = candidate;
+  }
+
+  async function removeState() {
+    const knownState = state;
+    try {
+      await storage.remove(SESSION_NAME);
+    } catch (error) {
+      await reconcileAfterMutationError(error, knownState);
+    }
+    state = null;
   }
 
   function hashSessionId(sessionId) {
@@ -270,7 +305,8 @@ export async function createSessionStore({
         const sameIdentity = pruned !== null
           && pruned.bambu.account === bambuInput.account;
         const priorSessions = sameIdentity ? pruned.sessions : [];
-        const { sessionId, idHash } = newSessionId(priorSessions);
+        const collisionSessions = pruned === null ? [] : pruned.sessions;
+        const { sessionId, idHash } = newSessionId(collisionSessions);
         const session = {
           idHash,
           createdAt: timestamp,
@@ -280,10 +316,9 @@ export async function createSessionStore({
         const candidate = {
           version: CURRENT_VERSION,
           bambu: { ...bambuInput, savedAt: timestamp },
-          sessions: evictSessions([...priorSessions, session]),
+          sessions: [...evictSessions(priorSessions, MAX_SESSIONS - 1), session],
         };
-        await storage.writeEncrypted(SESSION_NAME, candidate);
-        state = candidate;
+        await persistState(candidate);
         return {
           sessionId,
           csrfToken: csrfFor(sessionId),
@@ -303,15 +338,13 @@ export async function createSessionStore({
         const session = findSession(pruned.state.sessions, idHash);
         if (session === null) {
           if (pruned.changed) {
-            await storage.writeEncrypted(SESSION_NAME, pruned.state);
-            state = pruned.state;
+            await persistState(pruned.state);
           }
           return null;
         }
         if (!renew || timestamp - session.lastSeenAt < RENEWAL_INTERVAL_MS) {
           if (pruned.changed) {
-            await storage.writeEncrypted(SESSION_NAME, pruned.state);
-            state = pruned.state;
+            await persistState(pruned.state);
           }
           return publicSession(parsedId, session);
         }
@@ -324,8 +357,7 @@ export async function createSessionStore({
           ...pruned.state,
           sessions: pruned.state.sessions.map((entry) => entry.idHash === session.idHash ? renewed : entry),
         };
-        await storage.writeEncrypted(SESSION_NAME, candidate);
-        state = candidate;
+        await persistState(candidate);
         return publicSession(parsedId, renewed);
       });
     },
@@ -336,8 +368,7 @@ export async function createSessionStore({
 
     clear() {
       return serialize(async () => {
-        await storage.remove(SESSION_NAME);
-        state = null;
+        await removeState();
       });
     },
   };

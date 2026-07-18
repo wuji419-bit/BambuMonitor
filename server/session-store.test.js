@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,19 +15,29 @@ const BAMBU = { account: 'maker@example.test', accessToken: '  opaque-access-tok
 function memoryStorage(initial = null) {
   let value = initial === null ? null : structuredClone(initial);
   const writes = [];
+  let readError = null;
   let writeError = null;
+  let writeAfterCommitError = null;
   let removeError = null;
+  let removeAfterCommitError = null;
+  let readCalls = 0;
   let activeWrites = 0;
   let maxActiveWrites = 0;
   return {
     key: Buffer.alloc(32, 0x5a), writes,
     get value() { return value === null ? null : structuredClone(value); },
+    set readError(error) { readError = error; },
     set writeError(error) { writeError = error; },
+    set writeAfterCommitError(error) { writeAfterCommitError = error; },
     set removeError(error) { removeError = error; },
+    set removeAfterCommitError(error) { removeAfterCommitError = error; },
+    get readCalls() { return readCalls; },
     get maxActiveWrites() { return maxActiveWrites; },
     getSecretKey() { return Buffer.from(this.key); },
     async readEncrypted(name) {
       assert.equal(name, 'session.enc');
+      readCalls += 1;
+      if (readError) throw readError;
       return value === null ? null : structuredClone(value);
     },
     async writeEncrypted(name, next) {
@@ -38,12 +49,14 @@ function memoryStorage(initial = null) {
         if (writeError) throw writeError;
         value = structuredClone(next);
         writes.push(structuredClone(next));
+        if (writeAfterCommitError) throw writeAfterCommitError;
       } finally { activeWrites -= 1; }
     },
     async remove(name) {
       assert.equal(name, 'session.enc');
       if (removeError) throw removeError;
       value = null;
+      if (removeAfterCommitError) throw removeAfterCommitError;
     },
   };
 }
@@ -184,6 +197,21 @@ test('logging into a different Bambu identity invalidates prior browser sessions
   assert.equal(storage.value.sessions.length, 1);
 });
 
+test('cross-account login retries a colliding ID while invalidating the prior account session', async () => {
+  const storage = memoryStorage();
+  const values = [7, 7, 8];
+  let calls = 0;
+  const randomBytes = (length) => Buffer.alloc(length, values[calls++]);
+  const store = await createAt(storage, { value: 100 }, { randomBytes });
+  const original = await store.create(BAMBU);
+  const replacement = await store.create({ ...BAMBU, account: 'other@example.test' });
+
+  assert.equal(calls, 3);
+  assert.notEqual(replacement.sessionId, original.sessionId);
+  assert.equal(await store.authenticate(original.sessionId), null);
+  assert.notEqual(await store.authenticate(replacement.sessionId), null);
+});
+
 test('same account preserves browser sessions when the Bambu username changes', async () => {
   const storage = memoryStorage();
   const clock = { value: 100 };
@@ -208,6 +236,70 @@ test('failed create and renewal writes preserve the last committed memory state'
   clock.value += DAY;
   await assert.rejects(store.authenticate(created.sessionId, { renew: true }), /simulated write failure/);
   assert.equal((await store.authenticate(created.sessionId)).expiresAt, created.expiresAt);
+});
+
+test('post-commit create and renewal errors reconcile live memory with restart state', async () => {
+  const storage = memoryStorage();
+  const clock = { value: 1_000 };
+  const random = byteGenerator();
+  const store = await createAt(storage, clock, random);
+  const sessionId = Buffer.alloc(32, 1).toString('base64url');
+  const createError = new Error('create directory sync failed');
+  storage.writeAfterCommitError = createError;
+
+  await assert.rejects(store.create(BAMBU), (error) => error === createError);
+  storage.writeAfterCommitError = null;
+  const afterCreate = await createAt(storage, clock);
+  assert.deepEqual(await store.authenticate(sessionId), await afterCreate.authenticate(sessionId));
+
+  clock.value += DAY;
+  const renewalError = new Error('renew directory sync failed');
+  storage.writeAfterCommitError = renewalError;
+  await assert.rejects(store.authenticate(sessionId, { renew: true }), (error) => error === renewalError);
+  storage.writeAfterCommitError = null;
+  const afterRenewal = await createAt(storage, clock);
+  assert.deepEqual(await store.authenticate(sessionId), await afterRenewal.authenticate(sessionId));
+});
+
+test('post-commit prune and clear errors reconcile live memory with restart state', async () => {
+  const storage = memoryStorage();
+  const clock = { value: 1_000 };
+  const store = await createAt(storage, clock);
+  const expired = await store.create(BAMBU);
+  clock.value += DAY;
+  const active = await store.create(BAMBU);
+  clock.value = expired.expiresAt;
+
+  const pruneError = new Error('prune directory sync failed');
+  storage.writeAfterCommitError = pruneError;
+  const unknownId = Buffer.alloc(32, 99).toString('base64url');
+  await assert.rejects(store.authenticate(unknownId), (error) => error === pruneError);
+  storage.writeAfterCommitError = null;
+  const afterPrune = await createAt(storage, clock);
+  assert.equal(await store.authenticate(expired.sessionId), null);
+  assert.deepEqual(await store.authenticate(active.sessionId), await afterPrune.authenticate(active.sessionId));
+
+  const clearError = new Error('clear directory sync failed');
+  storage.removeAfterCommitError = clearError;
+  await assert.rejects(store.clear(), (error) => error === clearError);
+  storage.removeAfterCommitError = null;
+  const afterClear = await createAt(storage, clock);
+  assert.equal(store.getBambuSession(), null);
+  assert.equal(afterClear.getBambuSession(), null);
+  assert.equal(await store.authenticate(active.sessionId), null);
+});
+
+test('mutation reconciliation keeps known memory and original error when reread fails', async () => {
+  const storage = memoryStorage();
+  const store = await createAt(storage, { value: 1_000 });
+  const created = await store.create(BAMBU);
+  const originalError = new Error('write failed before commit');
+  storage.writeError = originalError;
+  storage.readError = new Error('reconciliation read failed');
+
+  await assert.rejects(store.create(BAMBU), (error) => error === originalError);
+  assert.equal(storage.readCalls, 2);
+  assert.notEqual(await store.authenticate(created.sessionId), null);
 });
 
 test('clear removes disk before memory and failed remove preserves memory', async () => {
@@ -296,6 +388,29 @@ test('serializes concurrent creates and retries bounded hash collisions', async 
   assert.equal(storage.value.sessions.length, 3);
   assert.equal(storage.maxActiveWrites, 1);
   assert.equal(random.calls, 5);
+});
+
+test('new session survives deterministic eviction when all existing timestamps tie', async () => {
+  const storage = memoryStorage();
+  let calls = 0;
+  const randomBytes = (length) => {
+    calls += 1;
+    return Buffer.alloc(length, calls <= 20 ? calls : 0);
+  };
+  const store = await createAt(storage, { value: 1_000 }, { randomBytes });
+  for (let index = 0; index < 20; index += 1) await store.create(BAMBU);
+
+  const lowestExistingHash = storage.value.sessions
+    .map(({ idHash }) => idHash)
+    .sort()[0];
+  const expectedId = Buffer.alloc(32).toString('base64url');
+  const expectedHash = createHash('sha256').update(expectedId).digest('hex');
+  assert.ok(expectedHash < lowestExistingHash);
+
+  const created = await store.create(BAMBU);
+  assert.equal(created.sessionId, expectedId);
+  assert.equal(storage.value.sessions.length, 20);
+  assert.notEqual(await store.authenticate(created.sessionId), null);
 });
 
 test('validates dependencies, bounded strings, time, and exact random output', async () => {
