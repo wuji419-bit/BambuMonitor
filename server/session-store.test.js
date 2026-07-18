@@ -135,9 +135,9 @@ test('renewal writes at the 24-hour boundary, extends by 30 days, and avoids exc
 });
 
 test('startup prunes expired sessions only when needed and authenticate rejects expiry', async () => {
-  const clock = { value: 500 };
-  const active = { idHash: 'a'.repeat(64), createdAt: 1, lastSeenAt: 1, expiresAt: 501 };
-  const expired = { idHash: 'b'.repeat(64), createdAt: 1, lastSeenAt: 1, expiresAt: 500 };
+  const clock = { value: MONTH + 500 };
+  const active = { idHash: 'a'.repeat(64), createdAt: 1, lastSeenAt: 501, expiresAt: MONTH + 501 };
+  const expired = { idHash: 'b'.repeat(64), createdAt: 1, lastSeenAt: 500, expiresAt: MONTH + 500 };
   const storage = memoryStorage({ version: 1, bambu: { ...BAMBU, savedAt: 1 }, sessions: [active, expired] });
   await createAt(storage, clock);
   assert.deepEqual(storage.value.sessions, [active]);
@@ -184,6 +184,19 @@ test('logging into a different Bambu identity invalidates prior browser sessions
   assert.equal(storage.value.sessions.length, 1);
 });
 
+test('same account preserves browser sessions when the Bambu username changes', async () => {
+  const storage = memoryStorage();
+  const clock = { value: 100 };
+  const store = await createAt(storage, clock);
+  const original = await store.create(BAMBU);
+  clock.value += 1;
+  const renamed = await store.create({ ...BAMBU, username: 'Renamed Maker' });
+
+  assert.equal((await store.authenticate(original.sessionId)).username, 'Renamed Maker');
+  assert.notEqual(await store.authenticate(renamed.sessionId), null);
+  assert.equal(storage.value.sessions.length, 2);
+});
+
 test('failed create and renewal writes preserve the last committed memory state', async () => {
   const storage = memoryStorage();
   const clock = { value: 1_000 };
@@ -214,7 +227,7 @@ test('clear removes disk before memory and failed remove preserves memory', asyn
 
 test('strict startup validation rejects malformed and future state without overwrite', async () => {
   const bambu = { ...BAMBU, savedAt: 1 };
-  const session = { idHash: 'a'.repeat(64), createdAt: 1, lastSeenAt: 1, expiresAt: 2 };
+  const session = { idHash: 'a'.repeat(64), createdAt: 1, lastSeenAt: 1, expiresAt: 1 + MONTH };
   const cases = [{}, { version: 2, bambu, sessions: [] },
     { version: 1, bambu: { ...bambu, extra: true }, sessions: [] },
     { version: 1, bambu, sessions: [{ ...session, idHash: 'bad' }] },
@@ -225,6 +238,36 @@ test('strict startup validation rejects malformed and future state without overw
     await assert.rejects(createAt(storage, { value: 1 }), /Invalid session store|Unsupported session store version/);
     assert.equal(storage.writes.length, 0);
   }
+});
+
+test('strict startup validation rejects non-30-day expiry and timestamp overflow without overwrite', async () => {
+  const bambu = { ...BAMBU, savedAt: 1 };
+  const baseSession = { idHash: 'a'.repeat(64), createdAt: 1, lastSeenAt: 10 };
+  const cases = [
+    { ...baseSession, expiresAt: baseSession.lastSeenAt + MONTH - 1 },
+    { ...baseSession, expiresAt: baseSession.lastSeenAt + MONTH + 1 },
+    { ...baseSession, lastSeenAt: Number.MAX_SAFE_INTEGER - MONTH + 1,
+      expiresAt: Number.MAX_SAFE_INTEGER },
+  ];
+  for (const session of cases) {
+    const state = { version: 1, bambu, sessions: [session] };
+    const storage = memoryStorage(state);
+    await assert.rejects(createAt(storage, { value: 1 }), /Invalid session store/);
+    assert.deepEqual(storage.value, state);
+    assert.equal(storage.writes.length, 0);
+  }
+});
+
+test('create normalizes a missing username to empty and restores it after restart', async () => {
+  const storage = memoryStorage();
+  const clock = { value: 100 };
+  const store = await createAt(storage, clock);
+  const created = await store.create({ account: BAMBU.account, accessToken: BAMBU.accessToken });
+
+  assert.equal(storage.value.bambu.username, '');
+  assert.equal(store.getBambuSession().username, '');
+  const restarted = await createAt(storage, clock);
+  assert.equal((await restarted.authenticate(created.sessionId)).username, '');
 });
 
 test('encrypted corruption and authentication errors propagate unchanged', async () => {
@@ -260,7 +303,7 @@ test('validates dependencies, bounded strings, time, and exact random output', a
   await assert.rejects(createSessionStore({ storage: memoryStorage(), now: 1 }), /Invalid session store dependencies/);
   const store = await createAt(memoryStorage(), { value: 1 });
   for (const input of [null, {}, { ...BAMBU, account: '' }, { ...BAMBU, account: 'x'.repeat(321) },
-    { ...BAMBU, username: 'x'.repeat(257) }, { ...BAMBU, accessToken: '' },
+    { ...BAMBU, username: null }, { ...BAMBU, username: 'x'.repeat(257) }, { ...BAMBU, accessToken: '' },
     { ...BAMBU, accessToken: 'x'.repeat(16_385) }]) {
     await assert.rejects(store.create(input), /Invalid session input/);
   }

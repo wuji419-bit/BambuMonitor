@@ -47,17 +47,22 @@ function validateText(value, maxLength) {
   return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
 }
 
+function validateUsername(value) {
+  return typeof value === 'string' && value.length <= MAX_USERNAME_LENGTH;
+}
+
 function normalizeInput(value) {
+  const username = isPlainObject(value) && Object.hasOwn(value, 'username') ? value.username : '';
   if (!isPlainObject(value)
     || !validateText(value.account, MAX_ACCOUNT_LENGTH)
     || !validateText(value.accessToken, MAX_ACCESS_TOKEN_LENGTH)
-    || !validateText(value.username, MAX_USERNAME_LENGTH)) {
+    || !validateUsername(username)) {
     throw namedError('Invalid session input');
   }
   return {
     account: value.account,
     accessToken: value.accessToken,
-    username: value.username,
+    username,
   };
 }
 
@@ -65,7 +70,7 @@ function validateBambu(value) {
   if (!hasExactKeys(value, ['account', 'accessToken', 'username', 'savedAt'])
     || !validateText(value.account, MAX_ACCOUNT_LENGTH)
     || !validateText(value.accessToken, MAX_ACCESS_TOKEN_LENGTH)
-    || !validateText(value.username, MAX_USERNAME_LENGTH)
+    || !validateUsername(value.username)
     || !validTimestamp(value.savedAt)) {
     throw namedError('Invalid session store');
   }
@@ -80,7 +85,8 @@ function validateSession(value) {
     || !validTimestamp(value.lastSeenAt)
     || !validTimestamp(value.expiresAt)
     || value.lastSeenAt < value.createdAt
-    || value.expiresAt < value.lastSeenAt) {
+    || value.lastSeenAt > Number.MAX_SAFE_INTEGER - SESSION_TTL_MS
+    || value.expiresAt !== value.lastSeenAt + SESSION_TTL_MS) {
     throw namedError('Invalid session store');
   }
   return { ...value };
@@ -262,8 +268,7 @@ export async function createSessionStore({
         const timestamp = readTime(now);
         const pruned = pruneSessions(state, timestamp).state;
         const sameIdentity = pruned !== null
-          && pruned.bambu.account === bambuInput.account
-          && pruned.bambu.username === bambuInput.username;
+          && pruned.bambu.account === bambuInput.account;
         const priorSessions = sameIdentity ? pruned.sessions : [];
         const { sessionId, idHash } = newSessionId(priorSessions);
         const session = {
