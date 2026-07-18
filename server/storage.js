@@ -1,4 +1,5 @@
 import * as defaultCrypto from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import * as defaultFs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -10,9 +11,10 @@ const IV_BYTES = 12;
 const AUTH_TAG_BYTES = 16;
 const KEY_WAIT_ATTEMPTS = 25;
 const KEY_WAIT_MS = 5;
-const WINDOWS_DIRECTORY_SYNC_ERRORS = new Set([
+const READ_ONLY_NOFOLLOW_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+const REQUIRED_FS_METHODS = ['chmod', 'link', 'lstat', 'mkdir', 'open', 'rename', 'unlink'];
+const WINDOWS_UNSUPPORTED_DIRECTORY_FSYNC_ERRORS = new Set([
   'EBADF',
-  'EISDIR',
   'EINVAL',
   'ENOTSUP',
   'EPERM',
@@ -53,6 +55,12 @@ function invalidStorageFileError(name) {
   return namedError(`Invalid storage file: ${name}`);
 }
 
+function missingStorageFileError(name) {
+  const error = namedError(`Storage file not found: ${name}`);
+  error.code = 'ENOENT';
+  return error;
+}
+
 function invalidSecretKeyError() {
   return namedError(`Invalid secret key file: ${SECRET_KEY_NAME}`);
 }
@@ -61,14 +69,20 @@ function isMissing(error) {
   return error?.code === 'ENOENT';
 }
 
-async function inspectTarget(fsApi, targetPath, name, { keyFile = false } = {}) {
-  if (typeof fsApi.lstat !== 'function') return { available: false, exists: undefined };
+function validateFsApi(fsApi) {
+  for (const method of REQUIRED_FS_METHODS) {
+    if (typeof fsApi?.[method] !== 'function') {
+      throw namedError(`Invalid fsApi: missing ${method}`);
+    }
+  }
+}
 
+async function inspectTarget(fsApi, targetPath, name, { keyFile = false } = {}) {
   let stat;
   try {
     stat = await fsApi.lstat(targetPath);
   } catch (error) {
-    if (isMissing(error)) return { available: true, exists: false };
+    if (isMissing(error)) return { exists: false };
     throw error;
   }
 
@@ -76,11 +90,92 @@ async function inspectTarget(fsApi, targetPath, name, { keyFile = false } = {}) 
   if (!stat.isFile()) {
     throw keyFile ? invalidSecretKeyError() : invalidStorageFileError(name);
   }
-  return { available: true, exists: true, stat };
+  return { exists: true, stat };
 }
 
 async function inspectManagedTarget(fsApi, targetPath, name) {
   return inspectTarget(fsApi, targetPath, name);
+}
+
+function fileIdentityMatches(left, right) {
+  const validIdentityPart = (value) => typeof value === 'number' || typeof value === 'bigint';
+  return validIdentityPart(left?.dev)
+    && validIdentityPart(left?.ino)
+    && validIdentityPart(right?.dev)
+    && validIdentityPart(right?.ino)
+    && left.dev === right.dev
+    && left.ino === right.ino;
+}
+
+function assertHandleMatchesPath(pathStat, handleStat, name, { keyFile = false } = {}) {
+  if (typeof handleStat?.isFile !== 'function' || !handleStat.isFile()) {
+    throw keyFile ? invalidSecretKeyError() : invalidStorageFileError(name);
+  }
+  if (!fileIdentityMatches(pathStat, handleStat)) throw unsafeLinkError(name);
+}
+
+async function verifyHandlePath(fsApi, targetPath, name, handleStat, options) {
+  const current = await inspectTarget(fsApi, targetPath, name, options);
+  if (!current.exists || !fileIdentityMatches(current.stat, handleStat)) {
+    throw unsafeLinkError(name);
+  }
+}
+
+async function openVerifiedReadHandle(fsApi, targetPath, name, options = {}) {
+  const inspected = await inspectTarget(fsApi, targetPath, name, options);
+  if (!inspected.exists) return null;
+
+  let handle;
+  try {
+    handle = await fsApi.open(targetPath, READ_ONLY_NOFOLLOW_FLAGS);
+  } catch (error) {
+    if (error?.code === 'ELOOP') throw unsafeLinkError(name);
+    if (isMissing(error)) return null;
+    if (error?.code === 'EISDIR') {
+      throw options.keyFile ? invalidSecretKeyError() : invalidStorageFileError(name);
+    }
+    throw error;
+  }
+
+  try {
+    if (typeof handle.stat !== 'function') throw namedError('Invalid fsApi file handle: missing stat');
+    const handleStat = await handle.stat();
+    assertHandleMatchesPath(inspected.stat, handleStat, name, options);
+    await verifyHandlePath(fsApi, targetPath, name, handleStat, options);
+    return { handle, stat: handleStat };
+  } catch (error) {
+    await closeQuietly(handle);
+    throw error;
+  }
+}
+
+async function readVerifiedHandle(fsApi, targetPath, name, opened, { mode, ...options } = {}) {
+  let { handle } = opened;
+  let bytes;
+  try {
+    if (mode !== undefined) {
+      if (typeof handle.chmod !== 'function') {
+        throw namedError('Invalid fsApi file handle: missing chmod');
+      }
+      await handle.chmod(mode);
+    }
+    if (typeof handle.readFile !== 'function') {
+      throw namedError('Invalid fsApi file handle: missing readFile');
+    }
+    bytes = await handle.readFile();
+    if (!Buffer.isBuffer(bytes)) bytes = Buffer.from(bytes);
+    const finalStat = await handle.stat();
+    assertHandleMatchesPath(opened.stat, finalStat, name, options);
+    await verifyHandlePath(fsApi, targetPath, name, finalStat, options);
+    await handle.close();
+    handle = undefined;
+    return bytes;
+  } catch (error) {
+    bytes?.fill(0);
+    throw error;
+  } finally {
+    await closeQuietly(handle);
+  }
 }
 
 async function writeAll(handle, bytes) {
@@ -113,20 +208,26 @@ async function unlinkQuietly(fsApi, targetPath) {
   }
 }
 
-function isUnsupportedWindowsDirectorySync(error) {
-  return process.platform === 'win32' && WINDOWS_DIRECTORY_SYNC_ERRORS.has(error?.code);
+function isUnsupportedWindowsDirectorySync(error, operation) {
+  return process.platform === 'win32'
+    && operation === 'sync'
+    && error?.syscall === 'fsync'
+    && WINDOWS_UNSUPPORTED_DIRECTORY_FSYNC_ERRORS.has(error?.code);
 }
 
 async function syncDirectory(fsApi, directory) {
   let handle;
+  let operation = 'open';
   try {
     handle = await fsApi.open(directory, 'r');
+    operation = 'sync';
     await handle.sync();
+    operation = 'close';
     await handle.close();
     handle = undefined;
   } catch (error) {
     await closeQuietly(handle);
-    if (!isUnsupportedWindowsDirectorySync(error)) throw error;
+    if (!isUnsupportedWindowsDirectorySync(error, operation)) throw error;
   }
 }
 
@@ -180,51 +281,29 @@ function serializeJson(name, value) {
 
 async function readManagedBytes(fsApi, dataDir, name) {
   const targetPath = path.join(dataDir, name);
-  await inspectManagedTarget(fsApi, targetPath, name);
-
-  let bytes;
-  try {
-    bytes = await fsApi.readFile(targetPath);
-  } catch (error) {
-    if (isMissing(error)) return null;
-    if (error?.code === 'EISDIR') throw invalidStorageFileError(name);
-    throw error;
-  }
-
-  try {
-    await inspectManagedTarget(fsApi, targetPath, name);
-    return bytes;
-  } catch (error) {
-    bytes.fill(0);
-    throw error;
-  }
+  const opened = await openVerifiedReadHandle(fsApi, targetPath, name);
+  if (opened === null) return null;
+  return readVerifiedHandle(fsApi, targetPath, name, opened);
 }
 
 async function inspectSecretKey(fsApi, keyPath) {
-  const inspected = await inspectTarget(fsApi, keyPath, SECRET_KEY_NAME, { keyFile: true });
-  if (inspected.available && !inspected.exists) return { state: 'missing' };
-  if (inspected.stat && inspected.stat.size !== SECRET_KEY_BYTES) return { state: 'incomplete' };
-
-  let bytes;
-  try {
-    bytes = await fsApi.readFile(keyPath);
-  } catch (error) {
-    if (isMissing(error)) return { state: 'missing' };
-    if (error?.code === 'EISDIR') throw invalidSecretKeyError();
-    throw error;
+  const options = { keyFile: true };
+  const opened = await openVerifiedReadHandle(fsApi, keyPath, SECRET_KEY_NAME, options);
+  if (opened === null) return { state: 'missing' };
+  if (opened.stat.size !== SECRET_KEY_BYTES) {
+    await closeQuietly(opened.handle);
+    return { state: 'incomplete' };
   }
 
-  try {
-    await inspectTarget(fsApi, keyPath, SECRET_KEY_NAME, { keyFile: true });
-    if (bytes.length !== SECRET_KEY_BYTES) {
-      bytes.fill(0);
-      return { state: 'incomplete' };
-    }
-    return { state: 'ready', key: bytes };
-  } catch (error) {
+  const bytes = await readVerifiedHandle(fsApi, keyPath, SECRET_KEY_NAME, opened, {
+    ...options,
+    mode: 0o600,
+  });
+  if (bytes.length !== SECRET_KEY_BYTES) {
     bytes.fill(0);
-    throw error;
+    return { state: 'incomplete' };
   }
+  return { state: 'ready', key: bytes };
 }
 
 async function createSecretKey(fsApi, cryptoApi, keyPath, dataDir) {
@@ -239,22 +318,25 @@ async function createSecretKey(fsApi, cryptoApi, keyPath, dataDir) {
     throw invalidSecretKeyError();
   }
 
+  const tempPath = nextTempPath(dataDir, SECRET_KEY_NAME);
   let handle;
-  let ownsKey = false;
-  let durableFile = false;
+  let ownsTemp = false;
   try {
-    handle = await fsApi.open(keyPath, 'wx', 0o600);
-    ownsKey = true;
+    handle = await fsApi.open(tempPath, 'wx', 0o600);
+    ownsTemp = true;
     await writeAll(handle, candidate);
     await handle.sync();
     await handle.close();
     handle = undefined;
-    durableFile = true;
+
+    await fsApi.link(tempPath, keyPath);
+    await fsApi.unlink(tempPath);
+    ownsTemp = false;
     await syncDirectory(fsApi, dataDir);
     return Buffer.from(candidate);
   } catch (error) {
     await closeQuietly(handle);
-    if (ownsKey && !durableFile) await unlinkQuietly(fsApi, keyPath);
+    if (ownsTemp) await unlinkQuietly(fsApi, tempPath);
     throw error;
   } finally {
     candidate.fill(0);
@@ -268,17 +350,7 @@ function waitBriefly() {
 async function initializeSecretKey(fsApi, cryptoApi, keyPath, dataDir) {
   for (let attempt = 0; attempt < KEY_WAIT_ATTEMPTS; attempt += 1) {
     const inspected = await inspectSecretKey(fsApi, keyPath);
-    if (inspected.state === 'ready') {
-      if (typeof fsApi.chmod === 'function') {
-        try {
-          await fsApi.chmod(keyPath, 0o600);
-        } catch (error) {
-          inspected.key.fill(0);
-          throw error;
-        }
-      }
-      return inspected.key;
-    }
+    if (inspected.state === 'ready') return inspected.key;
 
     if (inspected.state === 'missing') {
       try {
@@ -359,12 +431,11 @@ export async function createStorage({ dataDir, fsApi = defaultFs, cryptoApi = de
   if (typeof dataDir !== 'string' || dataDir.length === 0) {
     throw namedError('Invalid data directory');
   }
+  validateFsApi(fsApi);
 
   const resolvedDataDir = path.resolve(dataDir);
   await fsApi.mkdir(resolvedDataDir, { recursive: true, mode: 0o700 });
-  if (typeof fsApi.chmod === 'function') {
-    await fsApi.chmod(resolvedDataDir, 0o700);
-  }
+  await fsApi.chmod(resolvedDataDir, 0o700);
 
   const keyPath = path.join(resolvedDataDir, SECRET_KEY_NAME);
   const initializedKey = await sharedKeyInitialization(
@@ -518,8 +589,8 @@ export async function createStorage({ dataDir, fsApi = defaultFs, cryptoApi = de
       let ownsBackup = false;
       let complete = false;
       try {
-        sourceBytes = await fsApi.readFile(sourcePath);
-        await inspectManagedTarget(fsApi, sourcePath, name);
+        sourceBytes = await readManagedBytes(fsApi, resolvedDataDir, name);
+        if (sourceBytes === null) throw missingStorageFileError(name);
         try {
           handle = await fsApi.open(backupPath, 'wx', 0o600);
           ownsBackup = true;

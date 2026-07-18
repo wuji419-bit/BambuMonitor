@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { constants as fsConstants } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
@@ -39,6 +41,143 @@ function mutateBase64(value) {
   return bytes.toString('base64');
 }
 
+async function makeFileSymlink(target, linkPath) {
+  try {
+    await fs.symlink(target, linkPath, process.platform === 'win32' ? 'file' : undefined);
+    return true;
+  } catch (error) {
+    if (process.platform === 'win32' && ['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) return false;
+    throw error;
+  }
+}
+
+async function fileSymlinksAvailable(root) {
+  const target = path.join(root, 'symlink-probe-target');
+  const link = path.join(root, 'symlink-probe-link');
+  await fs.writeFile(target, 'probe');
+  const available = await makeFileSymlink(target, link);
+  if (available) await fs.unlink(link);
+  await fs.unlink(target);
+  return available;
+}
+
+function createPathSwapFs({ targetPath, parkedPath, externalPath, symlink = true }) {
+  let swapped = false;
+  let restored = false;
+  let restorePromise;
+
+  async function restore() {
+    if (!swapped || restored) return;
+    restorePromise ??= (async () => {
+      if (symlink) {
+        await fs.unlink(targetPath);
+      } else {
+        await fs.rename(targetPath, externalPath);
+      }
+      await fs.rename(parkedPath, targetPath);
+      restored = true;
+    })();
+    await restorePromise;
+  }
+
+  return {
+    ...fs,
+    async lstat(target, ...args) {
+      const stat = await fs.lstat(target, ...args);
+      if (target === targetPath && !swapped) {
+        swapped = true;
+        await fs.rename(targetPath, parkedPath);
+        if (symlink) {
+          if (!await makeFileSymlink(externalPath, targetPath)) {
+            throw new Error('Symlink privilege disappeared during race test');
+          }
+        } else {
+          await fs.rename(externalPath, targetPath);
+        }
+      }
+      return stat;
+    },
+    async readFile(target, ...args) {
+      const bytes = await fs.readFile(target, ...args);
+      if (target === targetPath) await restore();
+      return bytes;
+    },
+    async open(target, ...args) {
+      const handle = await fs.open(target, ...args);
+      if (target !== targetPath) return handle;
+      return proxyHandle(handle, {
+        stat: async (...statArgs) => {
+          const stat = await handle.stat(...statArgs);
+          await restore();
+          return stat;
+        },
+      });
+    },
+  };
+}
+
+async function nextChildMessage(child) {
+  const [message] = await once(child, 'message', { signal: AbortSignal.timeout(5000) });
+  return message;
+}
+
+const FAILING_KEY_CREATOR_SOURCE = String.raw`
+import * as fs from 'node:fs/promises';
+import path from 'node:path';
+
+const [storageUrl, dataDir] = process.argv.slice(1);
+const { createStorage } = await import(storageUrl);
+const keyPath = path.join(dataDir, 'secret.key');
+let releaseSync;
+const syncRelease = new Promise((resolve) => {
+  releaseSync = resolve;
+});
+process.on('message', (message) => {
+  if (message?.type === 'continue') releaseSync();
+});
+
+function proxyHandle(handle, overrides) {
+  return new Proxy(handle, {
+    get(target, property) {
+      if (Object.hasOwn(overrides, property)) return overrides[property];
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+let interceptedKeyWrite = false;
+const failingFs = {
+  ...fs,
+  async open(target, ...args) {
+    const handle = await fs.open(target, ...args);
+    const basename = path.basename(String(target));
+    const isKeyWrite = target === keyPath
+      || (basename.startsWith('.secret.key.') && basename.endsWith('.tmp'));
+    if (interceptedKeyWrite || !isKeyWrite) return handle;
+    interceptedKeyWrite = true;
+    return proxyHandle(handle, {
+      sync: async () => {
+        process.send({ type: 'before-sync' });
+        await syncRelease;
+        const error = new Error('simulated key sync failure');
+        error.code = 'EIO';
+        throw error;
+      },
+    });
+  },
+};
+
+try {
+  await createStorage({ dataDir, fsApi: failingFs });
+  process.send({ type: 'result', outcome: 'resolved' });
+} catch (error) {
+  process.send({ type: 'result', outcome: 'rejected', message: error.message });
+} finally {
+  process.disconnect();
+}
+`;
+
 test('creates a private data directory and converges concurrent key initialization', async (t) => {
   const root = await makeTempDir(t);
   const dataDir = path.join(root, 'nested', 'data');
@@ -61,6 +200,61 @@ test('creates a private data directory and converges concurrent key initializati
   if (process.platform !== 'win32') {
     assert.equal(modeBits(await fs.stat(dataDir)), 0o700);
     assert.equal(modeBits(await fs.stat(path.join(dataDir, 'secret.key'))), 0o600);
+  }
+});
+
+test('publishes only a fully synced key when a concurrent process fails before sync', async (t) => {
+  const root = await makeTempDir(t);
+  const dataDir = path.join(root, 'data');
+  const child = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      FAILING_KEY_CREATOR_SOURCE,
+      new URL('./storage.js', import.meta.url).href,
+      dataDir,
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] },
+  );
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  const exitPromise = once(child, 'exit', { signal: AbortSignal.timeout(5000) });
+  t.after(() => {
+    if (child.exitCode === null) child.kill();
+  });
+
+  assert.deepEqual(await nextChildMessage(child), { type: 'before-sync' });
+  const competingStorage = await createStorage({ dataDir });
+  child.send({ type: 'continue' });
+  assert.deepEqual(await nextChildMessage(child), {
+    type: 'result',
+    outcome: 'rejected',
+    message: 'simulated key sync failure',
+  });
+  const [exitCode] = await exitPromise;
+  assert.equal(exitCode, 0, stderr);
+
+  const keyOnDisk = await fs.readFile(path.join(dataDir, 'secret.key'));
+  assert.equal(keyOnDisk.length, 32);
+  assert.deepEqual(competingStorage.getSecretKey(), keyOnDisk);
+  assert.deepEqual((await createStorage({ dataDir })).getSecretKey(), keyOnDisk);
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'secret.key'), []);
+});
+
+test('rejects injected filesystems missing mandatory security methods', async (t) => {
+  const root = await makeTempDir(t);
+
+  for (const method of ['lstat', 'chmod', 'link']) {
+    const incompleteFs = { ...fs };
+    delete incompleteFs[method];
+    await assert.rejects(
+      createStorage({ dataDir: path.join(root, method), fsApi: incompleteFs }),
+      { message: `Invalid fsApi: missing ${method}` },
+    );
   }
 });
 
@@ -95,17 +289,26 @@ test('fails initialization when private permissions cannot be enforced', async (
       ...fs,
       async chmod(target, mode) {
         if (target === keyPath) {
-          const error = new Error('simulated secret key chmod failure');
-          error.code = 'EACCES';
-          throw error;
+          throw new Error('unsafe path chmod was used for secret.key');
         }
         return fs.chmod(target, mode);
+      },
+      async open(target, ...args) {
+        const handle = await fs.open(target, ...args);
+        if (target !== keyPath) return handle;
+        return proxyHandle(handle, {
+          chmod: async () => {
+            const error = new Error('simulated secret key handle chmod failure');
+            error.code = 'EACCES';
+            throw error;
+          },
+        });
       },
     };
 
     await assert.rejects(
       createStorage({ dataDir, fsApi: failingFs }),
-      /simulated secret key chmod failure/,
+      /simulated secret key handle chmod failure/,
     );
   });
 });
@@ -356,6 +559,33 @@ test('does not swallow arbitrary directory sync errors', async (t) => {
   assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'state.json'), []);
 });
 
+test('does not treat a generic Windows EPERM as an unsupported directory fsync', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const healthyStorage = await createStorage({ dataDir });
+  const failingFs = {
+    ...fs,
+    async open(target, ...args) {
+      const handle = await fs.open(target, ...args);
+      if (target !== dataDir) return handle;
+      return proxyHandle(handle, {
+        sync: async () => {
+          const error = new Error('simulated genuine directory EPERM');
+          error.code = 'EPERM';
+          throw error;
+        },
+      });
+    },
+  };
+  const failingStorage = await createStorage({ dataDir, fsApi: failingFs });
+
+  await assert.rejects(
+    failingStorage.writeJson('state.json', { generation: 2 }),
+    /simulated genuine directory EPERM/,
+  );
+  assert.deepEqual(await healthyStorage.readJson('state.json', null), { generation: 2 });
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'state.json'), []);
+});
+
 test('concurrent writes use distinct same-directory temp paths', async (t) => {
   const dataDir = await makeTempDir(t);
   await createStorage({ dataDir });
@@ -398,23 +628,101 @@ test('backup is exclusive, byte-identical, and idempotent', async (t) => {
   }
 });
 
-test('rejects symlink key and every managed operation target when symlinks are available', async (t) => {
-  async function makeSymlink(target, linkPath) {
-    try {
-      await fs.symlink(target, linkPath, process.platform === 'win32' ? 'file' : undefined);
-      return true;
-    } catch (error) {
-      if (process.platform === 'win32' && ['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) return false;
-      throw error;
-    }
+test('rejects a file replaced between path inspection and handle verification', async (t) => {
+  const root = await makeTempDir(t);
+  const dataDir = path.join(root, 'data');
+  const storage = await createStorage({ dataDir });
+  const targetPath = path.join(dataDir, 'state.json');
+  const parkedPath = path.join(dataDir, 'state.json.parked');
+  const externalPath = path.join(root, 'replacement.json');
+  const marker = 'REPLACEMENT_SECRET_MUST_NOT_BE_READ';
+  await storage.writeJson('state.json', { safe: true });
+  await fs.writeFile(externalPath, `${JSON.stringify({ marker })}\n`, { mode: 0o600 });
+  const racingFs = createPathSwapFs({
+    targetPath,
+    parkedPath,
+    externalPath,
+    symlink: false,
+  });
+  const racingStorage = await createStorage({ dataDir, fsApi: racingFs });
+
+  await assert.rejects(
+    racingStorage.readJson('state.json', null),
+    (error) => error.message === 'Unsafe symbolic link: state.json'
+      && !error.message.includes(marker),
+  );
+});
+
+test('rejects symlink swaps during key, managed, and backup reads', async (t) => {
+  const root = await makeTempDir(t);
+  if (!await fileSymlinksAvailable(root)) {
+    t.skip('Windows symlink privilege is unavailable');
+    return;
   }
 
+  await t.test('secret key swap', async () => {
+    const dataDir = path.join(root, 'key-race');
+    const keyPath = path.join(dataDir, 'secret.key');
+    const parkedPath = path.join(dataDir, 'secret.key.parked');
+    const externalPath = path.join(root, 'external-race.key');
+    await fs.mkdir(dataDir);
+    await fs.writeFile(keyPath, Buffer.alloc(32, 0x11), { mode: 0o600 });
+    await fs.writeFile(externalPath, Buffer.alloc(32, 0x77), { mode: 0o600 });
+    const racingFs = createPathSwapFs({ targetPath: keyPath, parkedPath, externalPath });
+
+    await assert.rejects(
+      createStorage({ dataDir, fsApi: racingFs }),
+      { message: 'Unsafe symbolic link: secret.key' },
+    );
+  });
+
+  await t.test('managed JSON swap', async () => {
+    const dataDir = path.join(root, 'read-race');
+    const storage = await createStorage({ dataDir });
+    const targetPath = path.join(dataDir, 'state.json');
+    const parkedPath = path.join(dataDir, 'state.json.parked');
+    const externalPath = path.join(root, 'external-race.json');
+    const marker = 'RACE_SECRET_MUST_NOT_BE_READ';
+    await storage.writeJson('state.json', { safe: true });
+    await fs.writeFile(externalPath, `${JSON.stringify({ marker })}\n`, { mode: 0o600 });
+    const racingFs = createPathSwapFs({ targetPath, parkedPath, externalPath });
+    const racingStorage = await createStorage({ dataDir, fsApi: racingFs });
+
+    await assert.rejects(
+      racingStorage.readJson('state.json', null),
+      (error) => error.message === 'Unsafe symbolic link: state.json'
+        && !error.message.includes(marker),
+    );
+  });
+
+  await t.test('backup source swap', async () => {
+    const dataDir = path.join(root, 'backup-race');
+    const storage = await createStorage({ dataDir });
+    const targetPath = path.join(dataDir, 'source.bin');
+    const parkedPath = path.join(dataDir, 'source.bin.parked');
+    const externalPath = path.join(root, 'external-race.bin');
+    const marker = 'RACE_BACKUP_SECRET';
+    await fs.writeFile(targetPath, 'safe source', { mode: 0o600 });
+    await fs.writeFile(externalPath, marker, { mode: 0o600 });
+    const racingFs = createPathSwapFs({ targetPath, parkedPath, externalPath });
+    const racingStorage = await createStorage({ dataDir, fsApi: racingFs });
+
+    await assert.rejects(
+      racingStorage.backup('source.bin', 'source.bin.bak'),
+      (error) => error.message === 'Unsafe symbolic link: source.bin'
+        && !error.message.includes(marker),
+    );
+    await assert.rejects(fs.stat(path.join(dataDir, 'source.bin.bak')), { code: 'ENOENT' });
+  });
+});
+
+test('rejects symlink key and every managed operation target when symlinks are available', async (t) => {
   const root = await makeTempDir(t);
   const keyDir = path.join(root, 'key-data');
   await fs.mkdir(keyDir);
   const externalKey = path.join(root, 'external.key');
   await fs.writeFile(externalKey, Buffer.alloc(32, 0x11));
-  if (!await makeSymlink(externalKey, path.join(keyDir, 'secret.key'))) {
+  if (!await makeFileSymlink(externalKey, path.join(keyDir, 'secret.key'))) {
     t.skip('Windows symlink privilege is unavailable');
     return;
   }
@@ -428,7 +736,7 @@ test('rejects symlink key and every managed operation target when symlinks are a
   const externalData = path.join(root, 'external-data');
   await fs.writeFile(externalData, '{}');
   for (const name of ['read.json', 'write.json', 'read.enc', 'write.enc', 'remove.json', 'source-link.bin', 'backup-link.bin']) {
-    await makeSymlink(externalData, path.join(dataDir, name));
+    await makeFileSymlink(externalData, path.join(dataDir, name));
   }
   await fs.writeFile(path.join(dataDir, 'regular-source.bin'), 'source', { mode: 0o600 });
 
