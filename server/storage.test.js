@@ -534,13 +534,39 @@ test('temp sync failures preserve the prior destination and clean the temp file'
   assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'state.json'), []);
 });
 
+test('attempts directory fsync with the native filesystem', async (t) => {
+  const root = await makeTempDir(t);
+  const dataDir = path.join(root, 'data');
+  const probeHandle = await fs.open(root, 'r');
+  const handlePrototype = Object.getPrototypeOf(probeHandle);
+  const nativeSync = handlePrototype.sync;
+  await probeHandle.close();
+  let directorySyncCalls = 0;
+
+  handlePrototype.sync = async function sync(...args) {
+    if ((await this.stat()).isDirectory()) {
+      directorySyncCalls += 1;
+      return;
+    }
+    return Reflect.apply(nativeSync, this, args);
+  };
+
+  try {
+    const storage = await createStorage({ dataDir });
+    await storage.writeJson('state.json', { generation: 1 });
+  } finally {
+    handlePrototype.sync = nativeSync;
+  }
+
+  assert.equal(directorySyncCalls, 2);
+});
+
 test('does not swallow arbitrary directory sync errors', async (t) => {
   const dataDir = await makeTempDir(t);
   const healthyStorage = await createStorage({ dataDir });
 
   const failingFs = {
     ...fs,
-    supportsDirectoryFsync: true,
     async open(target, ...args) {
       if (target === dataDir) {
         const error = new Error('simulated directory sync failure');
@@ -565,7 +591,6 @@ test('propagates a genuine Windows EPERM from directory fsync', async (t) => {
   const healthyStorage = await createStorage({ dataDir });
   const failingFs = {
     ...fs,
-    supportsDirectoryFsync: true,
     async open(target, ...args) {
       const handle = await fs.open(target, ...args);
       if (target !== dataDir) return handle;
@@ -596,8 +621,10 @@ test('concurrent writes use distinct same-directory temp paths', async (t) => {
   const observingFs = {
     ...fs,
     async open(target, ...args) {
+      const handle = await fs.open(target, ...args);
       if (path.basename(String(target)).startsWith('.parallel.json.')) openedTemps.push(String(target));
-      return fs.open(target, ...args);
+      if (target === dataDir) return proxyHandle(handle, { sync: async () => {} });
+      return handle;
     },
   };
   const storage = await createStorage({ dataDir, fsApi: observingFs });

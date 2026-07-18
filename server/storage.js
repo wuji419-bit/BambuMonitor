@@ -13,13 +13,6 @@ const KEY_WAIT_ATTEMPTS = 25;
 const KEY_WAIT_MS = 5;
 const READ_ONLY_NOFOLLOW_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 const REQUIRED_FS_METHODS = ['chmod', 'link', 'lstat', 'mkdir', 'open', 'rename', 'unlink'];
-const WINDOWS_UNSUPPORTED_DIRECTORY_FSYNC_ERRORS = new Set([
-  'EBADF',
-  'EINVAL',
-  'ENOTSUP',
-  'UNKNOWN',
-]);
-
 const keyInitializations = new Map();
 let tempSequence = 0;
 
@@ -207,17 +200,15 @@ async function unlinkQuietly(fsApi, targetPath) {
   }
 }
 
-function isUnsupportedWindowsDirectorySync(error, operation) {
-  return process.platform === 'win32'
+function isUnsupportedNativeWindowsDirectorySync(fsApi, error, operation) {
+  return fsApi === defaultFs
+    && process.platform === 'win32'
     && operation === 'sync'
-    && error?.syscall === 'fsync'
-    && WINDOWS_UNSUPPORTED_DIRECTORY_FSYNC_ERRORS.has(error?.code);
+    && error?.code === 'EPERM'
+    && error?.syscall === 'fsync';
 }
 
 async function syncDirectory(fsApi, directory) {
-  // Native Node directory handles cannot be fsynced on Windows; custom adapters may opt in.
-  if (process.platform === 'win32' && fsApi.supportsDirectoryFsync !== true) return;
-
   let handle;
   let operation = 'open';
   try {
@@ -229,7 +220,7 @@ async function syncDirectory(fsApi, directory) {
     handle = undefined;
   } catch (error) {
     await closeQuietly(handle);
-    if (!isUnsupportedWindowsDirectorySync(error, operation)) throw error;
+    if (!isUnsupportedNativeWindowsDirectorySync(fsApi, error, operation)) throw error;
   }
 }
 
