@@ -7,7 +7,10 @@ import {
     applyMqttReconnectingState,
     isReusableMqttConnectionStatus,
 } from '../utils/mqttConnectionState.js';
-import { getPrintTaskName, mapTelemetryStatus } from '../utils/printTaskStatus.js';
+import {
+    applyPrinterTelemetry,
+    refreshPrinterRemainingTime,
+} from '../utils/printerTelemetry.js';
 
 // Scan for printers on local network using SSDP
 // This runs in Electron main process via IPC
@@ -52,9 +55,12 @@ export class BambuClient {
         if (this.countdownTimer) return;
 
         this.countdownTimer = setInterval(() => {
-            for (const serialNumber of this.printers.keys()) {
-                const updated = this.refreshLiveRemainingTime(serialNumber);
-                if (updated) this.emitUpdate(serialNumber);
+            for (const [serialNumber, printer] of this.printers) {
+                const updated = refreshPrinterRemainingTime(printer);
+                if (updated !== printer) {
+                    this.printers.set(serialNumber, updated);
+                    this.emitUpdate(serialNumber);
+                }
             }
 
             if (this.printers.size === 0) {
@@ -246,205 +252,10 @@ export class BambuClient {
         const printer = this.printers.get(serialNumber);
         if (!printer) return;
 
-        const data = payload.print || payload;
-        if (!data) return;
-
-        let nextStatus = printer.status;
-        printer.connectionState = 'online';
-        printer.lastTelemetryAt = Date.now();
-
-        // Update printer state
-        if (data.mc_percent !== undefined) {
-            const progress = Number(data.mc_percent);
-            if (Number.isFinite(progress)) {
-                printer.progress = Math.min(100, Math.max(0, progress));
-            }
-        }
-        if (data.gcode_state) {
-            nextStatus = mapTelemetryStatus(data, printer);
-            printer.status = nextStatus;
-            printer.jobStatus = nextStatus;
-        }
-
-        this.updateRemainingTime(printer, data, nextStatus);
-
-        if (data.layer_num !== undefined) {
-            const currentLayer = Number(data.layer_num);
-            const totalLayer = Number(data.total_layer_num);
-            printer.layer = `${Number.isFinite(currentLayer) ? currentLayer : '?'}`
-                + `/${Number.isFinite(totalLayer) && totalLayer >= 0 ? totalLayer : '?'}`;
-        }
-        if (data.nozzle_temper !== undefined) {
-            printer.temperature.nozzle = Math.round(data.nozzle_temper);
-        }
-        if (data.bed_temper !== undefined) {
-            printer.temperature.bed = Math.round(data.bed_temper);
-        }
-        if (data.chamber_temper !== undefined) {
-            printer.temperature.chamber = Math.round(data.chamber_temper);
-        }
-        if (data.cooling_fan_speed !== undefined) {
-            printer.fan = Math.round(data.cooling_fan_speed / 255 * 100);
-        }
-        if (data.spd_lvl !== undefined) {
-            const speedMap = { 1: 50, 2: 100, 3: 125, 4: 166 };
-            printer.speed = speedMap[data.spd_lvl] || 100;
-        }
-        if (data.gcode_file || data.subtask_name) {
-            printer.filename = getPrintTaskName(data, printer);
-        }
-
-        // AMS is not included in every telemetry packet. Keep the last known AMS
-        // state instead of clearing it when regular print-status packets arrive.
-        if (data.ams && Array.isArray(data.ams.ams)) {
-            let activeAmsIndex = null;
-            let activeTrayIndex = null;
-
-            const extruderInfo = data.device?.extruder?.info;
-            if (Array.isArray(extruderInfo)) {
-                const nozzle0 = extruderInfo.find((entry) => Number(entry?.id) === 0 && entry?.snow !== undefined);
-                if (nozzle0 && Number.isFinite(Number(nozzle0.snow))) {
-                    const snow = Number(nozzle0.snow);
-                    activeAmsIndex = snow >> 8;
-                    activeTrayIndex = snow & 0x3;
-                }
-            }
-
-            if (activeAmsIndex === null && data.ams.tray_now !== undefined) {
-                const trayNow = Number(data.ams.tray_now);
-                if (Number.isFinite(trayNow)) {
-                    if (trayNow === 255) {
-                        activeAmsIndex = null;
-                        activeTrayIndex = null;
-                    } else if (trayNow === 254) {
-                        activeAmsIndex = 255; // external spool
-                        activeTrayIndex = 0;
-                    } else if (trayNow >= 80) {
-                        activeAmsIndex = trayNow;
-                        activeTrayIndex = 0;
-                    } else {
-                        activeAmsIndex = trayNow >> 2;
-                        activeTrayIndex = trayNow & 0x3;
-                    }
-                }
-            }
-
-            const amsUnits = data.ams.ams.map((unit) => {
-                const unitIndex = Number(unit?.id);
-                const humidityIndex = Number(unit?.humidity);
-                const humidityRaw = Number(unit?.humidity_raw);
-                const temperature = Number(unit?.temp);
-
-                const trays = Array.isArray(unit?.tray)
-                    ? unit.tray.map((tray) => ({
-                        id: Number(tray?.id),
-                        remain: Number(tray?.remain),
-                        trayWeight: Number(tray?.tray_weight),
-                        type: tray?.tray_type || '',
-                        color: tray?.tray_color || '',
-                        idx: tray?.tray_info_idx || '',
-                        subBrand: tray?.tray_sub_brands || '',
-                        name: tray?.tray_type || '',
-                        trayUuid: tray?.tray_uuid || ''
-                    }))
-                    : [];
-
-                const activeTray = trays.find((tray) => tray.id === activeTrayIndex) || null;
-
-                return {
-                    index: unitIndex,
-                    humidityIndex: Number.isFinite(humidityIndex) ? humidityIndex : null,
-                    humidityRaw: Number.isFinite(humidityRaw) ? humidityRaw : null,
-                    temperature: Number.isFinite(temperature) ? temperature : null,
-                    trays,
-                    activeTray
-                };
-            });
-
-            printer.ams = {
-                activeAmsIndex,
-                activeTrayIndex,
-                units: amsUnits
-            };
-        } else if (data.ams === null) {
-            printer.ams = null;
-        }
-
-        // Trigger callback
+        const updated = applyPrinterTelemetry(printer, payload);
+        if (updated === printer) return;
+        this.printers.set(serialNumber, updated);
         this.emitUpdate(serialNumber);
-    }
-
-    getRemainingMinutes(data) {
-        const candidates = [
-            data.mc_remaining_time,
-            data.remaining_time,
-            data.remain_time,
-            data.print_remaining_time,
-            data.left_time,
-        ];
-
-        for (const value of candidates) {
-            if (value === undefined || value === null || value === '') continue;
-            const minutes = Number(value);
-            if (Number.isFinite(minutes) && minutes >= 0) return minutes;
-        }
-
-        return null;
-    }
-
-    updateRemainingTime(printer, data, status = printer.status) {
-        const remainingMinutes = this.getRemainingMinutes(data);
-        if (remainingMinutes !== null) {
-            printer.remainingMinutesRaw = remainingMinutes;
-            printer.remainingUpdatedAt = Date.now();
-            printer.remainingStatus = status;
-        }
-
-        if (['finished', 'idle', 'error', 'disconnected'].includes(status)) {
-            printer.timeLeft = '--';
-            delete printer.remainingMinutesRaw;
-            delete printer.remainingUpdatedAt;
-            delete printer.remainingStatus;
-            return;
-        }
-
-        printer.timeLeft = this.formatLiveTime(printer);
-    }
-
-    refreshLiveRemainingTime(serialNumber) {
-        const printer = this.printers.get(serialNumber);
-        if (!printer || !Number.isFinite(printer.remainingMinutesRaw)) return false;
-
-        const previous = printer.timeLeft;
-        printer.timeLeft = this.formatLiveTime(printer);
-        return previous !== printer.timeLeft;
-    }
-
-    getLiveRemainingMinutes(printer) {
-        const base = Number(printer.remainingMinutesRaw);
-        if (!Number.isFinite(base) || base < 0) return null;
-
-        if (printer.status !== 'printing') return base;
-
-        const updatedAt = Number(printer.remainingUpdatedAt);
-        if (!Number.isFinite(updatedAt) || updatedAt <= 0) return base;
-
-        const elapsedMinutes = Math.max(0, (Date.now() - updatedAt) / 60000);
-        return Math.max(0, base - elapsedMinutes);
-    }
-
-    formatLiveTime(printer) {
-        const minutes = this.getLiveRemainingMinutes(printer);
-        return this.formatTime(minutes);
-    }
-
-    formatTime(minutes) {
-        const totalMinutes = Math.ceil(Number(minutes));
-        if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return '--';
-        const h = Math.floor(totalMinutes / 60);
-        const m = totalMinutes % 60;
-        if (h > 0) return `${h}h ${m}m`;
-        return `${m}m`;
     }
 
     async disconnect(serialNumber) {

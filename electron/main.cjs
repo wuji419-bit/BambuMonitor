@@ -15,6 +15,7 @@ const {
 const { buildMqttConnectionOptions } = require('./mqtt-options.cjs');
 const { createBambuCloudClient } = require('../core/bambu-cloud.cjs');
 const { scanBambuPrinters } = require('../core/lan-discovery.cjs');
+const { createMqttConnectionManager } = require('../core/mqtt-connection-manager.cjs');
 const {
   clampWindowSize,
   createWindowBoundsCloseHandshake,
@@ -53,14 +54,28 @@ let pendingWindowBounds = null;
 let windowBoundsLifecycleCleanup = null;
 const OPACITY_PRESETS = [1, 0.95, 0.9, 0.85, 0.8];
 
-const mqttConnections = new Map();
 const cameraSources = new Map();
 const cameraProcesses = new Set();
 const chamberStreams = new Map();
 let cameraServer = null;
 let cameraServerPort = 0;
-const MQTT_RECONNECT_PERIOD_MS = 5000;
 const MQTT_RECONNECT_GRACE_MS = 45000;
+const MQTT_RENDERER_CHANNELS = Object.freeze({
+  connected: 'mqtt-connected',
+  message: 'mqtt-data',
+  reconnecting: 'mqtt-reconnecting',
+  disconnected: 'mqtt-disconnected',
+});
+const mqttConnectionManager = createMqttConnectionManager({
+  connectImpl: mqtt.connect,
+  buildConnectionOptions: buildMqttConnectionOptions,
+  emit(event, payload) {
+    const channel = MQTT_RENDERER_CHANNELS[event];
+    if (channel) sendRendererEvent(channel, payload);
+  },
+  logger: console,
+  reconnectGraceMs: MQTT_RECONNECT_GRACE_MS,
+});
 const ownsSingleInstanceLock = enforceSingleInstance(app, () => {
   bringWindowToFront();
   updateTrayMenu();
@@ -125,12 +140,6 @@ function scheduleWindowBoundsChanged(win) {
     pendingWindowBounds = null;
     sendWindowBoundsChanged(win, boundsToSend);
   }, 120);
-}
-
-function clearMqttDisconnectTimer(entry) {
-  if (!entry?.disconnectTimer) return;
-  clearTimeout(entry.disconnectTimer);
-  entry.disconnectTimer = null;
 }
 
 function buildNotificationHeaders(target, body) {
@@ -861,14 +870,7 @@ app.on('will-quit', () => {
   clearWindowBoundsState();
   isAppQuitRequested = false;
   globalShortcut.unregisterAll();
-  for (const [, conn] of mqttConnections) {
-    conn.intentional = true;
-    clearMqttDisconnectTimer(conn);
-    if (conn.client) {
-      conn.client.end();
-    }
-  }
-  mqttConnections.clear();
+  void mqttConnectionManager.shutdown();
   closeCameraServer();
 });
 
@@ -1090,172 +1092,18 @@ ipcMain.handle('notification-send', async (_event, { targets = [], payload }) =>
 
 ipcMain.handle('mqtt-connect', async (_event, payload = {}) => {
   try {
-    const connectionConfig = buildMqttConnectionOptions(payload);
-    const { serialNumber, url, mode, options } = connectionConfig;
-
-    if (mqttConnections.has(serialNumber)) {
-      const existing = mqttConnections.get(serialNumber);
-      existing.intentional = true;
-      clearMqttDisconnectTimer(existing);
-      if (existing.client) {
-        existing.client.end();
-      }
-      mqttConnections.delete(serialNumber);
-    }
-
-    console.log(`[Main] Connecting ${mode} MQTT to ${serialNumber}: ${url}`);
-
-    const client = mqtt.connect(url, {
-      username: options.username,
-      password: options.password,
-      rejectUnauthorized: options.rejectUnauthorized,
-      connectTimeout: 15000,
-      reconnectPeriod: MQTT_RECONNECT_PERIOD_MS,
-      resubscribe: true,
-    });
-    const entry = {
-      client,
-      mode,
-      intentional: false,
-      connected: false,
-      disconnectTimer: null,
-    };
-    mqttConnections.set(serialNumber, entry);
-
-    try {
-      const result = await new Promise((resolve, reject) => {
-        let settled = false;
-        const timeout = setTimeout(() => {
-          entry.intentional = true;
-          client.end(true);
-          mqttConnections.delete(serialNumber);
-          settled = true;
-          reject(new Error('MQTT连接超时'));
-        }, 15000);
-
-        client.on('connect', () => {
-          clearTimeout(timeout);
-          clearMqttDisconnectTimer(entry);
-          entry.connected = true;
-          console.log(`[Main] MQTT Connected: ${serialNumber}`);
-          sendRendererEvent('mqtt-connected', { serialNumber });
-
-          const topic = `device/${serialNumber}/report`;
-          client.subscribe(topic, (err) => {
-            if (err) {
-              console.error('[Main] Subscribe error:', err);
-              if (!settled) {
-                settled = true;
-                reject(err);
-              }
-            } else {
-              console.log(`[Main] Subscribed to ${topic}`);
-              try {
-                const requestTopic = `device/${serialNumber}/request`;
-                const pushAllPayload = JSON.stringify({
-                  pushing: {
-                    sequence_id: '0',
-                    command: 'pushall',
-                  },
-                });
-                client.publish(requestTopic, pushAllPayload);
-              } catch (publishErr) {
-                console.warn(`[Main] pushall request failed (${serialNumber}):`, publishErr.message);
-              }
-              if (!settled) {
-                settled = true;
-                resolve({ success: true, serialNumber });
-              }
-            }
-          });
-        });
-
-        client.on('message', (_topic, message) => {
-          try {
-            const payload = JSON.parse(message.toString());
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('mqtt-data', { serialNumber, payload });
-            }
-          } catch {
-            // Ignore parse errors.
-          }
-        });
-
-        client.on('reconnect', () => {
-          console.log(`[Main] MQTT Reconnecting: ${serialNumber}`);
-          sendRendererEvent('mqtt-reconnecting', { serialNumber });
-        });
-
-        client.on('offline', () => {
-          console.log(`[Main] MQTT Offline: ${serialNumber}`);
-          entry.connected = false;
-          sendRendererEvent('mqtt-reconnecting', { serialNumber });
-        });
-
-        client.on('error', (err) => {
-          console.error(`[Main] MQTT Error (${serialNumber}):`, err.message);
-          if (!settled) {
-            clearTimeout(timeout);
-            settled = true;
-            reject(err);
-          }
-        });
-
-        client.on('close', () => {
-          console.log(`[Main] MQTT Connection closed: ${serialNumber}`);
-          entry.connected = false;
-          if (entry.intentional) return;
-
-          sendRendererEvent('mqtt-reconnecting', { serialNumber });
-          if (!entry.disconnectTimer) {
-            entry.disconnectTimer = setTimeout(() => {
-              entry.disconnectTimer = null;
-              if (entry.connected || entry.intentional) return;
-              sendRendererEvent('mqtt-disconnected', { serialNumber });
-            }, MQTT_RECONNECT_GRACE_MS);
-            if (entry.disconnectTimer.unref) {
-              entry.disconnectTimer.unref();
-            }
-          }
-        });
-      });
-
-      return result;
-    } catch (promiseErr) {
-      console.error('[Main] MQTT Promise error:', promiseErr.message);
-      entry.intentional = true;
-      clearMqttDisconnectTimer(entry);
-      client.end(true);
-      mqttConnections.delete(serialNumber);
-      return { success: false, error: promiseErr.message };
-    }
+    return await mqttConnectionManager.connect(payload);
   } catch (err) {
-    console.error('[Main] MQTT connect error:', err);
-    return { success: false, error: err.message };
+    const message = err?.message || 'MQTT connection failed';
+    console.error({ operation: 'mqtt-connect-failed', message });
+    return { success: false, error: message };
   }
 });
 
-ipcMain.handle('mqtt-disconnect', async (_event, { serialNumber }) => {
-  if (mqttConnections.has(serialNumber)) {
-    const conn = mqttConnections.get(serialNumber);
-    conn.intentional = true;
-    clearMqttDisconnectTimer(conn);
-    if (conn.client) {
-      conn.client.end();
-    }
-    mqttConnections.delete(serialNumber);
-  }
-  return { success: true };
+ipcMain.handle('mqtt-disconnect', async (_event, { serialNumber } = {}) => {
+  return mqttConnectionManager.disconnect(serialNumber);
 });
 
 ipcMain.handle('mqtt-disconnect-all', async () => {
-  for (const [, conn] of mqttConnections) {
-    conn.intentional = true;
-    clearMqttDisconnectTimer(conn);
-    if (conn.client) {
-      conn.client.end();
-    }
-  }
-  mqttConnections.clear();
-  return { success: true };
+  return mqttConnectionManager.shutdown();
 });
