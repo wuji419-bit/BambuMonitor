@@ -7,6 +7,7 @@ const MAX_KEY_LENGTH = 128;
 const MAX_TEXT_LENGTH = 256;
 const MAX_URL_LENGTH = 2048;
 const MAX_SECRET_LENGTH = 4096;
+const MAX_CUSTOM_URLS = 100;
 const MAX_TARGETS = 100;
 const MAX_HEADERS = 50;
 const MAX_HEADER_NAME_LENGTH = 128;
@@ -14,6 +15,7 @@ const MAX_HEADER_VALUE_LENGTH = 4096;
 const SAFE_KEY = /^[A-Za-z0-9._-]+$/;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const MISSING_FILE = Object.freeze({ missingConfigStoreFile: 1n });
 
 const DEFAULT_CONFIG = {
   version: CURRENT_VERSION,
@@ -83,8 +85,10 @@ function normalizeHttpUrl(value, errorFactory, field) {
 
 function normalizeCustomUrls(value) {
   assertPlain(value, invalidConfig, 'camera.customUrls');
+  const entries = Object.entries(value);
+  if (entries.length > MAX_CUSTOM_URLS) throw invalidConfig('camera.customUrls');
   const result = {};
-  for (const [key, url] of Object.entries(value)) {
+  for (const [key, url] of entries) {
     const safeKey = normalizeSafeKey(key, invalidConfig, 'camera.customUrls key');
     result[safeKey] = normalizeHttpUrl(url, invalidConfig, 'camera.customUrls URL');
   }
@@ -235,18 +239,21 @@ function assertVersion(value, name) {
 }
 
 async function loadVersioned({ storage, name, defaults, normalize }) {
-  const loaded = await storage.readJson(name, null);
-  if (loaded === null) {
+  const loaded = await storage.readJson(name, MISSING_FILE);
+  if (loaded?.missingConfigStoreFile === 1n) {
     const initial = clone(defaults);
     await storage.writeJson(name, initial);
     return initial;
   }
   assertVersion(loaded, name);
-  const normalized = normalize(loaded);
   if (loaded.version === 0) {
     await storage.backup(name, `${name}.bak-v0`);
+    const normalized = normalize(loaded);
     await storage.writeJson(name, normalized);
-  } else if (!equal(loaded, normalized)) {
+    return normalized;
+  }
+  const normalized = normalize(loaded);
+  if (!equal(loaded, normalized)) {
     await storage.writeJson(name, normalized);
   }
   return normalized;

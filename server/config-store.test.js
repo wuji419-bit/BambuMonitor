@@ -102,6 +102,22 @@ test('rejects malformed config patches, unsafe URL keys, protocols, and bounds',
   for (const patch of invalid) await assert.rejects(store.update(patch), /Invalid configuration/);
 });
 
+test('accepts 100 custom camera URLs and rejects 101 without changing memory', async () => {
+  const store = await createConfigStore({ storage: memoryStorage() });
+  const atLimit = Object.fromEntries(
+    Array.from({ length: 100 }, (_, index) => [`serial-${index}`, `https://cam.example/${index}`]),
+  );
+  await store.update({ camera: { customUrls: atLimit } });
+  assert.equal(Object.keys(store.get().camera.customUrls).length, 100);
+
+  const overLimit = { ...atLimit, 'serial-100': 'https://cam.example/100' };
+  await assert.rejects(
+    store.update({ camera: { customUrls: overLimit } }),
+    /Invalid configuration field: camera\.customUrls/,
+  );
+  assert.equal(Object.keys(store.get().camera.customUrls).length, 100);
+});
+
 test('normalizes bounded notification targets and removes unknown fields', async () => {
   const store = await createConfigStore({ storage: memoryStorage() });
   await store.update({ notifications: { enabled: true, targets: [{
@@ -210,6 +226,34 @@ test('cleans version 1 files and only writes when normalized content changes', a
   await createConfigStore({ storage });
   assert.deepEqual(writes, []);
 });
+
+for (const name of ['config.json', 'device-cache.json']) {
+  test(`${name} existing null fails validation without overwrite or backup`, async (t) => {
+    const { dataDir, storage } = await realStorage(t);
+    if (name === 'device-cache.json') await storage.writeJson('config.json', DEFAULT_CONFIG);
+    const original = Buffer.from('null\n');
+    await fs.writeFile(path.join(dataDir, name), original);
+
+    await assert.rejects(createConfigStore({ storage }), new RegExp(`Unsupported ${name} version`));
+    assert.deepEqual(await fs.readFile(path.join(dataDir, name)), original);
+    await assert.rejects(fs.stat(path.join(dataDir, `${name}.bak-v0`)), { code: 'ENOENT' });
+  });
+}
+
+for (const name of ['config.json', 'device-cache.json']) {
+  test(`${name} v0 backup precedes migration validation failure`, async (t) => {
+    const { dataDir, storage } = await realStorage(t);
+    if (name === 'device-cache.json') await storage.writeJson('config.json', DEFAULT_CONFIG);
+    const original = name === 'config.json'
+      ? Buffer.from('{\n  "version": 0, "debug": "invalid"\n}\n')
+      : Buffer.from('{\n  "version": 0, "devices": []\n}\n');
+    await fs.writeFile(path.join(dataDir, name), original);
+
+    await assert.rejects(createConfigStore({ storage }), /Invalid (configuration|device) field/);
+    assert.deepEqual(await fs.readFile(path.join(dataDir, `${name}.bak-v0`)), original);
+    assert.deepEqual(await fs.readFile(path.join(dataDir, name)), original);
+  });
+}
 
 for (const name of ['config.json', 'device-cache.json']) {
   test(`${name} v0 migration creates one byte-identical backup and is idempotent`, async (t) => {
