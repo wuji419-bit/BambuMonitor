@@ -1,4 +1,4 @@
-const { extractBambuUsername } = require('../electron/mqtt-options.cjs');
+const { extractBambuUsername } = require('./bambu-token.cjs');
 
 const BAMBU_API = Object.freeze({
   LOGIN: 'https://api.bambulab.cn/v1/user-service/user/login',
@@ -27,6 +27,14 @@ class BambuCloudError extends Error {
     this.name = 'BambuCloudError';
     this.status = status;
     this.tokenInvalid = status === 401 || status === 403;
+  }
+}
+
+class MalformedBambuResponseError extends Error {
+  constructor(status) {
+    super('Malformed Bambu Cloud response');
+    this.name = 'MalformedBambuResponseError';
+    this.status = status;
   }
 }
 
@@ -68,17 +76,23 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
     throw new TypeError('Bambu Cloud client requires fetch');
   }
 
-  const logHttp = (operation, status, deviceCount) => {
-    if (!logger || typeof logger.info !== 'function') return;
+  const logEntry = (level, operation, status, deviceCount) => {
+    if (!logger || typeof logger[level] !== 'function') return;
 
     const entry = { operation };
     if (typeof status === 'number') entry.status = status;
     if (typeof deviceCount === 'number') entry.deviceCount = deviceCount;
     try {
-      logger.info(entry);
+      logger[level](entry);
     } catch {
       // Diagnostics must never change a cloud operation's behavior.
     }
+  };
+  const logHttp = (operation, status, deviceCount) => {
+    logEntry('info', operation, status, deviceCount);
+  };
+  const logWarning = (operation, status) => {
+    logEntry('warn', operation, status);
   };
 
   const isTokenInvalidResponse = (response) => (
@@ -88,11 +102,11 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
   const readJson = async (response) => {
     try {
       return await response.json();
-    } catch (error) {
+    } catch {
       if (isTokenInvalidResponse(response)) {
         throw new BambuCloudError('Bambu Cloud authentication failed', response.status);
       }
-      throw error;
+      throw new MalformedBambuResponseError(response?.status);
     }
   };
 
@@ -130,6 +144,9 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
 
       return { success: false, error: translateBambuError(data.error) || '登录失败' };
     } catch (error) {
+      if (error instanceof MalformedBambuResponseError) {
+        return { success: false, error: '登录失败' };
+      }
       return { success: false, error: translateBambuError(error?.message) };
     }
   }
@@ -159,6 +176,9 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
       const data = await readJson(response);
       return { success: false, error: translateBambuError(data.error) || '发送验证码失败' };
     } catch (error) {
+      if (error instanceof MalformedBambuResponseError) {
+        return { success: false, error: '发送验证码失败' };
+      }
       return { success: false, error: translateBambuError(error?.message) };
     }
   }
@@ -199,6 +219,9 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
         error: translateBambuError(data.error || data.message) || '登录失败',
       };
     } catch (error) {
+      if (error instanceof MalformedBambuResponseError) {
+        return { success: false, error: '登录失败' };
+      }
       return { success: false, error: translateBambuError(error?.message) };
     }
   }
@@ -221,6 +244,7 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
       return data?.uid ? `u_${data.uid}` : '';
     } catch (error) {
       if (error instanceof BambuCloudError) throw error;
+      logWarning('bambu-cloud.get-username-failed', error?.status);
       return '';
     }
   }
@@ -258,6 +282,9 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
       return { success: false, error: data?.error || '获取设备列表失败' };
     } catch (error) {
       if (error instanceof BambuCloudError) throw error;
+      if (error instanceof MalformedBambuResponseError) {
+        return { success: false, error: '获取设备列表失败' };
+      }
       return { success: false, error: error?.message };
     }
   }

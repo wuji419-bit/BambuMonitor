@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
 
 const {
   BAMBU_API,
@@ -14,6 +15,16 @@ function jsonResponse(status, data) {
     status,
     ok: status >= 200 && status < 300,
     json: async () => data,
+  };
+}
+
+function malformedJsonResponse(status, message = 'Unexpected token < in JSON') {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    json: async () => {
+      throw new SyntaxError(message);
+    },
   };
 }
 
@@ -58,6 +69,13 @@ function assertSafeLogEntries(entries, secrets) {
     }
   }
 }
+
+test('cloud core depends on the shared token helper instead of Electron code', () => {
+  const source = readFileSync(require.resolve('./bambu-cloud.cjs'), 'utf8');
+
+  assert.match(source, /require\(['"]\.\/bambu-token\.cjs['"]\)/);
+  assert.doesNotMatch(source, /\.\.\/electron\//);
+});
 
 test('exports the existing Bambu China endpoints and OrcaSlicer headers', () => {
   assert.deepEqual(BAMBU_API, {
@@ -300,6 +318,55 @@ test('code login and translated errors preserve the current Chinese UI behavior'
   });
 });
 
+test('malformed non-auth responses use stable operation-specific Chinese fallbacks', async () => {
+  const parserError = 'Unexpected token < from https://credentials.invalid/?token=private-token';
+  const responses = [
+    malformedJsonResponse(500, parserError),
+    malformedJsonResponse(502, parserError),
+    malformedJsonResponse(503, parserError),
+    malformedJsonResponse(500, parserError),
+  ];
+  const { entries, logger } = createCapturingLogger();
+  const client = createBambuCloudClient({
+    logger,
+    fetchImpl: async () => responses.shift(),
+  });
+
+  assert.deepEqual(await client.loginPassword({ account: 'a', password: 'b' }), {
+    success: false,
+    error: '登录失败',
+  });
+  assert.deepEqual(await client.requestVerifyCode({ account: 'a@example.com' }), {
+    success: false,
+    error: '发送验证码失败',
+  });
+  assert.deepEqual(await client.loginCode({ account: 'a@example.com', code: '123456' }), {
+    success: false,
+    error: '登录失败',
+  });
+  assert.deepEqual(await client.listDevices('private-token'), {
+    success: false,
+    error: '获取设备列表失败',
+  });
+  assertSafeLogEntries(entries, [parserError, 'private-token']);
+});
+
+test('malformed preference responses return an empty username with a redacted warning', async () => {
+  const parserError = 'Unexpected token < from https://credentials.invalid/?token=private-token';
+  const { entries, logger } = createCapturingLogger();
+  const client = createBambuCloudClient({
+    logger,
+    fetchImpl: async () => malformedJsonResponse(502, parserError),
+  });
+
+  assert.equal(await client.getCloudUsername('private-token'), '');
+  assert.ok(entries.some((entry) => (
+    entry.level === 'warn'
+    && entry.args[0].status === 502
+  )));
+  assertSafeLogEntries(entries, [parserError, 'private-token']);
+});
+
 test('device list normalization and preference fallback match Electron behavior', async () => {
   const calls = [];
   const { entries, logger } = createCapturingLogger();
@@ -401,6 +468,38 @@ test('401 and 403 device or preference responses throw token-invalid BambuCloudE
   const responses = [
     jsonResponse(200, { devices: [] }),
     jsonResponse(403, { error: 'Forbidden' }),
+  ];
+  const preferenceClient = createBambuCloudClient({
+    fetchImpl: async () => responses.shift(),
+  });
+  await assert.rejects(
+    preferenceClient.listDevices('revoked-token'),
+    (error) => {
+      assert.ok(error instanceof BambuCloudError);
+      assert.equal(error.status, 403);
+      assert.equal(error.tokenInvalid, true);
+      return true;
+    },
+  );
+});
+
+test('malformed 401 and 403 device or preference responses remain token-invalid', async () => {
+  const bindClient = createBambuCloudClient({
+    fetchImpl: async () => malformedJsonResponse(401),
+  });
+  await assert.rejects(
+    bindClient.listDevices('expired-token'),
+    (error) => {
+      assert.ok(error instanceof BambuCloudError);
+      assert.equal(error.status, 401);
+      assert.equal(error.tokenInvalid, true);
+      return true;
+    },
+  );
+
+  const responses = [
+    jsonResponse(200, { devices: [] }),
+    malformedJsonResponse(403),
   ];
   const preferenceClient = createBambuCloudClient({
     fetchImpl: async () => responses.shift(),

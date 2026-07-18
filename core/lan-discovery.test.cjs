@@ -53,10 +53,12 @@ function createManualTimers() {
 }
 
 class FakeSocket extends EventEmitter {
-  constructor(name) {
+  constructor(name, { deferBindCallbacks = false } = {}) {
     super();
     this.name = name;
+    this.deferBindCallbacks = deferBindCallbacks;
     this.bindCalls = [];
+    this.pendingBindCallbacks = [];
     this.sendCalls = [];
     this.broadcastValues = [];
     this.closeCount = 0;
@@ -66,7 +68,17 @@ class FakeSocket extends EventEmitter {
   bind(...args) {
     this.bindCalls.push(args);
     const callback = args.at(-1);
-    if (typeof callback === 'function') callback();
+    if (typeof callback !== 'function') return;
+    if (this.deferBindCallbacks) {
+      this.pendingBindCallbacks.push(callback);
+      return;
+    }
+    callback();
+  }
+
+  flushBindCallbacks() {
+    const callbacks = this.pendingBindCallbacks.splice(0);
+    for (const callback of callbacks) callback();
   }
 
   setBroadcast(value) {
@@ -83,9 +95,11 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-function createDgramHarness() {
+function createDgramHarness({ deferSearchBind = false } = {}) {
   const listenSocket = new FakeSocket('listen');
-  const searchSocket = new FakeSocket('search');
+  const searchSocket = new FakeSocket('search', {
+    deferBindCallbacks: deferSearchBind,
+  });
   const createCalls = [];
   const sockets = [listenSocket, searchSocket];
   return {
@@ -285,6 +299,103 @@ test('scan closes both sockets and rejects when aborted', async () => {
     assert.equal(error.name, 'AbortError');
     return true;
   });
+  assert.equal(harness.listenSocket.closeCount, 1);
+  assert.equal(harness.searchSocket.closeCount, 1);
+  assert.equal(timers.pendingCount(), 0);
+});
+
+test('scan rejects an already-aborted signal without creating sockets or timers', async () => {
+  const timers = createManualTimers();
+  const controller = new AbortController();
+  let createCount = 0;
+  controller.abort();
+
+  await assert.rejects(
+    scanBambuPrinters({
+      dgramImpl: {
+        createSocket() {
+          createCount += 1;
+          throw new Error('socket creation should not run');
+        },
+      },
+      durationMs: 6000,
+      timers: timers.api,
+      signal: controller.signal,
+    }),
+    (error) => {
+      assert.equal(error.name, 'AbortError');
+      return true;
+    },
+  );
+  assert.equal(createCount, 0);
+  assert.equal(timers.pendingCount(), 0);
+});
+
+test('scan closes the first socket when creating the second socket fails', async () => {
+  const timers = createManualTimers();
+  const listenSocket = new FakeSocket('listen');
+  const creationError = new Error('second socket failed');
+  let createCount = 0;
+
+  await assert.rejects(
+    scanBambuPrinters({
+      dgramImpl: {
+        createSocket() {
+          createCount += 1;
+          if (createCount === 1) return listenSocket;
+          throw creationError;
+        },
+      },
+      durationMs: 6000,
+      timers: timers.api,
+    }),
+    (error) => error === creationError,
+  );
+  assert.equal(createCount, 2);
+  assert.equal(listenSocket.closeCount, 1);
+  assert.equal(timers.pendingCount(), 0);
+});
+
+test('abort before the asynchronous search bind callback cannot send or leak sockets', async () => {
+  const timers = createManualTimers();
+  const harness = createDgramHarness({ deferSearchBind: true });
+  const controller = new AbortController();
+  const scanPromise = scanBambuPrinters({
+    dgramImpl: harness.dgramImpl,
+    durationMs: 6000,
+    timers: timers.api,
+    signal: controller.signal,
+  });
+
+  assert.equal(harness.searchSocket.sendCalls.length, 0);
+  controller.abort();
+  await assert.rejects(scanPromise, (error) => error.name === 'AbortError');
+  harness.searchSocket.flushBindCallbacks();
+
+  assert.equal(harness.searchSocket.sendCalls.length, 0);
+  assert.deepEqual(harness.searchSocket.broadcastValues, []);
+  assert.equal(harness.listenSocket.closeCount, 1);
+  assert.equal(harness.searchSocket.closeCount, 1);
+  assert.equal(timers.pendingCount(), 0);
+});
+
+test('socket error before the asynchronous search bind callback cannot send or leak sockets', async () => {
+  const timers = createManualTimers();
+  const harness = createDgramHarness({ deferSearchBind: true });
+  const socketError = new Error('listen failed before search bind');
+  const scanPromise = scanBambuPrinters({
+    dgramImpl: harness.dgramImpl,
+    durationMs: 6000,
+    timers: timers.api,
+  });
+
+  assert.equal(harness.searchSocket.sendCalls.length, 0);
+  harness.listenSocket.emit('error', socketError);
+  await assert.rejects(scanPromise, (error) => error === socketError);
+  harness.searchSocket.flushBindCallbacks();
+
+  assert.equal(harness.searchSocket.sendCalls.length, 0);
+  assert.deepEqual(harness.searchSocket.broadcastValues, []);
   assert.equal(harness.listenSocket.closeCount, 1);
   assert.equal(harness.searchSocket.closeCount, 1);
   assert.equal(timers.pendingCount(), 0);
