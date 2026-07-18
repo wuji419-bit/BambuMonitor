@@ -25,6 +25,30 @@ function tempFiles(entries, name) {
   return entries.filter((entry) => entry.startsWith(`.${name}.`) && entry.endsWith('.tmp'));
 }
 
+function isTempPath(target, name) {
+  return tempFiles([path.basename(String(target))], name).length === 1;
+}
+
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+async function waitForSignal(promise, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 5000);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function proxyHandle(handle, overrides = {}) {
   return new Proxy(handle, {
     get(target, property) {
@@ -44,6 +68,16 @@ function mutateBase64(value) {
 async function makeFileSymlink(target, linkPath) {
   try {
     await fs.symlink(target, linkPath, process.platform === 'win32' ? 'file' : undefined);
+    return true;
+  } catch (error) {
+    if (process.platform === 'win32' && ['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) return false;
+    throw error;
+  }
+}
+
+async function makeDirectoryLink(target, linkPath) {
+  try {
+    await fs.symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
     return true;
   } catch (error) {
     if (process.platform === 'win32' && ['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) return false;
@@ -203,6 +237,63 @@ test('creates a private data directory and converges concurrent key initializati
   }
 });
 
+test('copies a shared initialized key for each waiter and wipes the shared source buffer', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const keyPath = path.join(dataDir, 'secret.key');
+  const expectedKey = Buffer.alloc(32, 0x5a);
+  const observedSharedKey = Buffer.from(expectedKey);
+  await fs.writeFile(keyPath, expectedKey, { mode: 0o600 });
+  const readStarted = createDeferred();
+  const releaseRead = createDeferred();
+  const secondDirectoryClose = createDeferred();
+  t.after(() => releaseRead.resolve());
+  let directoryOpenCalls = 0;
+  let keyReadCalls = 0;
+  const observingFs = {
+    ...fs,
+    async open(target, ...args) {
+      const handle = await fs.open(target, ...args);
+      if (target === dataDir && args[0] !== 'r') {
+        directoryOpenCalls += 1;
+        if (directoryOpenCalls === 2) {
+          return proxyHandle(handle, {
+            close: async () => {
+              await handle.close();
+              secondDirectoryClose.resolve();
+            },
+          });
+        }
+      }
+      if (target !== keyPath) return handle;
+      return proxyHandle(handle, {
+        readFile: async () => {
+          keyReadCalls += 1;
+          if (keyReadCalls !== 1) return Buffer.from(expectedKey);
+          readStarted.resolve();
+          await releaseRead.promise;
+          return observedSharedKey;
+        },
+      });
+    },
+  };
+
+  const firstStorage = createStorage({ dataDir, fsApi: observingFs });
+  await waitForSignal(readStarted.promise, 'the shared key read');
+  const secondStorage = createStorage({ dataDir, fsApi: observingFs });
+  await waitForSignal(secondDirectoryClose.promise, 'the second storage directory check');
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseRead.resolve();
+  const stores = await Promise.all([firstStorage, secondStorage]);
+
+  assert.equal(keyReadCalls, 1);
+  assert.deepEqual(observedSharedKey, Buffer.alloc(32));
+  assert.deepEqual(stores.map((storage) => storage.getSecretKey()), [expectedKey, expectedKey]);
+  const mutableCopy = stores[0].getSecretKey();
+  mutableCopy.fill(0);
+  assert.deepEqual(stores[0].getSecretKey(), expectedKey);
+  assert.deepEqual(stores[1].getSecretKey(), expectedKey);
+});
+
 test('publishes only a fully synced key when a concurrent process fails before sync', async (t) => {
   const root = await makeTempDir(t);
   const dataDir = path.join(root, 'data');
@@ -248,7 +339,7 @@ test('publishes only a fully synced key when a concurrent process fails before s
 test('rejects injected filesystems missing mandatory security methods', async (t) => {
   const root = await makeTempDir(t);
 
-  for (const method of ['lstat', 'chmod', 'link']) {
+  for (const method of ['lstat', 'chmod', 'link', 'realpath']) {
     const incompleteFs = { ...fs };
     delete incompleteFs[method];
     await assert.rejects(
@@ -256,6 +347,80 @@ test('rejects injected filesystems missing mandatory security methods', async (t
       { message: `Invalid fsApi: missing ${method}` },
     );
   }
+});
+
+test('rejects a linked data directory without writing a key through it', async (t) => {
+  const root = await makeTempDir(t);
+  const externalDir = path.join(root, 'external');
+  const linkedDir = path.join(root, 'linked-data');
+  await fs.mkdir(externalDir);
+  if (!await makeDirectoryLink(externalDir, linkedDir)) {
+    t.skip('Windows directory-link privilege is unavailable');
+    return;
+  }
+
+  await assert.rejects(createStorage({ dataDir: linkedDir }), {
+    message: 'Unsafe data directory',
+  });
+  await assert.rejects(fs.stat(path.join(externalDir, 'secret.key')), { code: 'ENOENT' });
+});
+
+test('rejects a data directory path that names a non-directory', async (t) => {
+  const root = await makeTempDir(t);
+  const filePath = path.join(root, 'not-a-directory');
+  await fs.writeFile(filePath, 'not a directory');
+  await assert.rejects(createStorage({ dataDir: filePath }), {
+    message: 'Invalid data directory',
+  });
+});
+
+test('rejects a data directory whose canonical path escapes the requested path', async (t) => {
+  const root = await makeTempDir(t);
+  const dataDir = path.join(root, 'data');
+  const externalDir = path.join(root, 'canonical-target');
+  await fs.mkdir(dataDir);
+  await fs.mkdir(externalDir);
+  const escapingFs = {
+    ...fs,
+    async realpath(target, ...args) {
+      if (target === dataDir) return externalDir;
+      return fs.realpath(target, ...args);
+    },
+  };
+
+  await assert.rejects(createStorage({ dataDir, fsApi: escapingFs }), {
+    message: 'Unsafe data directory',
+  });
+  await assert.rejects(fs.stat(path.join(dataDir, 'secret.key')), { code: 'ENOENT' });
+});
+
+test('rejects a data directory replaced while its verified handle is opened', async (t) => {
+  const root = await makeTempDir(t);
+  const dataDir = path.join(root, 'data');
+  const parkedDir = path.join(root, 'parked-data');
+  const replacementDir = path.join(root, 'replacement-data');
+  await fs.mkdir(dataDir);
+  await fs.mkdir(replacementDir);
+  let swapped = false;
+  const racingFs = {
+    ...fs,
+    async open(target, ...args) {
+      if (target === dataDir && !swapped) {
+        swapped = true;
+        await fs.rename(dataDir, parkedDir);
+        await fs.rename(replacementDir, dataDir);
+      }
+      const handle = await fs.open(target, ...args);
+      if (target === dataDir) return proxyHandle(handle, { sync: async () => {} });
+      return handle;
+    },
+  };
+
+  await assert.rejects(createStorage({ dataDir, fsApi: racingFs }), {
+    message: 'Unsafe data directory',
+  });
+  await assert.rejects(fs.stat(path.join(dataDir, 'secret.key')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(parkedDir, 'secret.key')), { code: 'ENOENT' });
 });
 
 test('fails initialization when private permissions cannot be enforced', async (t) => {
@@ -271,6 +436,17 @@ test('fails initialization when private permissions cannot be enforced', async (
           throw error;
         }
         return fs.chmod(target, mode);
+      },
+      async open(target, ...args) {
+        const handle = await fs.open(target, ...args);
+        if (target !== dataDir) return handle;
+        return proxyHandle(handle, {
+          chmod: async () => {
+            const error = new Error('simulated data directory chmod failure');
+            error.code = 'EACCES';
+            throw error;
+          },
+        });
       },
     };
 
@@ -568,7 +744,7 @@ test('does not swallow arbitrary directory sync errors', async (t) => {
   const failingFs = {
     ...fs,
     async open(target, ...args) {
-      if (target === dataDir) {
+      if (target === dataDir && args[0] === 'r') {
         const error = new Error('simulated directory sync failure');
         error.code = 'EIO';
         throw error;
@@ -656,6 +832,123 @@ test('backup is exclusive, byte-identical, and idempotent', async (t) => {
   if (process.platform !== 'win32') {
     assert.equal(modeBits(await fs.stat(path.join(dataDir, 'source.bin.bak'))), 0o600);
   }
+});
+
+test('backup never exposes a partial final file and cleans a failed temp write', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const healthyStorage = await createStorage({ dataDir });
+  const source = Buffer.from('complete backup source');
+  const backupPath = path.join(dataDir, 'source.bin.bak');
+  await fs.writeFile(path.join(dataDir, 'source.bin'), source, { mode: 0o600 });
+  const partialStarted = createDeferred();
+  const releaseWrite = createDeferred();
+  t.after(() => releaseWrite.resolve());
+  let writeCalls = 0;
+  const failingFs = {
+    ...fs,
+    async open(target, ...args) {
+      const handle = await fs.open(target, ...args);
+      const isBackupWrite = target === backupPath || isTempPath(target, 'source.bin.bak');
+      if (!isBackupWrite) return handle;
+      return proxyHandle(handle, {
+        write: async (buffer, offset = 0, length = buffer.length - offset, position = null) => {
+          writeCalls += 1;
+          if (writeCalls === 1) {
+            const result = await handle.write(buffer, offset, Math.min(4, length), position);
+            partialStarted.resolve();
+            await releaseWrite.promise;
+            return result;
+          }
+          const error = new Error('simulated backup temp write failure');
+          error.code = 'EIO';
+          throw error;
+        },
+      });
+    },
+  };
+  const failingStorage = await createStorage({ dataDir, fsApi: failingFs });
+  const backupPromise = failingStorage.backup('source.bin', 'source.bin.bak');
+
+  await waitForSignal(partialStarted.promise, 'a partial backup write');
+  let finalWasAbsent = false;
+  try {
+    await fs.stat(backupPath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    finalWasAbsent = true;
+  } finally {
+    releaseWrite.resolve();
+  }
+
+  await assert.rejects(backupPromise, /simulated backup temp write failure/);
+  assert.equal(finalWasAbsent, true);
+  await assert.rejects(fs.stat(backupPath), { code: 'ENOENT' });
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'source.bin.bak'), []);
+  assert.deepEqual(await fs.readFile(path.join(dataDir, 'source.bin')), source);
+  assert.equal(await healthyStorage.backup('source.bin', 'source.bin.bak'), true);
+  assert.deepEqual(await fs.readFile(backupPath), source);
+});
+
+test('a failing backup writer cannot strand a concurrent caller without a valid backup', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const healthyStorage = await createStorage({ dataDir });
+  const source = Buffer.from('concurrent backup source');
+  const backupPath = path.join(dataDir, 'source.bin.bak');
+  await fs.writeFile(path.join(dataDir, 'source.bin'), source, { mode: 0o600 });
+  const syncStarted = createDeferred();
+  const releaseSync = createDeferred();
+  t.after(() => releaseSync.resolve());
+  let intercepted = false;
+  const failingFs = {
+    ...fs,
+    async open(target, ...args) {
+      const handle = await fs.open(target, ...args);
+      const isBackupWrite = target === backupPath || isTempPath(target, 'source.bin.bak');
+      if (intercepted || !isBackupWrite) return handle;
+      intercepted = true;
+      return proxyHandle(handle, {
+        sync: async () => {
+          syncStarted.resolve();
+          await releaseSync.promise;
+          const error = new Error('simulated backup temp sync failure');
+          error.code = 'EIO';
+          throw error;
+        },
+      });
+    },
+  };
+  const failingStorage = await createStorage({ dataDir, fsApi: failingFs });
+  const failingBackup = failingStorage.backup('source.bin', 'source.bin.bak');
+
+  await waitForSignal(syncStarted.promise, 'a backup temp sync');
+  let concurrentResult;
+  try {
+    concurrentResult = await healthyStorage.backup('source.bin', 'source.bin.bak');
+  } finally {
+    releaseSync.resolve();
+  }
+  await assert.rejects(failingBackup, /simulated backup temp sync failure/);
+
+  assert.equal(concurrentResult, true);
+  assert.deepEqual(await fs.readFile(backupPath), source);
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'source.bin.bak'), []);
+});
+
+test('concurrent backup callers publish exactly one complete backup', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  const source = Buffer.alloc(64 * 1024, 0xa7);
+  await fs.writeFile(path.join(dataDir, 'source.bin'), source, { mode: 0o600 });
+
+  const results = await Promise.all([
+    storage.backup('source.bin', 'source.bin.bak'),
+    storage.backup('source.bin', 'source.bin.bak'),
+    storage.backup('source.bin', 'source.bin.bak'),
+  ]);
+
+  assert.deepEqual(results.sort(), [false, false, true]);
+  assert.deepEqual(await fs.readFile(path.join(dataDir, 'source.bin.bak')), source);
+  assert.deepEqual(tempFiles(await fs.readdir(dataDir), 'source.bin.bak'), []);
 });
 
 test('rejects a file replaced between path inspection and handle verification', async (t) => {
@@ -883,6 +1176,40 @@ test('strictly validates encrypted envelope fields and base64 lengths', async (t
   await assert.rejects(storage.readEncrypted('session.enc'), {
     message: 'Invalid encrypted envelope: session.enc',
   });
+});
+
+test('accepts envelope whitespace and key order but rejects every duplicate top-level member', async (t) => {
+  const dataDir = await makeTempDir(t);
+  const storage = await createStorage({ dataDir });
+  const envelopePath = path.join(dataDir, 'session.enc');
+  const secret = { token: 'DUPLICATE_MEMBER_SECRET' };
+  await storage.writeEncrypted('session.enc', secret);
+  const valid = JSON.parse(await fs.readFile(envelopePath, 'utf8'));
+  const reversedEntries = Object.entries(valid).reverse();
+  await fs.writeFile(
+    envelopePath,
+    `  {\n${reversedEntries.map(([key, value]) => `    ${JSON.stringify(key)} : ${JSON.stringify(value)}`).join(',\n')}\n  }  \n`,
+    { mode: 0o600 },
+  );
+  assert.deepEqual(await storage.readEncrypted('session.enc'), secret);
+
+  for (const field of ['version', 'algorithm', 'iv', 'tag', 'ciphertext']) {
+    await t.test(`duplicate ${field}`, async () => {
+      const members = Object.entries(valid).map(
+        ([key, value]) => `${JSON.stringify(key)}:${JSON.stringify(value)}`,
+      );
+      const duplicateKey = field === 'version' ? '\\u0076ersion' : field;
+      members.push(`"${duplicateKey}":${JSON.stringify(valid[field])}`);
+      await fs.writeFile(envelopePath, `{ ${members.join(', ')} }\n`, { mode: 0o600 });
+
+      await assert.rejects(
+        storage.readEncrypted('session.enc'),
+        (error) => error.message === 'Invalid encrypted envelope: session.enc'
+          && !error.message.includes(secret.token)
+          && !error.message.includes(String(valid[field])),
+      );
+    });
+  }
 });
 
 test('rejects an encrypted file read with the wrong key', async (t) => {
