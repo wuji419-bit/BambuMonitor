@@ -12,6 +12,7 @@ const MAX_TARGETS = 100;
 const MAX_HEADERS = 50;
 const MAX_HEADER_NAME_LENGTH = 128;
 const MAX_HEADER_VALUE_LENGTH = 4096;
+const MAX_DEVICES = 1000;
 const SAFE_KEY = /^[A-Za-z0-9._-]+$/;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
@@ -59,6 +60,11 @@ function normalizeString(value, maxLength, errorFactory, field, { allowEmpty = t
     throw errorFactory(field);
   }
   return normalized;
+}
+
+function normalizeOpaqueString(value, maxLength, errorFactory, field) {
+  if (typeof value !== 'string' || value.length > maxLength) throw errorFactory(field);
+  return value;
 }
 
 function normalizeSafeKey(value, errorFactory, field) {
@@ -112,7 +118,7 @@ function normalizeHeaders(value) {
     if (typeof rawValue !== 'string' || rawValue.length > MAX_HEADER_VALUE_LENGTH || /[\r\n]/.test(rawValue)) {
       throw invalidConfig('notifications.targets.headers value');
     }
-    result[name] = rawValue.trim();
+    result[name] = rawValue;
   }
   return result;
 }
@@ -133,7 +139,12 @@ function normalizeTarget(value) {
   if (Object.hasOwn(value, 'url')) result.url = normalizeHttpUrl(value.url, invalidConfig, 'notifications.targets.url');
   for (const field of ['secret', 'token']) {
     if (Object.hasOwn(value, field)) {
-      result[field] = normalizeString(value[field], MAX_SECRET_LENGTH, invalidConfig, `notifications.targets.${field}`);
+      result[field] = normalizeOpaqueString(
+        value[field],
+        MAX_SECRET_LENGTH,
+        invalidConfig,
+        `notifications.targets.${field}`,
+      );
     }
   }
   if (Object.hasOwn(value, 'headers')) result.headers = normalizeHeaders(value.headers);
@@ -207,8 +218,10 @@ function normalizeDevice(value) {
 function normalizeDeviceCache(value) {
   assertPlain(value, invalidDevice, 'cache');
   if (Object.hasOwn(value, 'devices')) assertPlain(value.devices, invalidDevice, 'devices');
+  const entries = Object.entries(value.devices ?? {});
+  if (entries.length > MAX_DEVICES) throw invalidDevice('devices');
   const devices = {};
-  for (const [serial, device] of Object.entries(value.devices ?? {})) {
+  for (const [serial, device] of entries) {
     devices[normalizeSerial(serial)] = normalizeDevice(device);
   }
   return { version: CURRENT_VERSION, devices };
@@ -222,7 +235,7 @@ function mergeConfig(current, patch) {
   const next = clone(current);
   if (patch.camera) {
     if (Object.hasOwn(patch.camera, 'autoOpen')) next.camera.autoOpen = patch.camera.autoOpen;
-    if (patch.camera.customUrls) next.camera.customUrls = { ...next.camera.customUrls, ...patch.camera.customUrls };
+    if (Object.hasOwn(patch.camera, 'customUrls')) next.camera.customUrls = patch.camera.customUrls;
   }
   if (patch.notifications) {
     if (Object.hasOwn(patch.notifications, 'enabled')) next.notifications.enabled = patch.notifications.enabled;
@@ -238,25 +251,30 @@ function assertVersion(value, name) {
   }
 }
 
-async function loadVersioned({ storage, name, defaults, normalize }) {
-  const loaded = await storage.readJson(name, MISSING_FILE);
+function planVersioned({ loaded, name, defaults, normalize }) {
   if (loaded?.missingConfigStoreFile === 1n) {
-    const initial = clone(defaults);
-    await storage.writeJson(name, initial);
-    return initial;
+    return { name, value: clone(defaults), write: true };
   }
   assertVersion(loaded, name);
   if (loaded.version === 0) {
-    await storage.backup(name, `${name}.bak-v0`);
-    const normalized = normalize(loaded);
-    await storage.writeJson(name, normalized);
-    return normalized;
+    return { name, loaded, migrate: true, normalize };
   }
   const normalized = normalize(loaded);
-  if (!equal(loaded, normalized)) {
-    await storage.writeJson(name, normalized);
+  return { name, value: normalized, write: !equal(loaded, normalized) };
+}
+
+async function executeVersionPlans(storage, plans) {
+  for (const plan of plans) {
+    if (plan.migrate) await storage.backup(plan.name, `${plan.name}.bak-v0`);
   }
-  return normalized;
+
+  const resolved = plans.map((plan) => plan.migrate
+    ? { ...plan, value: plan.normalize(plan.loaded), write: true }
+    : plan);
+  for (const plan of resolved) {
+    if (plan.write) await storage.writeJson(plan.name, plan.value);
+  }
+  return resolved.map((plan) => plan.value);
 }
 
 export async function createConfigStore({ storage, now = () => Date.now() }) {
@@ -265,18 +283,22 @@ export async function createConfigStore({ storage, now = () => Date.now() }) {
     throw new Error('Invalid config store dependencies');
   }
 
-  let config = await loadVersioned({
-    storage,
+  const [loadedConfig, loadedDeviceCache] = await Promise.all([
+    storage.readJson(CONFIG_NAME, MISSING_FILE),
+    storage.readJson(DEVICE_CACHE_NAME, MISSING_FILE),
+  ]);
+  const plans = [planVersioned({
+    loaded: loadedConfig,
     name: CONFIG_NAME,
     defaults: DEFAULT_CONFIG,
     normalize: normalizeConfig,
-  });
-  let deviceCache = await loadVersioned({
-    storage,
+  }), planVersioned({
+    loaded: loadedDeviceCache,
     name: DEVICE_CACHE_NAME,
     defaults: DEFAULT_DEVICE_CACHE,
     normalize: normalizeDeviceCache,
-  });
+  })];
+  let [config, deviceCache] = await executeVersionPlans(storage, plans);
   let queue = Promise.resolve();
 
   function serialize(operation) {

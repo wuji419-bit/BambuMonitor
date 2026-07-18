@@ -80,11 +80,27 @@ test('partially merges config while stripping unknown and dangerous keys', async
   await store.update({ camera: { customUrls: { second: 'https://two.test/path' } } });
   assert.deepEqual(store.get(), {
     version: 1,
-    camera: { autoOpen: true, customUrls: { first: 'http://one.test/', second: 'https://two.test/path' } },
+    camera: { autoOpen: true, customUrls: { second: 'https://two.test/path' } },
     notifications: { enabled: true, targets: [] },
     debug: false,
   });
   assert.equal({}.polluted, undefined);
+});
+
+test('an explicit custom URL map replaces prior entries and an empty map clears them on restart', async (t) => {
+  const { storage } = await realStorage(t);
+  const store = await createConfigStore({ storage });
+  await store.update({ camera: { customUrls: {
+    first: 'https://cam.example/first',
+    second: 'https://cam.example/second',
+  } } });
+  await store.update({ camera: { customUrls: { second: 'https://cam.example/replaced' } } });
+  assert.deepEqual(store.get().camera.customUrls, { second: 'https://cam.example/replaced' });
+
+  await store.update({ camera: { customUrls: {} } });
+  assert.deepEqual(store.get().camera.customUrls, {});
+  const restarted = await createConfigStore({ storage });
+  assert.deepEqual(restarted.get().camera.customUrls, {});
 });
 
 test('rejects malformed config patches, unsafe URL keys, protocols, and bounds', async () => {
@@ -128,8 +144,24 @@ test('normalizes bounded notification targets and removes unknown fields', async
   assert.deepEqual(store.get().notifications.targets, [{
     id: 'hook-1', name: 'Webhook', type: 'custom', enabled: true,
     url: 'https://hooks.example/path', secret: 'secret', token: 'token',
-    headers: { 'X-Trace-Id': 'abc', Authorization: 'Bearer hidden' },
+    headers: { 'X-Trace-Id': ' abc ', Authorization: 'Bearer hidden' },
   }]);
+});
+
+test('preserves opaque notification credentials and header values exactly across restart', async (t) => {
+  const { storage } = await realStorage(t);
+  const first = await createConfigStore({ storage });
+  const target = {
+    id: 'opaque',
+    secret: '  secret with surrounding whitespace\t',
+    token: '\ttoken with whitespace  ',
+    headers: { Authorization: '  Bearer exact-token  ', 'X-Opaque': '\tvalue\t' },
+  };
+  await first.update({ notifications: { targets: [target] } });
+  assert.deepEqual(first.get().notifications.targets[0], target);
+
+  const restarted = await createConfigStore({ storage });
+  assert.deepEqual(restarted.get().notifications.targets[0], target);
 });
 
 test('enforces notification target, URL, header, and string bounds without echoing secrets', async () => {
@@ -225,6 +257,66 @@ test('cleans version 1 files and only writes when normalized content changes', a
   writes.length = 0;
   await createConfigStore({ storage });
   assert.deepEqual(writes, []);
+});
+
+test('plans both files before changing a normalizable config with a future cache', async () => {
+  const config = { ...DEFAULT_CONFIG, extra: 'would-be-cleaned' };
+  const cache = { ...DEFAULT_CACHE, version: 2 };
+  const storage = memoryStorage({ 'config.json': config, 'device-cache.json': cache });
+
+  await assert.rejects(createConfigStore({ storage }), /Unsupported device-cache\.json version/);
+  assert.deepEqual(storage.files['config.json'], config);
+  assert.deepEqual(storage.files['device-cache.json'], cache);
+  assert.deepEqual(storage.backups, []);
+});
+
+test('plans both files before changing a normalizable cache with a future config', async () => {
+  const config = { ...DEFAULT_CONFIG, version: 2 };
+  const cache = { version: 1, devices: {}, extra: 'would-be-cleaned' };
+  const storage = memoryStorage({ 'config.json': config, 'device-cache.json': cache });
+
+  await assert.rejects(createConfigStore({ storage }), /Unsupported config\.json version/);
+  assert.deepEqual(storage.files['config.json'], config);
+  assert.deepEqual(storage.files['device-cache.json'], cache);
+  assert.deepEqual(storage.backups, []);
+});
+
+test('does not back up a v0 file before the other file version validates', async () => {
+  const config = { version: 0, debug: true };
+  const cache = { ...DEFAULT_CACHE, version: 2 };
+  const storage = memoryStorage({ 'config.json': config, 'device-cache.json': cache });
+
+  await assert.rejects(createConfigStore({ storage }), /Unsupported device-cache\.json version/);
+  assert.deepEqual(storage.files['config.json'], config);
+  assert.deepEqual(storage.files['device-cache.json'], cache);
+  assert.deepEqual(storage.backups, []);
+});
+
+test('allows existing device updates at capacity but rejects insertion and loading overflow', async () => {
+  const devices = Object.fromEntries(
+    Array.from({ length: 1000 }, (_, index) => [`SERIAL_${index}`, { updatedAt: index }]),
+  );
+  const storage = memoryStorage({
+    'config.json': DEFAULT_CONFIG,
+    'device-cache.json': { version: 1, devices },
+  });
+  const store = await createConfigStore({ storage, now: () => 2000 });
+  await store.updateDevice('SERIAL_0', { name: 'Updated' });
+  assert.equal(store.getDeviceCache().devices.SERIAL_0.name, 'Updated');
+  assert.equal(Object.keys(store.getDeviceCache().devices).length, 1000);
+
+  await assert.rejects(store.updateDevice('SERIAL_OVERFLOW', { name: 'Rejected' }), /Invalid device field: devices/);
+  assert.equal(Object.keys(store.getDeviceCache().devices).length, 1000);
+  assert.equal(Object.hasOwn(storage.files['device-cache.json'].devices, 'SERIAL_OVERFLOW'), false);
+
+  const overflowDevices = { ...devices, SERIAL_OVERFLOW: { updatedAt: 2000 } };
+  const overflowStorage = memoryStorage({
+    'config.json': DEFAULT_CONFIG,
+    'device-cache.json': { version: 1, devices: overflowDevices },
+  });
+  await assert.rejects(createConfigStore({ storage: overflowStorage }), /Invalid device field: devices/);
+  assert.deepEqual(overflowStorage.files['device-cache.json'].devices, overflowDevices);
+  assert.deepEqual(overflowStorage.backups, []);
 });
 
 for (const name of ['config.json', 'device-cache.json']) {
