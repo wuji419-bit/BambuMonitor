@@ -10,13 +10,20 @@ const PUSH_ALL_PAYLOAD = JSON.stringify({
   },
 });
 
-function createFingerprint({ mode, url, options = {} }) {
+function fingerprintValue(value) {
+  return value === undefined ? ['undefined'] : [typeof value, value];
+}
+
+function createFingerprint({ mode, url }, options) {
   const effectiveConfig = [
     String(mode || ''),
     String(url || ''),
-    options.username ?? null,
-    options.password ?? null,
-    Boolean(options.rejectUnauthorized),
+    fingerprintValue(options.username),
+    fingerprintValue(options.password),
+    fingerprintValue(options.rejectUnauthorized),
+    fingerprintValue(options.connectTimeout),
+    fingerprintValue(options.reconnectPeriod),
+    fingerprintValue(options.resubscribe),
   ];
 
   return crypto
@@ -250,14 +257,6 @@ function createMqttConnectionManager({
       throw new Error('MQTT connection requires a serial number');
     }
 
-    const fingerprint = createFingerprint(config);
-    const existing = entries.get(serialNumber);
-    if (existing && !existing.intentional && existing.fingerprint === fingerprint) {
-      await existing.readyPromise;
-      return { success: true, serialNumber, reused: true };
-    }
-    if (existing) closeEntry(existing);
-
     const mqttOptions = {
       username: config.options?.username,
       password: config.options?.password,
@@ -266,6 +265,13 @@ function createMqttConnectionManager({
       reconnectPeriod: MQTT_RECONNECT_PERIOD_MS,
       resubscribe: true,
     };
+    const fingerprint = createFingerprint(config, mqttOptions);
+    const existing = entries.get(serialNumber);
+    if (existing && !existing.intentional && existing.fingerprint === fingerprint) {
+      await existing.readyPromise;
+      return { success: true, serialNumber, reused: true };
+    }
+    if (existing) closeEntry(existing);
 
     let client;
     try {

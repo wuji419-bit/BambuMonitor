@@ -244,6 +244,81 @@ test('changed mode, IP, access code, token, or cloud username replaces only that
   }]);
 });
 
+test('TLS verification fingerprint distinguishes undefined, false, and true effective values', async () => {
+  const harness = createHarness({
+    buildConnectionOptions(payload) {
+      const options = {
+        username: 'same-user',
+        password: 'same-password',
+      };
+      if (Object.hasOwn(payload, 'rejectUnauthorized')) {
+        options.rejectUnauthorized = payload.rejectUnauthorized;
+      }
+      return {
+        serialNumber: payload.serialNumber,
+        mode: 'custom',
+        url: 'mqtts://same-host.test:8883',
+        options,
+      };
+    },
+  });
+
+  const omitted = await connectReady(harness, { serialNumber: 'SERIAL_TLS' });
+  assert.equal(harness.connectionCalls[0].options.rejectUnauthorized, undefined);
+
+  const disabledPending = harness.manager.connect({
+    serialNumber: 'SERIAL_TLS',
+    rejectUnauthorized: false,
+  });
+  assert.equal(harness.clients.length, 2);
+  const disabledClient = harness.clients[1];
+  disabledClient.emit('connect');
+  disabledClient.completeSubscribe();
+  assert.deepEqual(await disabledPending, {
+    success: true,
+    serialNumber: 'SERIAL_TLS',
+    reused: false,
+  });
+  assert.equal(omitted.client.endCalls.length, 1);
+  assert.equal(harness.connectionCalls[1].options.rejectUnauthorized, false);
+
+  assert.deepEqual(await harness.manager.connect({
+    serialNumber: 'SERIAL_TLS',
+    rejectUnauthorized: false,
+  }), {
+    success: true,
+    serialNumber: 'SERIAL_TLS',
+    reused: true,
+  });
+  assert.equal(harness.clients.length, 2);
+
+  const enabledPending = harness.manager.connect({
+    serialNumber: 'SERIAL_TLS',
+    rejectUnauthorized: true,
+  });
+  assert.equal(harness.clients.length, 3);
+  const enabledClient = harness.clients[2];
+  enabledClient.emit('connect');
+  enabledClient.completeSubscribe();
+  assert.deepEqual(await enabledPending, {
+    success: true,
+    serialNumber: 'SERIAL_TLS',
+    reused: false,
+  });
+  assert.equal(disabledClient.endCalls.length, 1);
+  assert.equal(harness.connectionCalls[2].options.rejectUnauthorized, true);
+
+  assert.deepEqual(await harness.manager.connect({
+    serialNumber: 'SERIAL_TLS',
+    rejectUnauthorized: true,
+  }), {
+    success: true,
+    serialNumber: 'SERIAL_TLS',
+    reused: true,
+  });
+  assert.equal(harness.clients.length, 3);
+});
+
 test('emits current renderer payload shapes and ignores malformed JSON', async () => {
   const harness = createHarness();
   const { client } = await connectReady(harness, {

@@ -35,6 +35,25 @@ export class BambuClient {
         this.globalUpdateCallback = null;
         this.ipcListenerSetup = false;
         this.countdownTimer = null;
+        this.connectionAttempts = new Map();
+    }
+
+    beginConnectionAttempt(serialNumber) {
+        const attempt = Symbol(serialNumber);
+        this.connectionAttempts.set(serialNumber, attempt);
+        return attempt;
+    }
+
+    commitConnectionAttempt(serialNumber, attempt, update) {
+        if (this.connectionAttempts.get(serialNumber) !== attempt) return false;
+        this.connectionAttempts.delete(serialNumber);
+
+        const current = this.printers.get(serialNumber);
+        if (!current) return false;
+
+        this.printers.set(serialNumber, update(current));
+        this.emitUpdate(serialNumber);
+        return true;
     }
 
     emitUpdate(serialNumber) {
@@ -87,7 +106,7 @@ export class BambuClient {
         electronEvents.onMqttConnected(({ serialNumber }) => {
             const printer = this.printers.get(serialNumber);
             if (printer) {
-                Object.assign(printer, applyMqttConnectedState(printer));
+                this.printers.set(serialNumber, applyMqttConnectedState(printer));
                 this.emitUpdate(serialNumber);
             }
         });
@@ -96,7 +115,7 @@ export class BambuClient {
             console.log(`[Renderer] MQTT reconnecting: ${serialNumber}`);
             const printer = this.printers.get(serialNumber);
             if (printer) {
-                Object.assign(printer, applyMqttReconnectingState(printer));
+                this.printers.set(serialNumber, applyMqttReconnectingState(printer));
                 this.emitUpdate(serialNumber);
             }
         });
@@ -106,7 +125,7 @@ export class BambuClient {
             console.log(`[Renderer] MQTT disconnected: ${serialNumber}`);
             const printer = this.printers.get(serialNumber);
             if (printer) {
-                Object.assign(printer, applyMqttDisconnectedState(printer));
+                this.printers.set(serialNumber, applyMqttDisconnectedState(printer));
                 this.emitUpdate(serialNumber);
             }
         });
@@ -122,6 +141,7 @@ export class BambuClient {
 
         // Setup IPC listeners if not done
         this.setupIpcListeners();
+        const connectionAttempt = this.beginConnectionAttempt(serialNumber);
 
         // Initialize printer object
         const printer = {
@@ -156,21 +176,25 @@ export class BambuClient {
             const result = await electronMqtt.connect({ mode: 'local', ip, accessCode, serialNumber });
 
             if (result.success) {
-                // Wait for first telemetry before claiming idle/printing.
-                printer.status = 'connected';
-                printer.connectionState = 'online';
-                delete printer.errorMsg;
-                this.emitUpdate(serialNumber);
+                this.commitConnectionAttempt(
+                    serialNumber,
+                    connectionAttempt,
+                    (current) => applyMqttConnectedState(current),
+                );
                 return true;
             } else {
                 throw new Error(result.error || 'MQTT连接失败');
             }
         } catch (err) {
             console.error(`[Renderer] MQTT connect error:`, err);
-            printer.status = 'error';
-            printer.connectionState = 'error';
-            printer.errorMsg = err.message;
-            this.emitUpdate(serialNumber);
+            this.commitConnectionAttempt(serialNumber, connectionAttempt, (current) => ({
+                ...current,
+                status: 'error',
+                connectionState: 'error',
+                statusSource: 'local',
+                connectionMode: 'local',
+                errorMsg: err.message,
+            }));
             throw err;
         }
     }
@@ -189,6 +213,7 @@ export class BambuClient {
         }
 
         this.setupIpcListeners();
+        const connectionAttempt = this.beginConnectionAttempt(serialNumber);
 
         const current = this.printers.get(serialNumber) || {};
         const printer = {
@@ -230,20 +255,25 @@ export class BambuClient {
             });
 
             if (result.success) {
-                Object.assign(printer, applyMqttConnectedState(printer));
-                this.emitUpdate(serialNumber);
+                this.commitConnectionAttempt(
+                    serialNumber,
+                    connectionAttempt,
+                    (latest) => applyMqttConnectedState(latest),
+                );
                 return true;
             }
 
             throw new Error(result.error || '云端 MQTT 连接失败');
         } catch (err) {
             console.error('[Renderer] Cloud MQTT connect error:', err);
-            printer.status = 'error';
-            printer.connectionState = 'error';
-            printer.statusSource = 'cloud';
-            printer.connectionMode = 'cloud';
-            printer.errorMsg = err.message;
-            this.emitUpdate(serialNumber);
+            this.commitConnectionAttempt(serialNumber, connectionAttempt, (latest) => ({
+                ...latest,
+                status: 'error',
+                connectionState: 'error',
+                statusSource: 'cloud',
+                connectionMode: 'cloud',
+                errorMsg: err.message,
+            }));
             throw err;
         }
     }
@@ -262,6 +292,7 @@ export class BambuClient {
         if (!isElectronEnvironment()) return;
 
         if (serialNumber) {
+            this.connectionAttempts.delete(serialNumber);
             try {
                 await electronMqtt.disconnect({ serialNumber });
             } finally {
@@ -270,6 +301,7 @@ export class BambuClient {
                 if (this.printers.size === 0) this.stopCountdownTimer();
             }
         } else {
+            this.connectionAttempts.clear();
             try {
                 await electronMqtt.disconnectAll();
             } finally {

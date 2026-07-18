@@ -7,6 +7,7 @@ const { spawn } = require('child_process');
 const mqtt = require('mqtt');
 const { installSafeConsole } = require('./safe-console.cjs');
 const { enforceSingleInstance } = require('./single-instance.cjs');
+const { connectMqttForRenderer } = require('./mqtt-ipc-result.cjs');
 const {
   clearAuthSession,
   readAuthSession,
@@ -1091,13 +1092,7 @@ ipcMain.handle('notification-send', async (_event, { targets = [], payload }) =>
 });
 
 ipcMain.handle('mqtt-connect', async (_event, payload = {}) => {
-  try {
-    return await mqttConnectionManager.connect(payload);
-  } catch (err) {
-    const message = err?.message || 'MQTT connection failed';
-    console.error({ operation: 'mqtt-connect-failed', message });
-    return { success: false, error: message };
-  }
+  return connectMqttForRenderer(mqttConnectionManager, payload, console);
 });
 
 ipcMain.handle('mqtt-disconnect', async (_event, { serialNumber } = {}) => {
