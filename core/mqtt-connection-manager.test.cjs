@@ -125,6 +125,16 @@ async function connectReady(harness, payload) {
   return { client, result: await pending };
 }
 
+async function assertPending(promise) {
+  let settled = false;
+  promise.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+  await Promise.resolve();
+  assert.equal(settled, false);
+}
+
 test('reuses one client for the same serial and effective connection fingerprint', async () => {
   const harness = createHarness();
   const payload = {
@@ -171,6 +181,162 @@ test('reuses one client for the same serial and effective connection fingerprint
       command: 'pushall',
     },
   });
+});
+
+test('offline same-fingerprint connect replaces the client and waits for subscription readiness', async () => {
+  const harness = createHarness({ connectTimeoutMs: 1200 });
+  const payload = {
+    serialNumber: 'SERIAL_OFFLINE',
+    ip: '192.168.1.20',
+    accessCode: 'code-a',
+  };
+  const { client: offlineClient } = await connectReady(harness, payload);
+  harness.events.length = 0;
+
+  offlineClient.emit('offline');
+  const pending = harness.manager.connect({ ...payload });
+  const replacement = harness.clients.at(-1);
+
+  assert.equal(harness.clients.length, 2);
+  assert.notEqual(replacement, offlineClient);
+  assert.equal(offlineClient.endCalls.length, 1);
+  assert.equal(harness.manager.size, 1);
+  assert.equal(harness.timers.count(45000), 0);
+  for (const event of ['connect', 'message', 'reconnect', 'offline', 'close']) {
+    assert.equal(offlineClient.listenerCount(event), 0, `removed stale ${event} listener`);
+  }
+  await assertPending(pending);
+
+  replacement.emit('connect');
+  await assertPending(pending);
+  assert.equal(harness.events.some(({ event }) => event === 'connected'), false);
+
+  replacement.completeSubscribe();
+  assert.deepEqual(await pending, {
+    success: true,
+    serialNumber: 'SERIAL_OFFLINE',
+    reused: false,
+  });
+  assert.deepEqual(harness.events.at(-1), {
+    event: 'connected',
+    payload: { serialNumber: 'SERIAL_OFFLINE' },
+  });
+  assert.equal(harness.timers.count(), 0);
+});
+
+test('close followed by same-fingerprint connect replaces only the closed client', async () => {
+  const harness = createHarness();
+  const payload = {
+    serialNumber: 'SERIAL_CLOSE',
+    ip: '192.168.1.21',
+    accessCode: 'code-b',
+  };
+  const { client: closedClient } = await connectReady(harness, payload);
+  harness.events.length = 0;
+
+  closedClient.emit('close');
+  const pending = harness.manager.connect(payload);
+  const replacement = harness.clients.at(-1);
+
+  assert.equal(harness.clients.length, 2);
+  assert.notEqual(replacement, closedClient);
+  assert.equal(closedClient.endCalls.length, 1);
+  assert.equal(harness.manager.size, 1);
+  replacement.emit('connect');
+  await assertPending(pending);
+  assert.equal(harness.events.some(({ event }) => event === 'connected'), false);
+  replacement.completeSubscribe();
+
+  assert.deepEqual(await pending, {
+    success: true,
+    serialNumber: 'SERIAL_CLOSE',
+    reused: false,
+  });
+  assert.equal(harness.manager.size, 1);
+});
+
+test('reconnect emits connected and becomes reusable only after subscription succeeds', async () => {
+  const harness = createHarness();
+  const payload = {
+    serialNumber: 'SERIAL_RECONNECT',
+    ip: '192.168.1.22',
+    accessCode: 'code-c',
+  };
+  const { client } = await connectReady(harness, payload);
+  harness.events.length = 0;
+
+  client.emit('offline');
+  client.emit('connect');
+
+  assert.equal(harness.events.some(({ event }) => event === 'connected'), false);
+  assert.equal(harness.timers.count(45000), 1);
+  client.completeSubscribe();
+  assert.deepEqual(harness.events.at(-1), {
+    event: 'connected',
+    payload: { serialNumber: 'SERIAL_RECONNECT' },
+  });
+  assert.equal(harness.timers.count(45000), 0);
+
+  assert.deepEqual(await harness.manager.connect({ ...payload }), {
+    success: true,
+    serialNumber: 'SERIAL_RECONNECT',
+    reused: true,
+  });
+  assert.equal(harness.clients.length, 1);
+});
+
+test('replacement subscription failure rejects without a false connected event', async () => {
+  const harness = createHarness();
+  const payload = {
+    serialNumber: 'SERIAL_SUBSCRIBE_FAIL',
+    ip: '192.168.1.23',
+    accessCode: 'code-d',
+  };
+  const { client } = await connectReady(harness, payload);
+  harness.events.length = 0;
+
+  client.emit('offline');
+  client.emit('connect');
+  client.completeSubscribe(new Error('reconnect subscription refused'));
+  assert.equal(harness.events.some(({ event }) => event === 'connected'), false);
+
+  const pending = harness.manager.connect(payload);
+  const replacement = harness.clients.at(-1);
+  replacement.emit('connect');
+  replacement.completeSubscribe(new Error('subscription refused'));
+
+  await assert.rejects(pending, /subscription failed/i);
+  assert.equal(harness.events.some(({ event }) => event === 'connected'), false);
+  assert.equal(harness.manager.size, 0);
+  assert.equal(harness.timers.count(), 0);
+  assert.equal(replacement.endCalls.length, 1);
+});
+
+test('replacement subscription timeout rejects without a false connected event', async () => {
+  const harness = createHarness({ connectTimeoutMs: 1200 });
+  const payload = {
+    serialNumber: 'SERIAL_SUBSCRIBE_TIMEOUT',
+    ip: '192.168.1.24',
+    accessCode: 'code-e',
+  };
+  const { client } = await connectReady(harness, payload);
+  harness.events.length = 0;
+
+  client.emit('close');
+  client.emit('connect');
+  assert.equal(client.subscribeCallbacks.length, 1);
+
+  const pending = harness.manager.connect(payload);
+  const replacement = harness.clients.at(-1);
+  replacement.emit('connect');
+  await assertPending(pending);
+  harness.timers.runOne(1200);
+
+  await assert.rejects(pending, /timeout/i);
+  assert.equal(harness.events.some(({ event }) => event === 'connected'), false);
+  assert.equal(harness.manager.size, 0);
+  assert.equal(harness.timers.count(), 0);
+  assert.equal(replacement.endCalls.length, 1);
 });
 
 test('changed mode, IP, access code, token, or cloud username replaces only that serial', async () => {

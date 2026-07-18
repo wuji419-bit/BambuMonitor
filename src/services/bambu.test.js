@@ -44,6 +44,8 @@ function createDeferred() {
 function installDeferredMqttApi() {
   const previousWindow = globalThis.window;
   const connectCalls = [];
+  const disconnectCalls = [];
+  const disconnectAllCalls = [];
   const listeners = {};
   globalThis.window = {
     bambuApi: {
@@ -54,8 +56,16 @@ function installDeferredMqttApi() {
           connectCalls.push({ ...deferred, payload });
           return deferred.promise;
         },
-        disconnect: async () => ({ success: true }),
-        disconnectAll: async () => ({ success: true }),
+        disconnect(payload) {
+          const deferred = createDeferred();
+          disconnectCalls.push({ ...deferred, payload });
+          return deferred.promise;
+        },
+        disconnectAll() {
+          const deferred = createDeferred();
+          disconnectAllCalls.push(deferred);
+          return deferred.promise;
+        },
       },
       events: {
         onMqttData(callback) {
@@ -80,6 +90,8 @@ function installDeferredMqttApi() {
 
   return {
     connectCalls,
+    disconnectCalls,
+    disconnectAllCalls,
     emitReconnecting(serialNumber) {
       listeners.reconnecting({ serialNumber });
     },
@@ -121,6 +133,149 @@ test('single disconnect clears its local state when IPC rejects', async () => {
   } finally {
     client.stopCountdownTimer();
     restoreWindow();
+  }
+});
+
+test('pending single disconnect cannot delete a newer successful connection', async () => {
+  const mqtt = installDeferredMqttApi();
+  const client = new BambuClient();
+  const oldUpdates = [];
+  const newUpdates = [];
+  const oldCallback = (printer) => oldUpdates.push(printer);
+  const newCallback = (printer) => newUpdates.push(printer);
+
+  try {
+    const initial = client.connectLocal(
+      '192.168.1.20',
+      'code-a',
+      'SERIAL_A',
+      oldCallback,
+    );
+    mqtt.connectCalls[0].resolve({ success: true, serialNumber: 'SERIAL_A' });
+    await initial;
+
+    const pendingDisconnect = client.disconnect('SERIAL_A');
+    assert.equal(mqtt.disconnectCalls.length, 1);
+
+    const newerConnect = client.connectLocal(
+      '192.168.1.21',
+      'code-b',
+      'SERIAL_A',
+      newCallback,
+      'New printer',
+    );
+    mqtt.connectCalls[1].resolve({ success: true, serialNumber: 'SERIAL_A' });
+    await newerConnect;
+    const newerPrinter = client.printers.get('SERIAL_A');
+    newUpdates.length = 0;
+
+    mqtt.disconnectCalls[0].resolve({ success: true });
+    await pendingDisconnect;
+
+    assert.equal(client.printers.get('SERIAL_A'), newerPrinter);
+    assert.equal(client.printers.get('SERIAL_A').ip, '192.168.1.21');
+    assert.equal(client.callbacks.get('SERIAL_A'), newCallback);
+    assert.notEqual(client.countdownTimer, null);
+    client.emitUpdate('SERIAL_A');
+    assert.equal(newUpdates.length, 1);
+    assert.equal(oldUpdates.at(-1)?.ip, '192.168.1.20');
+  } finally {
+    client.stopCountdownTimer();
+    mqtt.restore();
+  }
+});
+
+test('pending disconnect all preserves a newer connection and callback generations', async () => {
+  const mqtt = installDeferredMqttApi();
+  const client = new BambuClient();
+  const newUpdates = [];
+  const globalUpdates = [];
+  const newCallback = (printer) => newUpdates.push(printer);
+  const newGlobalCallback = (printer) => globalUpdates.push(printer);
+
+  try {
+    const initial = client.connectLocal(
+      '192.168.1.20',
+      'code-a',
+      'SERIAL_A',
+      () => {},
+    );
+    mqtt.connectCalls[0].resolve({ success: true, serialNumber: 'SERIAL_A' });
+    await initial;
+    client.setGlobalUpdateCallback(() => {});
+
+    const pendingDisconnect = client.disconnect();
+    assert.equal(mqtt.disconnectAllCalls.length, 1);
+
+    const newerConnect = client.connectLocal(
+      '192.168.1.22',
+      'code-c',
+      'SERIAL_A',
+      newCallback,
+      'Replacement printer',
+    );
+    mqtt.connectCalls[1].resolve({ success: true, serialNumber: 'SERIAL_A' });
+    await newerConnect;
+    client.setGlobalUpdateCallback(newGlobalCallback);
+    const newerPrinter = client.printers.get('SERIAL_A');
+    newUpdates.length = 0;
+    globalUpdates.length = 0;
+
+    mqtt.disconnectAllCalls[0].resolve({ success: true });
+    await pendingDisconnect;
+
+    assert.equal(client.printers.get('SERIAL_A'), newerPrinter);
+    assert.equal(client.callbacks.get('SERIAL_A'), newCallback);
+    assert.equal(client.globalUpdateCallback, newGlobalCallback);
+    assert.notEqual(client.countdownTimer, null);
+
+    client.handleMessage('SERIAL_A', {
+      print: { gcode_state: 'RUNNING', mc_percent: 29 },
+    });
+    assert.equal(newUpdates.length, 1);
+    assert.equal(newUpdates[0].progress, 29);
+    assert.equal(globalUpdates.length, 1);
+    assert.equal(globalUpdates[0].progress, 29);
+  } finally {
+    client.stopCountdownTimer();
+    mqtt.restore();
+  }
+});
+
+test('single disconnect cleans owned state when deferred IPC resolves without a newer connect', async () => {
+  const mqtt = installDeferredMqttApi();
+  const client = seedClient(['one']);
+
+  try {
+    const pending = client.disconnect('one');
+    mqtt.disconnectCalls[0].resolve({ success: true });
+    await pending;
+
+    assert.equal(client.printers.has('one'), false);
+    assert.equal(client.callbacks.has('one'), false);
+    assert.equal(client.countdownTimer, null);
+  } finally {
+    client.stopCountdownTimer();
+    mqtt.restore();
+  }
+});
+
+test('disconnect all cleans owned state when deferred IPC resolves without a newer connect', async () => {
+  const mqtt = installDeferredMqttApi();
+  const client = seedClient(['one', 'two']);
+
+  try {
+    const pending = client.disconnect();
+    mqtt.disconnectAllCalls[0].resolve({ success: true });
+    await pending;
+
+    assert.equal(client.printers.size, 0);
+    assert.equal(client.callbacks.size, 0);
+    assert.equal(client.globalUpdateCallback, null);
+    assert.equal(client.countdownTimer, null);
+  } finally {
+    client.stopCountdownTimer();
+    mqtt.restore();
   }
 });
 

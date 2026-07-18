@@ -36,11 +36,16 @@ export class BambuClient {
         this.ipcListenerSetup = false;
         this.countdownTimer = null;
         this.connectionAttempts = new Map();
+        this.printerOwners = new Map();
+        this.callbackOwners = new Map();
+        this.globalUpdateCallbackOwner = null;
     }
 
     beginConnectionAttempt(serialNumber) {
         const attempt = Symbol(serialNumber);
         this.connectionAttempts.set(serialNumber, attempt);
+        this.printerOwners.set(serialNumber, attempt);
+        this.callbackOwners.set(serialNumber, attempt);
         return attempt;
     }
 
@@ -54,6 +59,68 @@ export class BambuClient {
         this.printers.set(serialNumber, update(current));
         this.emitUpdate(serialNumber);
         return true;
+    }
+
+    ensureOwner(owners, values, serialNumber) {
+        if (!values.has(serialNumber)) return null;
+        let owner = owners.get(serialNumber);
+        if (!owner) {
+            owner = Symbol(serialNumber);
+            owners.set(serialNumber, owner);
+        }
+        return owner;
+    }
+
+    captureSerialOwnership(serialNumber) {
+        return {
+            serialNumber,
+            printer: this.ensureOwner(this.printerOwners, this.printers, serialNumber),
+            callback: this.ensureOwner(this.callbackOwners, this.callbacks, serialNumber),
+            attempt: this.connectionAttempts.get(serialNumber) || null,
+        };
+    }
+
+    cancelOwnedAttempt(ownership) {
+        if (
+            ownership.attempt
+            && this.connectionAttempts.get(ownership.serialNumber) === ownership.attempt
+        ) {
+            this.connectionAttempts.delete(ownership.serialNumber);
+        }
+    }
+
+    cleanOwnedSerialState(ownership) {
+        const { serialNumber } = ownership;
+        if (ownership.printer && this.printerOwners.get(serialNumber) === ownership.printer) {
+            this.printers.delete(serialNumber);
+            this.printerOwners.delete(serialNumber);
+        }
+        if (ownership.callback && this.callbackOwners.get(serialNumber) === ownership.callback) {
+            this.callbacks.delete(serialNumber);
+            this.callbackOwners.delete(serialNumber);
+        }
+        this.cancelOwnedAttempt(ownership);
+    }
+
+    captureAllOwnership() {
+        const serialNumbers = new Set([
+            ...this.printers.keys(),
+            ...this.callbacks.keys(),
+            ...this.connectionAttempts.keys(),
+        ]);
+        const serials = Array.from(
+            serialNumbers,
+            (serialNumber) => this.captureSerialOwnership(serialNumber),
+        );
+
+        if (this.globalUpdateCallback && !this.globalUpdateCallbackOwner) {
+            this.globalUpdateCallbackOwner = Symbol('globalUpdateCallback');
+        }
+
+        return {
+            serials,
+            globalCallback: this.globalUpdateCallbackOwner,
+        };
     }
 
     emitUpdate(serialNumber) {
@@ -292,23 +359,30 @@ export class BambuClient {
         if (!isElectronEnvironment()) return;
 
         if (serialNumber) {
-            this.connectionAttempts.delete(serialNumber);
+            const ownership = this.captureSerialOwnership(serialNumber);
+            this.cancelOwnedAttempt(ownership);
             try {
                 await electronMqtt.disconnect({ serialNumber });
             } finally {
-                this.printers.delete(serialNumber);
-                this.callbacks.delete(serialNumber);
+                this.cleanOwnedSerialState(ownership);
                 if (this.printers.size === 0) this.stopCountdownTimer();
             }
         } else {
-            this.connectionAttempts.clear();
+            const ownership = this.captureAllOwnership();
+            for (const serial of ownership.serials) {
+                this.cancelOwnedAttempt(serial);
+            }
             try {
                 await electronMqtt.disconnectAll();
             } finally {
-                this.printers.clear();
-                this.callbacks.clear();
-                this.globalUpdateCallback = null;
-                this.stopCountdownTimer();
+                for (const serial of ownership.serials) {
+                    this.cleanOwnedSerialState(serial);
+                }
+                if (this.globalUpdateCallbackOwner === ownership.globalCallback) {
+                    this.globalUpdateCallback = null;
+                    this.globalUpdateCallbackOwner = null;
+                }
+                if (this.printers.size === 0) this.stopCountdownTimer();
             }
         }
     }
@@ -339,6 +413,7 @@ export class BambuClient {
     setUpdateCallback(serialNumber, callback) {
         if (this.printers.has(serialNumber)) {
             this.callbacks.set(serialNumber, callback);
+            this.callbackOwners.set(serialNumber, Symbol(serialNumber));
             // Immediately call with current state
             const printer = this.printers.get(serialNumber);
             if (callback && printer) {
@@ -355,6 +430,7 @@ export class BambuClient {
     // Set callbacks for all printers at once (for view switch)
     setGlobalUpdateCallback(callback) {
         this.globalUpdateCallback = callback;
+        this.globalUpdateCallbackOwner = Symbol('globalUpdateCallback');
 
         for (const printer of this.printers.values()) {
             if (callback) {

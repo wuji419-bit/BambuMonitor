@@ -9,6 +9,7 @@ const PUSH_ALL_PAYLOAD = JSON.stringify({
     command: 'pushall',
   },
 });
+const SWALLOW_CLOSED_CLIENT_ERROR = () => {};
 
 function fingerprintValue(value) {
   return value === undefined ? ['undefined'] : [typeof value, value];
@@ -126,6 +127,25 @@ function createMqttConnectionManager({
     }
   };
 
+  const detachClientListeners = (entry) => {
+    if (!entry.clientListeners) return;
+    const removeListener = typeof entry.client.off === 'function'
+      ? entry.client.off.bind(entry.client)
+      : entry.client.removeListener?.bind(entry.client);
+    if (removeListener) {
+      for (const [event, listener] of Object.entries(entry.clientListeners)) {
+        removeListener(event, listener);
+      }
+    }
+    entry.clientListeners = null;
+
+    try {
+      entry.client.on('error', SWALLOW_CLOSED_CLIENT_ERROR);
+    } catch {
+      // A closed client must not retain manager-owned listener closures.
+    }
+  };
+
   const rejectPending = (entry, error) => {
     if (entry.readySettled) return;
     entry.readySettled = true;
@@ -136,11 +156,14 @@ function createMqttConnectionManager({
     if (!entry) return;
     entry.intentional = true;
     entry.connected = false;
+    entry.reconnecting = false;
+    entry.subscriptionAttempt = null;
     clearEntryTimers(entry);
     if (entries.get(entry.serialNumber) === entry) {
       entries.delete(entry.serialNumber);
     }
     rejectPending(entry, new Error(reason));
+    detachClientListeners(entry);
     closeClient(entry);
   };
 
@@ -148,9 +171,12 @@ function createMqttConnectionManager({
     if (entry.readySettled || !isCurrent(entry)) return;
     entry.intentional = true;
     entry.connected = false;
+    entry.reconnecting = false;
+    entry.subscriptionAttempt = null;
     clearEntryTimers(entry);
     entries.delete(entry.serialNumber);
     entry.readySettled = true;
+    detachClientListeners(entry);
     closeClient(entry);
     entry.rejectReady(error);
   };
@@ -177,71 +203,88 @@ function createMqttConnectionManager({
   const markReconnecting = (entry) => {
     if (!isCurrent(entry)) return;
     entry.connected = false;
+    entry.reconnecting = true;
+    entry.subscriptionAttempt = null;
     emitEvent('reconnecting', { serialNumber: entry.serialNumber }, entry);
     scheduleDisconnectGrace(entry);
   };
 
   const subscribeAndRequestTelemetry = (entry) => {
     const reportTopic = `device/${entry.serialNumber}/report`;
+    const subscriptionAttempt = Symbol(entry.serialNumber);
+    entry.subscriptionAttempt = subscriptionAttempt;
+
+    const failSubscription = () => {
+      if (!isCurrent(entry) || entry.subscriptionAttempt !== subscriptionAttempt) return;
+      entry.subscriptionAttempt = null;
+      entry.connected = false;
+      entry.reconnecting = true;
+      if (!entry.readySettled) {
+        failInitialConnection(entry, createPublicError('MQTT subscription failed'));
+      } else {
+        log('warn', 'mqtt-subscribe-failed', entry);
+        scheduleDisconnectGrace(entry);
+      }
+    };
+
     try {
       entry.client.subscribe(reportTopic, (error) => {
-        if (!isCurrent(entry)) return;
+        if (!isCurrent(entry) || entry.subscriptionAttempt !== subscriptionAttempt) return;
         if (error) {
-          if (!entry.readySettled) {
-            failInitialConnection(entry, createPublicError('MQTT subscription failed'));
-          } else {
-            log('warn', 'mqtt-subscribe-failed', entry);
-          }
+          failSubscription();
           return;
         }
 
+        entry.subscriptionAttempt = null;
         try {
           entry.client.publish(`device/${entry.serialNumber}/request`, PUSH_ALL_PAYLOAD);
         } catch {
           log('warn', 'mqtt-pushall-failed', entry);
         }
+        entry.connected = true;
+        entry.reconnecting = false;
+        clearEntryTimer(entry, 'disconnectTimer');
+        emitEvent('connected', { serialNumber: entry.serialNumber }, entry);
         resolveInitialConnection(entry);
       });
     } catch {
-      if (!entry.readySettled) {
-        failInitialConnection(entry, createPublicError('MQTT subscription failed'));
-      } else {
-        log('warn', 'mqtt-subscribe-failed', entry);
-      }
+      failSubscription();
     }
   };
 
   const attachClientListeners = (entry) => {
-    entry.client.on('connect', () => {
-      if (!isCurrent(entry)) return;
-      entry.connected = true;
-      clearEntryTimer(entry, 'disconnectTimer');
-      emitEvent('connected', { serialNumber: entry.serialNumber }, entry);
-      subscribeAndRequestTelemetry(entry);
-    });
-
-    entry.client.on('message', (_topic, message) => {
-      if (!isCurrent(entry)) return;
-      try {
-        const payload = JSON.parse(message.toString());
-        emitEvent('message', { serialNumber: entry.serialNumber, payload }, entry);
-      } catch {
-        // Ignore malformed telemetry packets.
-      }
-    });
-
-    entry.client.on('reconnect', () => markReconnecting(entry));
-    entry.client.on('offline', () => markReconnecting(entry));
-    entry.client.on('close', () => markReconnecting(entry));
-
-    entry.client.on('error', () => {
-      if (!isCurrent(entry)) return;
-      if (!entry.readySettled) {
-        failInitialConnection(entry, createPublicError('MQTT connection failed'));
-      } else {
-        log('warn', 'mqtt-client-error', entry);
-      }
-    });
+    const clientListeners = {
+      connect: () => {
+        if (!isCurrent(entry)) return;
+        entry.connected = false;
+        if (entry.readySettled) entry.reconnecting = true;
+        subscribeAndRequestTelemetry(entry);
+      },
+      message: (_topic, message) => {
+        if (!isCurrent(entry)) return;
+        try {
+          const payload = JSON.parse(message.toString());
+          emitEvent('message', { serialNumber: entry.serialNumber, payload }, entry);
+        } catch {
+          // Ignore malformed telemetry packets.
+        }
+      },
+      reconnect: () => markReconnecting(entry),
+      offline: () => markReconnecting(entry),
+      close: () => markReconnecting(entry),
+      error: () => {
+        if (!isCurrent(entry)) return;
+        if (!entry.readySettled) {
+          failInitialConnection(entry, createPublicError('MQTT connection failed'));
+        } else {
+          log('warn', 'mqtt-client-error', entry);
+        }
+      },
+    };
+    entry.clientListeners = clientListeners;
+    for (const [event, listener] of Object.entries(clientListeners)) {
+      entry.client.on(event, listener);
+    }
   };
 
   const connect = async (payload = {}) => {
@@ -267,7 +310,14 @@ function createMqttConnectionManager({
     };
     const fingerprint = createFingerprint(config, mqttOptions);
     const existing = entries.get(serialNumber);
-    if (existing && !existing.intentional && existing.fingerprint === fingerprint) {
+    const canReuse = existing?.connected
+      || (existing && !existing.readySettled && !existing.reconnecting);
+    if (
+      existing
+      && !existing.intentional
+      && existing.fingerprint === fingerprint
+      && canReuse
+    ) {
       await existing.readyPromise;
       return { success: true, serialNumber, reused: true };
     }
@@ -288,16 +338,19 @@ function createMqttConnectionManager({
     });
     const entry = {
       client,
+      clientListeners: null,
       connected: false,
       connectTimer: null,
       disconnectTimer: null,
       fingerprint,
       intentional: false,
+      reconnecting: false,
       readyPromise,
       readySettled: false,
       rejectReady,
       resolveReady,
       serialNumber,
+      subscriptionAttempt: null,
     };
 
     entries.set(serialNumber, entry);
