@@ -375,8 +375,23 @@ export function createDeviceRuntime({
     return snapshot();
   }
 
-  async function refresh() {
-    if (stopped) return snapshot();
+  async function waitForCloud(work, signal) {
+    if (!signal?.addEventListener) return work;
+    if (signal.aborted) return { aborted: true };
+    let onAbort;
+    const aborted = new Promise((resolve) => {
+      onAbort = () => resolve({ aborted: true });
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([work, aborted]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  async function refresh({ signal } = {}) {
+    if (stopped || signal?.aborted) return snapshot();
     const expectedGeneration = generation;
     const expectedRefresh = ++refreshSequence;
     const session = { ...credentials };
@@ -384,10 +399,27 @@ export function createDeviceRuntime({
     emitSnapshot();
 
     let result;
-    try {
-      result = await cloud.listDevices(session.accessToken);
-    } catch (error) {
-      return handleCloudFailure(error, expectedGeneration, expectedRefresh);
+    if (!signal) {
+      try {
+        result = await cloud.listDevices(session.accessToken);
+      } catch (error) {
+        return handleCloudFailure(error, expectedGeneration, expectedRefresh);
+      }
+    } else {
+      let request;
+      try {
+        request = cloud.listDevices(session.accessToken, { signal });
+      } catch (error) {
+        request = Promise.reject(error);
+      }
+      const cloudWork = Promise.resolve(request).then(
+        (value) => ({ result: value }),
+        (error) => ({ error }),
+      );
+      const outcome = await waitForCloud(cloudWork, signal);
+      if (outcome.aborted) return handleCloudFailure(null, expectedGeneration, expectedRefresh);
+      if (outcome.error) return handleCloudFailure(outcome.error, expectedGeneration, expectedRefresh);
+      result = outcome.result;
     }
     if (
       stopped
@@ -468,12 +500,15 @@ export function createDeviceRuntime({
     }
   }
 
-  function scanLan() {
-    if (stopped) return Promise.resolve(snapshot());
+  function scanLan({ signal } = {}) {
+    if (stopped || signal?.aborted) return Promise.resolve(snapshot());
     const expectedGeneration = generation;
     if (activeScan?.generation === expectedGeneration) return activeScan.promise;
 
     const controller = new AbortController();
+    const abortScan = () => controller.abort();
+    signal?.addEventListener?.('abort', abortScan, { once: true });
+    if (signal?.aborted) abortScan();
     let scanResult;
     try {
       scanResult = scan({ signal: controller.signal });
@@ -490,6 +525,7 @@ export function createDeviceRuntime({
       })
       .then(() => snapshot())
       .finally(() => {
+        signal?.removeEventListener?.('abort', abortScan);
         if (activeScan === entry) activeScan = null;
       });
     activeScan = entry;
@@ -519,9 +555,9 @@ export function createDeviceRuntime({
     return publicDevice(record);
   }
 
-  async function start({ accessToken, username }) {
+  async function start({ accessToken, username, signal } = {}) {
     if (stopSessionPromise) await stopSessionPromise;
-    if (stopped) return snapshot();
+    if (stopped || signal?.aborted) return snapshot();
     const expectedGeneration = ++generation;
     refreshSequence += 1;
     activeScan?.controller.abort();
@@ -531,10 +567,10 @@ export function createDeviceRuntime({
     } catch {
       log('warn', 'device-runtime.cache-load-failed');
     }
-    if (stopped || generation !== expectedGeneration) return snapshot();
-    await refresh();
-    if (stopped || generation !== expectedGeneration) return snapshot();
-    await scanLan();
+    if (stopped || signal?.aborted || generation !== expectedGeneration) return snapshot();
+    await refresh({ signal });
+    if (stopped || signal?.aborted || generation !== expectedGeneration) return snapshot();
+    await scanLan({ signal });
     return snapshot();
   }
 

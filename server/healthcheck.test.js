@@ -4,7 +4,12 @@ import test from 'node:test';
 
 import { checkHealth } from './healthcheck.js';
 
-function requestHarness({ statusCode = 200, chunks = ['{"status":"ok"}'], timeout = false } = {}) {
+function requestHarness({
+  statusCode = 200,
+  chunks = ['{"status":"ok"}'],
+  timeout = false,
+  autoEnd = true,
+} = {}) {
   const state = { options: null, requestDestroyed: false, responseDestroyed: false };
   const requestImpl = (options, onResponse) => {
     state.options = options;
@@ -22,10 +27,11 @@ function requestHarness({ statusCode = 200, chunks = ['{"status":"ok"}'], timeou
       const response = new EventEmitter();
       response.statusCode = statusCode;
       response.destroy = () => { state.responseDestroyed = true; };
+      state.response = response;
       onResponse(response);
       queueMicrotask(() => {
         for (const chunk of chunks) response.emit('data', Buffer.from(chunk));
-        response.emit('end');
+        if (autoEnd) response.emit('end');
       });
     };
     return request;
@@ -70,4 +76,35 @@ test('checkHealth times out and destroys the request', async () => {
   const { requestImpl, state } = requestHarness({ timeout: true });
   await assert.rejects(checkHealth({ port: 3080, timeoutMs: 20, requestImpl }), /timed out/i);
   assert.equal(state.requestDestroyed, true);
+});
+
+test('checkHealth wall deadline expires despite slow response activity and remains referenced', async () => {
+  let deadline;
+  const cleared = [];
+  const timers = {
+    setTimeout(callback, delay) {
+      deadline = { callback, delay, unrefCalled: false, unref() { this.unrefCalled = true; } };
+      return deadline;
+    },
+    clearTimeout(handle) { cleared.push(handle); },
+  };
+  const { requestImpl, state } = requestHarness({ chunks: ['{'], autoEnd: false });
+  const checking = checkHealth({ port: 3080, timeoutMs: 25, requestImpl, timers });
+  const observed = checking.then(
+    () => ({ value: true }),
+    (error) => ({ error }),
+  );
+  await Promise.resolve();
+  state.response.emit('data', Buffer.from(' '));
+  assert.equal(deadline.delay, 25);
+  assert.equal(deadline.unrefCalled, false);
+  deadline.callback();
+  const outcome = await Promise.race([
+    observed,
+    new Promise((resolve) => setImmediate(() => resolve({ pending: true }))),
+  ]);
+  assert.match(outcome.error?.message ?? '', /timed out/i);
+  assert.equal(state.requestDestroyed, true);
+  assert.equal(state.responseDestroyed, true);
+  assert.deepEqual(cleared, [deadline]);
 });

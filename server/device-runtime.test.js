@@ -46,10 +46,10 @@ function createHarness({
   let mqttShutdownCalls = 0;
 
   const cloud = {
-    listDevices(accessToken) {
-      cloudCalls.push(accessToken);
+    listDevices(accessToken, options) {
+      cloudCalls.push({ accessToken, options });
       const result = cloudQueue.shift();
-      if (typeof result === 'function') return result(accessToken);
+      if (typeof result === 'function') return result(accessToken, options);
       if (result instanceof Error) return Promise.reject(result);
       return result instanceof Promise ? result : Promise.resolve(result);
     },
@@ -153,6 +153,61 @@ test('publishes every cloud device in cloud order before LAN discovery completes
 
   scan.resolve([]);
   await started;
+});
+
+test('start threads AbortSignal to cloud and stale cloud completion cannot mutate state', async () => {
+  const cloud = deferred();
+  let cloudOptions;
+  const harness = createHarness({
+    cloudResults: [(_accessToken, options) => { cloudOptions = options; return cloud.promise; }],
+    scanResults: [[]],
+  });
+  const controller = new AbortController();
+  const started = harness.runtime.start({
+    accessToken: 'restore-token', username: 'restore-user', signal: controller.signal,
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(cloudOptions.signal, controller.signal);
+  controller.abort();
+  await started;
+  assert.equal(harness.runtime.snapshot().cloudState, 'reconnecting');
+
+  cloud.resolve({ success: true, devices: [cloudDevice('STALE')], username: 'stale-user' });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(harness.runtime.snapshot().devices, []);
+  assert.equal(harness.scanCalls.length, 0);
+  await harness.runtime.shutdown();
+});
+
+test('start links its AbortSignal to LAN discovery and settles the aborted scan', async () => {
+  let scanSignal;
+  const harness = createHarness({
+    cloudResults: [{ success: true, devices: [], username: 'restore-user' }],
+    scanResults: [(options) => {
+      scanSignal = options.signal;
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('scan aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
+    }],
+  });
+  const controller = new AbortController();
+  const started = harness.runtime.start({
+    accessToken: 'restore-token', username: 'restore-user', signal: controller.signal,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(scanSignal);
+  controller.abort();
+  assert.equal(scanSignal.aborted, true);
+  await started;
+  await harness.runtime.shutdown();
 });
 
 test('deduplicates normalized cloud serials with the first valid occurrence winning', async () => {

@@ -226,13 +226,14 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
     }
   }
 
-  async function getCloudUsername(accessToken) {
+  async function getCloudUsername(accessToken, { signal } = {}) {
     const tokenUsername = extractBambuUsername(accessToken);
     if (tokenUsername) return tokenUsername;
 
     try {
       const response = await fetchImpl(BAMBU_API.PREFERENCE, {
         method: 'GET',
+        signal,
         headers: {
           ...getBambuHeaders(),
           Authorization: `Bearer ${accessToken}`,
@@ -249,10 +250,11 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
     }
   }
 
-  async function listDevices(accessToken) {
+  async function listDevices(accessToken, { signal } = {}) {
     try {
       const response = await fetchImpl(BAMBU_API.BIND, {
         method: 'GET',
+        signal,
         headers: {
           ...getBambuHeaders(),
           Authorization: `Bearer ${accessToken}`,
@@ -265,7 +267,7 @@ function createBambuCloudClient({ fetchImpl = global.fetch, logger } = {}) {
       throwIfTokenInvalid(response, data);
 
       if (devicePayload) {
-        const username = await getCloudUsername(accessToken);
+        const username = await getCloudUsername(accessToken, { signal });
         const devices = devicePayload.map((device) => ({
           id: device.dev_id,
           name: device.name,

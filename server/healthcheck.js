@@ -8,6 +8,7 @@ export function checkHealth({
   host = '127.0.0.1',
   timeoutMs = 2000,
   requestImpl = http.request,
+  timers: timerOverrides = {},
 } = {}) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return Promise.reject(new TypeError('Invalid healthcheck port'));
@@ -19,16 +20,29 @@ export function checkHealth({
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let request;
     let response;
+    let wallTimer;
+    const timers = {
+      setTimeout: timerOverrides.setTimeout?.bind(timerOverrides) ?? setTimeout,
+      clearTimeout: timerOverrides.clearTimeout?.bind(timerOverrides) ?? clearTimeout,
+    };
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
+      timers.clearTimeout(wallTimer);
       response?.destroy?.();
       if (error) reject(error);
       else resolve(value);
     };
+    const expire = () => {
+      const error = new Error('Healthcheck timed out');
+      request?.destroy?.(error);
+      response?.destroy?.(error);
+      finish(error);
+    };
 
-    let request;
+    wallTimer = timers.setTimeout(expire, timeoutMs);
     try {
       request = requestImpl({
         host,
@@ -69,11 +83,7 @@ export function checkHealth({
         });
       });
       request.once('error', (error) => finish(error));
-      request.setTimeout(timeoutMs, () => {
-        const error = new Error('Healthcheck timed out');
-        request.destroy(error);
-        finish(error);
-      });
+      request.setTimeout?.(timeoutMs, expire);
       request.end();
     } catch (error) {
       request?.destroy?.();

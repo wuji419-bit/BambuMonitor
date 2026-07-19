@@ -3,6 +3,8 @@ import { EventEmitter, once } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
 
+import { createHttpApp } from './http-app.js';
+
 import {
   composeServer,
   installShutdownSignals,
@@ -100,17 +102,18 @@ test('parseServerEnv rejects invalid ports and empty configured data directories
   for (const DATA_DIR of ['', '   ']) assert.throws(() => parseServerEnv({ DATA_DIR }), /DATA_DIR/);
 });
 
-test('composeServer creates one production component in dependency order and restores the saved session', async () => {
+test('composeServer creates one production component in dependency order and owns deferred restoration', async () => {
   const harness = fakeComponents();
   const controller = await composeServer({ env: VALID_ENV, factories: harness.factories, writer: () => {}, now: () => 1234 });
 
   assert.deepEqual(harness.order, ['storage', 'config', 'logger', 'session', 'cloud', 'eventBus', 'mqtt', 'runtime', 'camera', 'http']);
-  assert.deepEqual(harness.calls.restore, [{ accessToken: 'restored-token', username: 'restored-user' }]);
-  assert.equal(controller.readiness.ready, true);
+  assert.deepEqual(harness.calls.restore, []);
+  assert.equal(controller.readiness.ready, false);
+  assert.equal(controller.readiness.syncing, true);
   assert.equal(controller.components.deviceRuntime, harness.deviceRuntime);
   assert.equal(harness.calls.httpOptions.trustProxy, false);
   assert.equal(harness.calls.httpOptions.distDir.endsWith('dist'), true);
-  assert.equal(harness.calls.httpOptions.readiness().ready, true);
+  assert.equal(harness.calls.httpOptions.readiness().ready, false);
   assert.notDeepEqual(harness.calls.loggerOptions.deviceSalt, Buffer.alloc(32, 7));
   assert.equal(
     typeof harness.calls.loggerOptions.deviceSalt === 'string'
@@ -118,6 +121,13 @@ test('composeServer creates one production component in dependency order and res
       : harness.calls.loggerOptions.deviceSalt.some((byte) => byte !== 0),
     true,
   );
+  await controller.startRestoration();
+  assert.equal(harness.calls.restore.length, 1);
+  assert.equal(harness.calls.restore[0].accessToken, 'restored-token');
+  assert.equal(harness.calls.restore[0].username, 'restored-user');
+  assert.ok(harness.calls.restore[0].signal instanceof AbortSignal);
+  assert.equal(controller.readiness.ready, true);
+  assert.equal(controller.readiness.syncing, false);
   await controller.close();
 });
 
@@ -195,9 +205,83 @@ test('restore network failure leaves the server ready for login', async () => {
     },
   });
   const controller = await composeServer({ env: VALID_ENV, factories: harness.factories, writer: () => {} });
+  assert.equal(controller.readiness.ready, false);
+  await controller.startRestoration();
   assert.equal(controller.readiness.ready, true);
   assert.equal(controller.readiness.degraded, false);
   await controller.close();
+});
+
+test('startServer listens and serves health while restored cloud work hangs, then becomes ready after timeout', async () => {
+  const restore = deferred();
+  let restoreSignal;
+  const harness = fakeComponents({
+    createDeviceRuntime(options) {
+      harness.order.push('runtime'); harness.calls.runtimeOptions = options;
+      return {
+        ...harness.deviceRuntime,
+        start(value) { restoreSignal = value.signal; return restore.promise; },
+      };
+    },
+    createHttpApp,
+  });
+  const starting = startServer({
+    env: VALID_ENV,
+    listenPort: 0,
+    factories: harness.factories,
+    restoreTimeoutMs: 20,
+    writer: () => {},
+  });
+  const controller = await Promise.race([
+    starting,
+    new Promise((resolve) => setImmediate(() => resolve(null))),
+  ]);
+  assert.ok(controller, 'server must listen without awaiting restored cloud work');
+  assert.equal((await request(controller.server, { path: '/healthz' })).status, 200);
+  assert.equal((await request(controller.server, { path: '/readyz' })).status, 503);
+  assert.equal(restoreSignal.aborted, false);
+
+  const restoration = await controller.restoration;
+  assert.equal(restoration.timedOut, true);
+  assert.equal(restoreSignal.aborted, true);
+  assert.equal(controller.readiness.ready, true);
+  assert.equal(controller.readiness.syncing, false);
+  assert.equal((await request(controller.server, { path: '/readyz' })).status, 200);
+  assert.deepEqual(harness.calls.remove, []);
+  await controller.close();
+});
+
+test('close aborts an owned restoration and leaves no restore timer or rejection behind', async () => {
+  const restore = deferred();
+  let restoreSignal;
+  const harness = fakeComponents({
+    createDeviceRuntime(options) {
+      harness.order.push('runtime'); harness.calls.runtimeOptions = options;
+      return {
+        ...harness.deviceRuntime,
+        start(value) { restoreSignal = value.signal; return restore.promise; },
+      };
+    },
+    createHttpApp,
+  });
+  const starting = startServer({
+    env: VALID_ENV,
+    listenPort: 0,
+    factories: harness.factories,
+    restoreTimeoutMs: 1000,
+    writer: () => {},
+  });
+  const controller = await Promise.race([
+    starting,
+    new Promise((resolve) => setImmediate(() => resolve(null))),
+  ]);
+  assert.ok(controller, 'server must listen before restoration settles');
+  const closing = controller.close();
+  assert.equal(restoreSignal.aborted, true);
+  assert.equal((await controller.restoration).aborted, true);
+  await closing;
+  restore.reject(new Error('late restore rejection'));
+  await new Promise((resolve) => setImmediate(resolve));
 });
 
 test('close awaits app, camera, and runtime in order while continuing after rejection', async () => {
@@ -206,7 +290,9 @@ test('close awaits app, camera, and runtime in order while continuing after reje
   const runtimeClose = deferred();
   const cleared = [];
   const timers = {
-    setTimeout(callback, delay) { return { callback, delay, unref() {} }; },
+    setTimeout(callback, delay) {
+      return { callback, delay, unrefCalled: false, unref() { this.unrefCalled = true; } };
+    },
     clearTimeout(handle) { cleared.push(handle); },
   };
   const harness = fakeComponents();
@@ -233,6 +319,7 @@ test('close awaits app, camera, and runtime in order while continuing after reje
   runtimeClose.resolve();
   assert.deepEqual(await first, { timedOut: false, failures: ['camera'] });
   assert.equal(cleared.length, 1);
+  assert.equal(cleared[0].unrefCalled, false);
 });
 
 test('close reports when the injected ten second overall deadline wins', async () => {

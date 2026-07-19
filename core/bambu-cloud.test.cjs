@@ -451,6 +451,29 @@ test('cloud username comes from the token without calling the preference endpoin
   assert.equal(await client.getCloudUsername(token), 'u_2468');
 });
 
+test('device inventory threads an AbortSignal through bind and preference fetches', async () => {
+  const controller = new AbortController();
+  const calls = [];
+  const responses = [
+    jsonResponse(200, { devices: [] }),
+    jsonResponse(200, { uid: 'signal-user' }),
+  ];
+  const client = createBambuCloudClient({
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return responses.shift();
+    },
+  });
+
+  await client.listDevices('opaque-token', { signal: controller.signal });
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, BAMBU_API.BIND);
+  assert.equal(calls[1].url, BAMBU_API.PREFERENCE);
+  assert.equal(calls[0].options.signal, controller.signal);
+  assert.equal(calls[1].options.signal, controller.signal);
+});
+
 test('401 and 403 device or preference responses throw token-invalid BambuCloudError instances', async () => {
   const bindClient = createBambuCloudClient({
     fetchImpl: async () => jsonResponse(401, null),

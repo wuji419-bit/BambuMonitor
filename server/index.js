@@ -21,6 +21,7 @@ const { createMqttConnectionManager } = require('../core/mqtt-connection-manager
 const DIST_DIR = fileURLToPath(new URL('../dist', import.meta.url));
 const SESSION_FILE = 'session.enc';
 const SHUTDOWN_DEADLINE_MS = 10_000;
+const RESTORE_TIMEOUT_MS = 15_000;
 const signalInstallations = new WeakMap();
 
 const defaultFactories = {
@@ -222,7 +223,6 @@ function withDeadline(work, timers, timeoutResult, timeoutMs = SHUTDOWN_DEADLINE
   let timeout;
   const deadline = new Promise((resolve) => {
     timeout = timers.setTimeout(() => resolve(timeoutResult()), timeoutMs);
-    timeout?.unref?.();
   });
   return Promise.race([work, deadline])
     .finally(() => timers.clearTimeout(timeout));
@@ -240,17 +240,98 @@ async function shutdownInOrder(stages, failures, logger) {
   return { timedOut: false, failures: [...failures] };
 }
 
-function createController({ app, components, readiness, timers, writer }) {
+function createController({
+  app,
+  components,
+  readiness,
+  timers,
+  writer,
+  restoredSession = null,
+  restoreTimeoutMs = RESTORE_TIMEOUT_MS,
+}) {
   let closingPromise = null;
+  let closing = false;
+  let restorationPromise = null;
+  let restorationController = null;
   let removeSignals = () => {};
+
+  const startRestoration = () => {
+    if (restorationPromise) return restorationPromise;
+    if (!restoredSession) {
+      readiness.ready = !readiness.degraded;
+      readiness.syncing = false;
+      restorationPromise = Promise.resolve({ timedOut: false, aborted: false, skipped: true });
+      return restorationPromise;
+    }
+    if (closing) {
+      restorationPromise = Promise.resolve({ timedOut: false, aborted: true });
+      return restorationPromise;
+    }
+
+    restorationController = new AbortController();
+    const { signal } = restorationController;
+    let timedOut = false;
+    let timeout;
+    let removeAbortListener = () => {};
+    const aborted = new Promise((resolve) => {
+      const onAbort = () => resolve({ timedOut, aborted: !timedOut });
+      removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const deadline = new Promise((resolve) => {
+      timeout = timers.setTimeout(() => {
+        timedOut = true;
+        restorationController?.abort();
+        resolve({ timedOut: true, aborted: false });
+      }, restoreTimeoutMs);
+    });
+
+    let restoreWork;
+    try {
+      restoreWork = Promise.resolve(components.deviceRuntime.start({
+        accessToken: restoredSession.accessToken,
+        username: typeof restoredSession.username === 'string' ? restoredSession.username : '',
+        signal,
+      }));
+    } catch (error) {
+      restoreWork = Promise.reject(error);
+    }
+    const observedWork = restoreWork.then(
+      () => ({ timedOut: false, aborted: false }),
+      () => ({ timedOut: false, aborted: false, failed: true }),
+    );
+
+    restorationPromise = Promise.race([observedWork, aborted, deadline])
+      .then((result) => {
+        if (!closing) {
+          readiness.ready = true;
+          readiness.syncing = false;
+        }
+        if (result.timedOut) components.logger?.warn?.('server', 'session-restore-timeout');
+        else if (result.failed) components.logger?.warn?.('server', 'session-restore-unavailable');
+        return result;
+      })
+      .finally(() => {
+        removeAbortListener();
+        timers.clearTimeout(timeout);
+        restorationController = null;
+      });
+    return restorationPromise;
+  };
+
   const controller = {
     app,
     server: app.server,
     components,
     readiness,
+    startRestoration,
+    get restoration() { return restorationPromise; },
     close() {
       if (closingPromise) return closingPromise;
+      closing = true;
       readiness.ready = false;
+      readiness.syncing = false;
+      restorationController?.abort();
       const failures = [];
       const stages = [
         ['app', app, 'close'],
@@ -285,15 +366,19 @@ export async function composeServer({
   writer: writerOption,
   now = Date.now,
   timers: timerOverrides = {},
+  restoreTimeoutMs = RESTORE_TIMEOUT_MS,
 } = {}) {
   const settings = parseServerEnv(env);
+  if (!Number.isFinite(restoreTimeoutMs) || restoreTimeoutMs <= 0) {
+    throw new TypeError('Invalid restore timeout');
+  }
   const factories = { ...defaultFactories, ...factoryOverrides };
   const timers = {
     setTimeout: timerOverrides.setTimeout?.bind(timerOverrides) ?? setTimeout,
     clearTimeout: timerOverrides.clearTimeout?.bind(timerOverrides) ?? clearTimeout,
   };
   const writer = normalizeWriter(writerOption);
-  const readiness = { ready: false, degraded: false, category: null };
+  const readiness = { ready: false, syncing: false, degraded: false, category: null };
   const components = {
     storage: null,
     configStore: null,
@@ -340,7 +425,7 @@ export async function composeServer({
       distDir: DIST_DIR,
     });
     guardDegradedApis(app);
-    return createController({ app, components, readiness, timers, writer });
+    return createController({ app, components, readiness, timers, writer, restoreTimeoutMs });
   };
 
   try {
@@ -403,19 +488,21 @@ export async function composeServer({
       distDir: DIST_DIR,
     });
 
-    const restored = components.sessionStore.getBambuSession?.();
-    if (restored && typeof restored.accessToken === 'string' && restored.accessToken.length > 0) {
-      try {
-        await components.deviceRuntime.start({
-          accessToken: restored.accessToken,
-          username: typeof restored.username === 'string' ? restored.username : '',
-        });
-      } catch {
-        components.logger.warn('server', 'session-restore-unavailable');
-      }
-    }
-    readiness.ready = true;
-    return createController({ app, components, readiness, timers, writer });
+    const session = components.sessionStore.getBambuSession?.();
+    const restoredSession = session && typeof session.accessToken === 'string' && session.accessToken.length > 0
+      ? session
+      : null;
+    readiness.ready = !restoredSession;
+    readiness.syncing = Boolean(restoredSession);
+    return createController({
+      app,
+      components,
+      readiness,
+      timers,
+      writer,
+      restoredSession,
+      restoreTimeoutMs,
+    });
   } catch (error) {
     const pending = [];
     if (app) pending.push(invokeLifecycle(app, 'close'));
@@ -449,6 +536,7 @@ export async function startServer({ listenPort, ...options } = {}) {
       controller.server.once('listening', onListening);
       controller.app.listen(parsedPort, '0.0.0.0');
     });
+    controller.startRestoration();
     return controller;
   } catch (error) {
     await controller.close();
