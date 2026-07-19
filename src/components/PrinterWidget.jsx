@@ -38,6 +38,9 @@ import {
   sortPrintersForDisplay,
 } from '../utils/printerPresentation';
 import {
+  usesCameraStartupTimeout,
+} from '../utils/cameraFrame';
+import {
   buildInitialCameraState,
   cameraStartErrorState,
   cameraStartResultState,
@@ -56,7 +59,7 @@ import {
   sendTestNotification,
 } from '../services/notifications';
 import { isValidPrinterAddress, normalizePrinterAddress } from '../utils/printerAddress';
-import { applySettingsTransaction } from '../utils/settingsTransaction';
+import { applySettingsTransaction, updateServerSettingsWhenReady } from '../utils/settingsTransaction';
 
 const statusMap = {
   no_ip: ['云端概览', '#8cc8ff', 'rgba(102, 178, 255, 0.14)', 'rgba(102, 178, 255, 0.22)'],
@@ -484,6 +487,7 @@ export default function PrinterWidget({
   const [ipDialogError, setIpDialogError] = useState('');
   const [submittingIp, setSubmittingIp] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsReady, setSettingsReady] = useState(() => !capabilities.serverSettings);
   const [notificationConfig, setNotificationConfig] = useState(() => createDefaultNotificationConfig());
   const [notificationFeedback, setNotificationFeedback] = useState('');
   const [testingTargetId, setTestingTargetId] = useState('');
@@ -699,18 +703,22 @@ export default function PrinterWidget({
 
   useEffect(() => {
     if (!capabilities.serverSettings) {
+      setSettingsReady(true);
       setNotificationConfig(getNotificationConfig());
       setCameraConfig(getCameraConfig());
       return undefined;
     }
 
     let cancelled = false;
+    setSettingsReady(false);
+    setSettingsOpen(false);
     runtime.settings.get()
       .then((result) => {
         if (cancelled) return;
         if (!result?.success) throw new Error(result?.error || '读取设置失败');
         setCameraConfig((current) => mergeCameraConfig(current, result.settings?.camera));
         setNotificationConfig((current) => mergeNotificationConfig(current, result.settings?.notifications));
+        setSettingsReady(true);
       })
       .catch((error) => {
         if (!cancelled) setNotificationFeedback(error?.message || '读取设置失败');
@@ -934,7 +942,7 @@ export default function PrinterWidget({
     if (!cameraOpen) return undefined;
 
     const timers = Object.entries(cameraStreams)
-      .filter(([, stream]) => stream?.success && stream.url && stream.mode !== 'chamber-image-mjpeg')
+      .filter(([, stream]) => usesCameraStartupTimeout(stream))
       .map(([key, stream]) => window.setTimeout(() => {
         setCameraImageStates((prev) => {
           if (prev[key]?.status === 'ready') return prev;
@@ -1077,9 +1085,13 @@ export default function PrinterWidget({
     };
 
     if (capabilities.serverSettings) {
-      const result = await runtime.settings.update({
-        camera: buildServerCameraConfig(next.cameraConfig),
-        notifications: buildServerNotificationConfig(next.notificationConfig),
+      const result = await updateServerSettingsWhenReady({
+        runtime,
+        ready: settingsReady,
+        settings: {
+          camera: buildServerCameraConfig(next.cameraConfig),
+          notifications: buildServerNotificationConfig(next.notificationConfig),
+        },
       });
       if (!result?.success) throw new Error(result?.error || '保存设置失败');
       setCameraConfig((current) => mergeCameraConfig(current, result.settings?.camera || next.cameraConfig));
@@ -1229,10 +1241,11 @@ export default function PrinterWidget({
       isAlwaysOnTop={isAlwaysOnTop}
       isLocked={isLocked}
       capabilities={capabilities}
+      settingsReady={settingsReady}
       onTabChange={changeWorkspaceTab}
       onRefresh={() => onRefreshDevices?.()}
       onToggleTop={toggleAlwaysOnTop}
-      onOpenSettings={() => setSettingsOpen(true)}
+      onOpenSettings={() => { if (settingsReady) setSettingsOpen(true); }}
       onChangeMode={changeViewMode}
       onToggleLock={toggleMousePassthrough}
       onResetSize={resetCurrentWindowSize}

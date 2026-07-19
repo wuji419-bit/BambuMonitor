@@ -22,6 +22,7 @@ export default function MonitorShell({
   isAlwaysOnTop,
   isLocked,
   capabilities = {},
+  settingsReady = true,
   onTabChange,
   onRefresh,
   onToggleTop,
@@ -40,7 +41,7 @@ export default function MonitorShell({
   const menuRef = useRef(null);
 
   const focusMenuItem = useCallback((requestedIndex) => {
-    const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])];
+    const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]:not([disabled])') || [])];
     if (items.length === 0) return;
     const index = (requestedIndex + items.length) % items.length;
     setMenuFocusIndex(index);
@@ -69,7 +70,7 @@ export default function MonitorShell({
 
       event.preventDefault();
       event.stopImmediatePropagation();
-      const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])];
+      const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]:not([disabled])') || [])];
       const currentIndex = Math.max(0, items.indexOf(document.activeElement));
       if (event.key === 'Home') focusMenuItem(0);
       else if (event.key === 'End') focusMenuItem(items.length - 1);
@@ -99,7 +100,7 @@ export default function MonitorShell({
     ...(capabilities.mousePassthrough ? [
       { label: isLocked ? '解除穿透' : '锁定穿透', icon: <Lock size={14} aria-hidden="true" />, action: onToggleLock },
     ] : []),
-    { label: '设置', icon: <Settings size={14} aria-hidden="true" />, action: onOpenSettings },
+    { label: '设置', icon: <Settings size={14} aria-hidden="true" />, action: onOpenSettings, disabled: !settingsReady },
     ...(capabilities.nativeWindow ? [
       { label: '重置窗口大小', icon: <RotateCcw size={14} aria-hidden="true" />, action: onResetSize },
       { label: '退出', icon: <Power size={14} aria-hidden="true" />, action: onQuit, danger: true },
@@ -158,13 +159,14 @@ export default function MonitorShell({
 
             {menuOpen ? (
               <div ref={menuRef} className="monitor-menu" id={menuId} role="menu" aria-label="更多操作">
-                {menuItems.map(({ label, icon, action, danger }, index) => (
+                {menuItems.map(({ label, icon, action, danger, disabled }, index) => (
                   <button
                     key={label}
                     type="button"
                     role="menuitem"
                     tabIndex={menuFocusIndex === index ? 0 : -1}
                     className={danger ? 'is-danger' : undefined}
+                    disabled={disabled}
                     onFocus={() => setMenuFocusIndex(index)}
                     onClick={() => choose(action)}
                   >

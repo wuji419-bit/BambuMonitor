@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Camera, Maximize2, RefreshCw } from 'lucide-react';
 import { cameraCompatibilityNote, getCustomCameraUrl, getPrinterCameraKey } from '../../services/camera';
-import { buildCameraFrameUrl } from '../../utils/cameraFrame';
+import { buildCameraFrameUrl, createVisibilityAwareCameraPoller } from '../../utils/cameraFrame';
 import { buildCameraZoomState } from '../../utils/cameraZoom';
 import { buildCameraCardPresentation, cameraRetryLabel } from '../../utils/cameraPresentation';
 import { isPublicCaptureSearch, publicCameraAddress } from '../../utils/publicCapture';
@@ -38,62 +38,42 @@ export function ChamberSnapshotCanvas({ snapshotUrl, imageKey, alt, isReady, set
   const canvasRef = useRef(null);
   useEffect(() => {
     if (!snapshotUrl || !imageKey) return undefined;
-    let stopped = false; let frame = 0; let timer = 0; let activeController = null;
-    let cardVisible = typeof IntersectionObserver !== 'function';
-    let documentVisible = document.visibilityState !== 'hidden';
+    let mounted = true;
+    let frame = 0;
     const markReady = () => setCameraImageStates((prev) => prev[imageKey]?.status === 'ready' ? prev : ({ ...prev, [imageKey]: { status: 'ready' } }));
     const markWaiting = () => setCameraImageStates((prev) => prev[imageKey]?.status === 'ready' ? prev : ({ ...prev, [imageKey]: { status: 'loading', message: '正在等待摄像头画面...' } }));
-    const canPoll = () => !stopped && cardVisible && documentVisible;
-    const suspend = () => {
-      window.clearTimeout(timer);
-      timer = 0;
-      activeController?.abort();
-      activeController = null;
-    };
-    const schedule = (delay = 0) => {
-      if (!canPoll() || timer || activeController) return;
-      timer = window.setTimeout(paintNextFrame, delay);
-    };
-    const paintNextFrame = async () => {
-      timer = 0;
-      if (!canPoll()) return;
-      const controller = new AbortController();
-      activeController = controller;
+    const poller = createVisibilityAwareCameraPoller({
+      documentVisible: document.visibilityState !== 'hidden',
+      cardVisible: typeof IntersectionObserver !== 'function',
+      async poll(signal) {
       const requestUrl = buildCameraFrameUrl(snapshotUrl, frame += 1);
-      try {
-        const response = await fetch(requestUrl, { cache: 'no-store', headers: { accept: 'image/jpeg' }, signal: controller.signal });
+        const response = await fetch(requestUrl, { cache: 'no-store', headers: { accept: 'image/jpeg' }, signal });
         if (!response.ok) throw new Error(`camera frame request failed: ${response.status}`);
         const blob = await response.blob();
         const image = await decodeCameraFrame(blob);
-        if (!stopped && canvasRef.current) { drawCameraFrame(canvasRef.current, image); markReady(); }
+        if (mounted && canvasRef.current) { drawCameraFrame(canvasRef.current, image); markReady(); }
         if (typeof image.close === 'function') image.close();
-      } catch (error) {
-        if (!stopped && error?.name !== 'AbortError') markWaiting();
-      } finally {
-        if (activeController === controller) activeController = null;
-        schedule(700);
-      }
-    };
+      },
+      onError(error) {
+        if (mounted && error?.name !== 'AbortError') markWaiting();
+      },
+    });
     const handleVisibilityChange = () => {
-      documentVisible = document.visibilityState !== 'hidden';
-      if (documentVisible) schedule();
-      else suspend();
+      poller.setVisibility({ documentVisible: document.visibilityState !== 'hidden' });
     };
     const observer = typeof IntersectionObserver === 'function'
       ? new IntersectionObserver(([entry]) => {
-        cardVisible = Boolean(entry?.isIntersecting);
-        if (cardVisible) schedule();
-        else suspend();
+        poller.setVisibility({ cardVisible: Boolean(entry?.isIntersecting) });
       })
       : null;
     document.addEventListener('visibilitychange', handleVisibilityChange);
     if (canvasRef.current) observer?.observe(canvasRef.current);
-    schedule();
+    poller.start();
     return () => {
-      stopped = true;
+      mounted = false;
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       observer?.disconnect();
-      suspend();
+      poller.stop();
     };
   }, [imageKey, setCameraImageStates, snapshotUrl]);
   return <canvas ref={canvasRef} role="img" aria-label={alt} className="camera-media__image" style={{ opacity: isReady ? 1 : 0.35 }} />;

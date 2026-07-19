@@ -14,3 +14,8 @@ export async function applySettingsTransaction({ startupChanged, applyStartup, c
     throw error;
   }
 }
+
+export async function updateServerSettingsWhenReady({ runtime, ready, settings }) {
+  if (!ready) throw new Error('服务器设置仍在加载');
+  return runtime.settings.update(settings);
+}
