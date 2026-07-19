@@ -1,0 +1,881 @@
+import { createHash } from 'node:crypto';
+import { createReadStream, realpathSync, statSync } from 'node:fs';
+import { realpath, stat } from 'node:fs/promises';
+import http from 'node:http';
+import path from 'node:path';
+import { WebSocket, WebSocketServer } from 'ws';
+
+import {
+  assertMutationRequest,
+  buildSessionCookie,
+  clearSessionCookie,
+  createSlidingWindowLimiter,
+  parseCookies,
+  readJsonBody,
+  requestIsSecure,
+} from './http-security.js';
+
+const JSON_TYPE = 'application/json; charset=utf-8';
+const SESSION_COOKIE = 'bambu_session';
+const STREAM_BOUNDARY = 'bambuframe';
+const DEFAULT_LIMITS = Object.freeze({
+  bodyBytes: 65_536,
+  frameWaitMs: 4_000,
+  maxFrameBytes: 8 * 1024 * 1024,
+  maxWsEventBytes: 512 * 1024,
+  streamsPerCamera: 4,
+  streamsGlobal: 20,
+  wsPerSession: 5,
+  login: Object.freeze({ limit: 5, windowMs: 15 * 60_000, maxKeys: 2_000 }),
+  requestCode: Object.freeze({ limit: 3, windowMs: 60_000, maxKeys: 2_000 }),
+  frameRate: Object.freeze({ limit: 4, windowMs: 1_000, maxKeys: 10_000 }),
+});
+const MIME_TYPES = Object.freeze({
+  '.css': 'text/css; charset=utf-8',
+  '.gif': 'image/gif',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+});
+const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasOnlyKeys(value, allowed, { exact = false } = {}) {
+  if (!isPlainObject(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.some((key) => DANGEROUS_KEYS.has(key) || !allowed.includes(key))) return false;
+  return !exact || keys.length === allowed.length && allowed.every((key) => Object.hasOwn(value, key));
+}
+
+function apiError(status, code, message) {
+  return Object.assign(new Error(message), { apiStatus: status, apiCode: code, safeMessage: message });
+}
+
+function sendJson(res, status, payload, headers = {}) {
+  if (res.destroyed || res.writableEnded) return;
+  const body = Buffer.from(JSON.stringify(payload));
+  res.writeHead(status, {
+    'Content-Type': JSON_TYPE,
+    'Content-Length': body.length,
+    'Cache-Control': 'no-store',
+    ...headers,
+  });
+  res.end(body);
+}
+
+function sendSuccess(res, data, status = 200, headers) {
+  sendJson(res, status, { ok: true, data }, headers);
+}
+
+function sendFailure(res, status, code, message, headers) {
+  sendJson(res, status, { ok: false, error: { code, message } }, headers);
+}
+
+function logSafe(logger, level, operation, details = {}) {
+  if (typeof logger?.[level] !== 'function') return;
+  try {
+    logger[level]({ operation, ...details });
+  } catch {
+    // Diagnostics must never affect request ownership.
+  }
+}
+
+function contentTypeIsJson(req) {
+  const value = req.headers['content-type'];
+  return typeof value === 'string' && /^application\/json(?:\s*;|$)/i.test(value);
+}
+
+async function jsonBody(req, maxBytes) {
+  if (!contentTypeIsJson(req)) throw apiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Expected application/json');
+  try {
+    return await readJsonBody(req, { maxBytes });
+  } catch (error) {
+    if (error?.message === 'Request body too large') {
+      throw apiError(413, 'BODY_TOO_LARGE', 'Request body too large');
+    }
+    throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+  }
+}
+
+function effectiveOrigin(req, trustProxy) {
+  const host = req.headers.host;
+  if (typeof host !== 'string' || host.length < 1 || host.length > 255 || /[\s\\/@?#]/.test(host)) {
+    throw apiError(403, 'FORBIDDEN', 'Request verification failed');
+  }
+  const protocol = requestIsSecure(req, { trustProxy }) ? 'https' : 'http';
+  try {
+    const value = new URL(`${protocol}://${host}`);
+    if (value.origin !== `${protocol}://${host}` || value.username || value.password) throw new Error('invalid');
+    return value.origin;
+  } catch {
+    throw apiError(403, 'FORBIDDEN', 'Request verification failed');
+  }
+}
+
+function assertOrigin(req, trustProxy, { optional = false } = {}) {
+  const origin = req.headers.origin;
+  if (optional && origin === undefined) return;
+  if (typeof origin !== 'string' || origin.length > 512 || origin === 'null') {
+    throw apiError(403, 'FORBIDDEN', 'Request verification failed');
+  }
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw apiError(403, 'FORBIDDEN', 'Request verification failed');
+  }
+  if (parsed.origin !== origin || parsed.username || parsed.password || origin !== effectiveOrigin(req, trustProxy)) {
+    throw apiError(403, 'FORBIDDEN', 'Request verification failed');
+  }
+}
+
+function remoteAddress(req, trustProxy) {
+  let address = req.socket?.remoteAddress;
+  if (trustProxy) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string') address = forwarded.split(',', 1)[0].trim();
+  }
+  const normalized = typeof address === 'string' ? address.trim() : '';
+  return normalized.length > 0 && normalized.length <= 128 && !/[\s\r\n]/.test(normalized)
+    ? normalized
+    : 'unknown';
+}
+
+function limiterKey(req, account, trustProxy) {
+  const normalized = account.trim().toLowerCase().replace(/\s+/g, '');
+  const digest = createHash('sha256').update(normalized).digest('hex');
+  return `${remoteAddress(req, trustProxy)}:${digest}`;
+}
+
+function enforceLimit(limiter, key) {
+  const result = limiter.check(key);
+  if (!result.allowed) {
+    throw apiError(429, 'RATE_LIMITED', 'Too many requests');
+  }
+}
+
+function validateAccount(value) {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 320;
+}
+
+function validatePassword(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 4_096;
+}
+
+function validateCode(value) {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 128;
+}
+
+function maskAccount(account) {
+  const value = String(account || '').trim();
+  const at = value.indexOf('@');
+  if (at > 0) return `${value[0]}***${value.slice(at)}`;
+  if (value.length <= 4) return '*'.repeat(Math.max(1, value.length));
+  return `${value.slice(0, 2)}***${value.slice(-2)}`;
+}
+
+function decodeSegment(value) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+  }
+  if (!decoded || decoded.length > 256 || decoded.includes('\0') || decoded.includes('/') || decoded.includes('\\')) {
+    throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+  }
+  return decoded;
+}
+
+function validateDevicePatch(body) {
+  const fields = ['ip', 'name', 'model'];
+  if (!hasOnlyKeys(body, fields) || Object.keys(body).length === 0) {
+    throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+  }
+}
+
+function validateSettingsPatch(body) {
+  if (!hasOnlyKeys(body, ['camera', 'notifications', 'debug'])) {
+    throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+  }
+  if (Object.hasOwn(body, 'camera')) {
+    if (!hasOnlyKeys(body.camera, ['autoOpen', 'customUrls'])) throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+    if (Object.hasOwn(body.camera, 'customUrls') && !safeDictionary(body.camera.customUrls)) {
+      throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+    }
+  }
+  if (Object.hasOwn(body, 'notifications')) {
+    if (!hasOnlyKeys(body.notifications, ['enabled', 'targets'])) throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+    if (Object.hasOwn(body.notifications, 'targets')) {
+      if (!Array.isArray(body.notifications.targets)) throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      for (const target of body.notifications.targets) {
+        if (!hasOnlyKeys(target, ['id', 'name', 'type', 'enabled', 'url', 'secret', 'token', 'headers'])) {
+          throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+        }
+        if (Object.hasOwn(target, 'headers') && !safeDictionary(target.headers)) {
+          throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+        }
+      }
+    }
+  }
+}
+
+function safeDictionary(value) {
+  return isPlainObject(value) && Object.keys(value).every((key) => !DANGEROUS_KEYS.has(key));
+}
+
+function normalizeRelease(value) {
+  if (typeof value === 'function') return value;
+  if (typeof value?.release === 'function') return value.release.bind(value);
+  return () => {};
+}
+
+function fixedRoot(distDir) {
+  if (distDir === null || distDir === undefined) return null;
+  try {
+    const resolveRealPath = realpathSync.native ?? realpathSync;
+    const root = resolveRealPath(path.resolve(distDir));
+    return statSync(root).isDirectory() ? root : null;
+  } catch {
+    return null;
+  }
+}
+
+function insideRoot(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === '' || !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function splitTarget(req) {
+  const target = typeof req.url === 'string' ? req.url : '';
+  const query = target.indexOf('?');
+  const rawPath = query < 0 ? target : target.slice(0, query);
+  return { rawPath, hasQuery: query >= 0 };
+}
+
+function resolveLimits(overrides = {}) {
+  const value = isPlainObject(overrides) ? overrides : {};
+  return {
+    ...DEFAULT_LIMITS,
+    ...value,
+    login: { ...DEFAULT_LIMITS.login, ...(isPlainObject(value.login) ? value.login : {}) },
+    requestCode: { ...DEFAULT_LIMITS.requestCode, ...(isPlainObject(value.requestCode) ? value.requestCode : {}) },
+    frameRate: { ...DEFAULT_LIMITS.frameRate, ...(isPlainObject(value.frameRate) ? value.frameRate : {}) },
+  };
+}
+
+function validateDependencies(deps) {
+  const required = [
+    [deps.cloud, ['loginPassword', 'requestVerifyCode', 'loginCode']],
+    [deps.sessionStore, ['create', 'authenticate', 'clear']],
+    [deps.deviceRuntime, ['start', 'refresh', 'updateDevice', 'snapshot', 'subscribe']],
+    [deps.cameraManager, ['configure', 'acquire', 'getLatestFrame', 'subscribe']],
+    [deps.configStore, ['get', 'update']],
+  ];
+  if (required.some(([owner, methods]) => methods.some((method) => typeof owner?.[method] !== 'function'))) {
+    throw new TypeError('Invalid HTTP app dependencies');
+  }
+}
+
+export function createHttpApp(deps = {}) {
+  validateDependencies(deps);
+  const {
+    cloud, sessionStore, deviceRuntime, cameraManager, configStore, logger,
+    notificationSender, trustProxy = false, readiness = true,
+  } = deps;
+  const timers = {
+    setTimeout: deps.timers?.setTimeout?.bind(deps.timers) ?? setTimeout,
+    clearTimeout: deps.timers?.clearTimeout?.bind(deps.timers) ?? clearTimeout,
+    setInterval: deps.timers?.setInterval?.bind(deps.timers) ?? setInterval,
+    clearInterval: deps.timers?.clearInterval?.bind(deps.timers) ?? clearInterval,
+  };
+  const limits = resolveLimits(deps.limits);
+  const root = fixedRoot(deps.distDir);
+  const now = typeof deps.now === 'function' ? deps.now : Date.now;
+  const loginLimiter = createSlidingWindowLimiter({ ...limits.login, now });
+  const requestCodeLimiter = createSlidingWindowLimiter({ ...limits.requestCode, now });
+  const frameLimiter = createSlidingWindowLimiter({ ...limits.frameRate, now });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: limits.maxWsEventBytes });
+  const wsBySession = new Map();
+  const wsCleanup = new Map();
+  const streamCounts = new Map();
+  const activeCameraClosers = new Set();
+  const sockets = new Set();
+  let activeStreams = 0;
+  let closingPromise = null;
+  let closed = false;
+
+  async function authenticate(req) {
+    const sessionId = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+    if (typeof sessionId !== 'string') return null;
+    const session = await sessionStore.authenticate(sessionId, { renew: true });
+    return session ? { sessionId, session } : null;
+  }
+
+  async function requireSession(req) {
+    const auth = await authenticate(req);
+    if (!auth) throw apiError(401, 'UNAUTHORIZED', 'Authentication required');
+    return auth;
+  }
+
+  function assertMutation(req, auth) {
+    try {
+      assertMutationRequest(req, { csrfToken: auth.session.csrfToken, trustProxy });
+    } catch {
+      throw apiError(403, 'FORBIDDEN', 'Request verification failed');
+    }
+  }
+
+  async function completeLogin(req, res, body, method) {
+    assertOrigin(req, trustProxy);
+    const expected = method === 'loginCode' ? ['account', 'code'] : ['account', 'password'];
+    if (!hasOnlyKeys(body, expected, { exact: true }) || !validateAccount(body.account)
+      || method === 'loginCode' && !validateCode(body.code)
+      || method === 'loginPassword' && !validatePassword(body.password)) {
+      throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+    }
+    enforceLimit(loginLimiter, limiterKey(req, body.account, trustProxy));
+    let result;
+    try {
+      result = await cloud[method](body);
+    } finally {
+      if (Object.hasOwn(body, 'password')) body.password = '';
+      if (Object.hasOwn(body, 'code')) body.code = '';
+    }
+    if (!result?.success || typeof result.accessToken !== 'string' || result.accessToken.length < 1
+      || result.accessToken.length > 16_384) {
+      result = null;
+      throw apiError(401, 'AUTH_FAILED', 'Authentication failed');
+    }
+    let accessToken = result.accessToken;
+    let username = typeof result.username === 'string' ? result.username.trim().slice(0, 256) : '';
+    if (!username && typeof cloud.getCloudUsername === 'function') {
+      try {
+        const value = await cloud.getCloudUsername(accessToken);
+        if (typeof value === 'string') username = value.trim().slice(0, 256);
+      } catch {
+        username = '';
+      }
+    }
+    const created = await sessionStore.create({ account: body.account, accessToken, username });
+    const saved = typeof sessionStore.getBambuSession === 'function'
+      ? sessionStore.getBambuSession()
+      : { accessToken, username };
+    await deviceRuntime.start({ accessToken: saved?.accessToken || accessToken, username: saved?.username || username });
+    accessToken = null;
+    result = null;
+    const secure = requestIsSecure(req, { trustProxy });
+    sendSuccess(res, {
+      csrfToken: created.csrfToken,
+      expiresAt: created.expiresAt,
+      accountMasked: maskAccount(created.account ?? body.account),
+    }, 200, { 'Set-Cookie': buildSessionCookie(created.sessionId, { secure }) });
+  }
+
+  async function authRoute(req, res, pathname) {
+    if (pathname === '/api/auth/login' && req.method === 'POST') {
+      return completeLogin(req, res, await jsonBody(req, limits.bodyBytes), 'loginPassword');
+    }
+    if (pathname === '/api/auth/code/verify' && req.method === 'POST') {
+      return completeLogin(req, res, await jsonBody(req, limits.bodyBytes), 'loginCode');
+    }
+    if (pathname === '/api/auth/code/request' && req.method === 'POST') {
+      assertOrigin(req, trustProxy);
+      const body = await jsonBody(req, limits.bodyBytes);
+      if (!hasOnlyKeys(body, ['account'], { exact: true }) || !validateAccount(body.account)) {
+        throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      }
+      enforceLimit(requestCodeLimiter, limiterKey(req, body.account, trustProxy));
+      const result = await cloud.requestVerifyCode(body);
+      if (!result?.success) throw apiError(502, 'CODE_REQUEST_FAILED', 'Unable to request verification code');
+      return sendSuccess(res, { sent: true });
+    }
+    if (pathname === '/api/auth/logout' && req.method === 'POST') {
+      assertOrigin(req, trustProxy);
+      const auth = await authenticate(req);
+      if (auth) {
+        assertMutation(req, auth);
+        await sessionStore.clear();
+        const stop = deviceRuntime.clear ?? deviceRuntime.stop ?? deviceRuntime.shutdown;
+        if (typeof stop === 'function') await stop.call(deviceRuntime);
+        closeAllSessionSockets(1008, 'Session ended');
+      }
+      return sendSuccess(res, { authenticated: false }, 200, {
+        'Set-Cookie': clearSessionCookie({ secure: requestIsSecure(req, { trustProxy }) }),
+      });
+    }
+    return false;
+  }
+
+  async function sessionAndDataRoutes(req, res, pathname) {
+    if (pathname === '/api/session' && req.method === 'GET') {
+      const auth = await authenticate(req);
+      if (!auth) return sendSuccess(res, { authenticated: false });
+      return sendSuccess(res, {
+        authenticated: true,
+        accountMasked: maskAccount(auth.session.account),
+        csrfToken: auth.session.csrfToken,
+        expiresAt: auth.session.expiresAt,
+      });
+    }
+    if (pathname === '/api/devices' && req.method === 'GET') {
+      await requireSession(req);
+      return sendSuccess(res, deviceRuntime.snapshot());
+    }
+    if (pathname === '/api/devices/refresh' && req.method === 'POST') {
+      const auth = await requireSession(req);
+      assertMutation(req, auth);
+      return sendSuccess(res, await deviceRuntime.refresh());
+    }
+    const deviceMatch = /^\/api\/devices\/([^/]+)$/.exec(pathname);
+    if (deviceMatch && req.method === 'PATCH') {
+      const auth = await requireSession(req);
+      assertMutation(req, auth);
+      const serial = decodeSegment(deviceMatch[1]);
+      const body = await jsonBody(req, limits.bodyBytes);
+      validateDevicePatch(body);
+      let updated;
+      try {
+        updated = await deviceRuntime.updateDevice(serial, body);
+      } catch {
+        throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      }
+      if (!updated) throw apiError(404, 'DEVICE_NOT_FOUND', 'Device not found');
+      return sendSuccess(res, updated);
+    }
+    if (pathname === '/api/settings' && req.method === 'GET') {
+      await requireSession(req);
+      return sendSuccess(res, configStore.get());
+    }
+    if (pathname === '/api/settings' && req.method === 'PUT') {
+      const auth = await requireSession(req);
+      assertMutation(req, auth);
+      const body = await jsonBody(req, limits.bodyBytes);
+      validateSettingsPatch(body);
+      try {
+        return sendSuccess(res, await configStore.update(body));
+      } catch {
+        throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      }
+    }
+    if (pathname === '/api/notifications/test' && req.method === 'POST') {
+      const auth = await requireSession(req);
+      assertMutation(req, auth);
+      const body = await jsonBody(req, limits.bodyBytes);
+      if (!hasOnlyKeys(body, [])) throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      if (typeof notificationSender !== 'function') {
+        throw apiError(501, 'NOTIFICATION_UNSUPPORTED', 'Notification testing is not supported');
+      }
+      const result = await notificationSender({
+        settings: configStore.get(),
+        notification: { title: 'Bambu Monitor test', body: 'NAS notification test' },
+      });
+      return sendSuccess(res, { sent: result?.success !== false });
+    }
+    return false;
+  }
+
+  function canonicalCamera(serial) {
+    const device = typeof deviceRuntime.getDevice === 'function'
+      ? deviceRuntime.getDevice(serial)
+      : deviceRuntime.snapshot()?.devices?.find((item) => item?.dev_id === serial);
+    if (!device) throw apiError(404, 'DEVICE_NOT_FOUND', 'Device not found');
+    const canonical = String(device.dev_id ?? serial);
+    cameraManager.configure(device);
+    return { canonical, device };
+  }
+
+  async function cameraFrame(req, res, serial, auth) {
+    enforceLimit(frameLimiter, `${auth.sessionId}:${createHash('sha256').update(serial).digest('hex')}`);
+    const release = normalizeRelease(cameraManager.acquire(serial));
+    let unsubscribe = () => {};
+    let timeout = null;
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (timeout) timers.clearTimeout(timeout);
+      timeout = null;
+      unsubscribe();
+      release();
+      activeCameraClosers.delete(abort);
+      req.removeListener('aborted', abort);
+      res.removeListener('close', abort);
+      res.removeListener('error', abort);
+    };
+    const abort = () => cleanup();
+    activeCameraClosers.add(abort);
+    req.once('aborted', abort);
+    res.once('close', abort);
+    res.once('error', abort);
+    const sendFrame = (frame) => {
+      const copy = Buffer.isBuffer(frame) ? Buffer.from(frame) : null;
+      if (cleaned || !copy || copy.length < 1 || copy.length > limits.maxFrameBytes) return;
+      cleanup();
+      res.writeHead(200, {
+        'Content-Type': 'image/jpeg',
+        'Content-Length': copy.length,
+        'Cache-Control': 'no-store',
+      });
+      res.end(copy);
+    };
+    const latest = cameraManager.getLatestFrame(serial);
+    if (latest) return sendFrame(latest);
+    let subscription;
+    try {
+      subscription = cameraManager.subscribe(serial, sendFrame);
+    } catch {
+      cleanup();
+      throw apiError(503, 'CAMERA_UNAVAILABLE', 'Camera is unavailable');
+    }
+    unsubscribe = normalizeRelease(subscription);
+    if (cleaned) {
+      unsubscribe();
+      return;
+    }
+    timeout = timers.setTimeout(() => {
+      if (cleaned) return;
+      cleanup();
+      sendFailure(res, 504, 'CAMERA_TIMEOUT', 'Camera frame timed out');
+    }, limits.frameWaitMs);
+    timeout?.unref?.();
+  }
+
+  function cameraStream(req, res, serial) {
+    const cameraCount = streamCounts.get(serial) ?? 0;
+    if (cameraCount >= limits.streamsPerCamera || activeStreams >= limits.streamsGlobal) {
+      throw apiError(429, 'CAMERA_STREAM_LIMIT', 'Camera stream limit reached');
+    }
+    streamCounts.set(serial, cameraCount + 1);
+    activeStreams += 1;
+    let unsubscribe = () => {};
+    let cleaned = false;
+    let blocked = false;
+    let pending = null;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      pending = null;
+      unsubscribe();
+      activeStreams = Math.max(0, activeStreams - 1);
+      const next = Math.max(0, (streamCounts.get(serial) ?? 1) - 1);
+      if (next === 0) streamCounts.delete(serial);
+      else streamCounts.set(serial, next);
+      activeCameraClosers.delete(abort);
+      req.removeListener('aborted', abort);
+      res.removeListener('close', abort);
+      res.removeListener('error', abort);
+      res.removeListener('finish', abort);
+      res.removeListener('drain', drain);
+    };
+    const abort = () => cleanup();
+    const writeFrame = (rawFrame) => {
+      if (cleaned || !Buffer.isBuffer(rawFrame) || rawFrame.length < 1 || rawFrame.length > limits.maxFrameBytes) return;
+      const frame = Buffer.from(rawFrame);
+      if (blocked) {
+        pending = frame;
+        return;
+      }
+      const header = Buffer.from(`--${STREAM_BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`);
+      blocked = !res.write(Buffer.concat([header, frame, Buffer.from('\r\n')]));
+    };
+    const drain = () => {
+      blocked = false;
+      if (!pending) return;
+      const frame = pending;
+      pending = null;
+      writeFrame(frame);
+    };
+    activeCameraClosers.add(abort);
+    req.once('aborted', abort);
+    res.once('close', abort);
+    res.once('error', abort);
+    res.once('finish', abort);
+    res.on('drain', drain);
+    res.writeHead(200, {
+      'Content-Type': `multipart/x-mixed-replace; boundary=${STREAM_BOUNDARY}`,
+      'Cache-Control': 'no-store',
+      Connection: 'keep-alive',
+    });
+    res.flushHeaders?.();
+    try {
+      unsubscribe = normalizeRelease(cameraManager.subscribe(serial, writeFrame));
+    } catch {
+      cleanup();
+      res.destroy();
+    }
+  }
+
+  async function cameraRoutes(req, res, pathname) {
+    const match = /^\/api\/cameras\/([^/]+)\/(frame|stream)$/.exec(pathname);
+    if (!match || req.method !== 'GET') return false;
+    const auth = await requireSession(req);
+    assertOrigin(req, trustProxy, { optional: true });
+    const requested = decodeSegment(match[1]);
+    const { canonical } = canonicalCamera(requested);
+    if (match[2] === 'frame') return cameraFrame(req, res, canonical, auth);
+    return cameraStream(req, res, canonical);
+  }
+
+  async function serveFile(req, res, file, { index = false, asset = false } = {}) {
+    let info;
+    try {
+      const resolved = await realpath(file);
+      if (!insideRoot(root, resolved)) return sendFailure(res, 404, 'NOT_FOUND', 'Not found');
+      info = await stat(resolved);
+      if (!info.isFile()) return sendFailure(res, 404, 'NOT_FOUND', 'Not found');
+      file = resolved;
+    } catch {
+      return sendFailure(res, 404, 'NOT_FOUND', 'Not found');
+    }
+    const headers = {
+      'Content-Type': MIME_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
+      'Content-Length': info.size,
+      'Cache-Control': index ? 'no-cache' : asset ? 'public, max-age=31536000, immutable' : 'no-cache',
+    };
+    res.writeHead(200, headers);
+    if (req.method === 'HEAD') return res.end();
+    const stream = createReadStream(file);
+    stream.once('error', () => {
+      if (!res.headersSent) sendFailure(res, 500, 'INTERNAL_ERROR', 'Internal server error');
+      else res.destroy();
+    });
+    res.once('close', () => stream.destroy());
+    stream.pipe(res);
+  }
+
+  async function staticRoute(req, res, rawPath) {
+    if (!root) return sendFailure(res, 404, 'NOT_FOUND', 'Not found');
+    if (!['GET', 'HEAD'].includes(req.method)) return sendFailure(res, 405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+    let decoded;
+    try {
+      decoded = decodeURIComponent(rawPath);
+    } catch {
+      return sendFailure(res, 400, 'BAD_REQUEST', 'Invalid request');
+    }
+    const segments = decoded.split('/').filter(Boolean);
+    if (!decoded.startsWith('/') || decoded.includes('\0') || decoded.includes('\\')
+      || segments.some((segment) => segment === '.' || segment === '..')) {
+      return sendFailure(res, 400, 'BAD_REQUEST', 'Invalid request');
+    }
+    if (segments.some((segment) => segment.startsWith('.') || ['server', 'data'].includes(segment.toLowerCase()))) {
+      return sendFailure(res, 404, 'NOT_FOUND', 'Not found');
+    }
+    const candidate = path.resolve(root, `.${decoded}`);
+    if (!insideRoot(root, candidate)) return sendFailure(res, 400, 'BAD_REQUEST', 'Invalid request');
+    if (segments.length === 0) return serveFile(req, res, path.join(root, 'index.html'), { index: true });
+    try {
+      const info = await stat(candidate);
+      if (info.isFile()) return serveFile(req, res, candidate, { asset: segments[0] === 'assets' });
+    } catch {
+      // Valid client routes fall through to the SPA shell.
+    }
+    return serveFile(req, res, path.join(root, 'index.html'), { index: true });
+  }
+
+  function knownApiPath(pathname) {
+    return new Set([
+      '/api/auth/login', '/api/auth/code/request', '/api/auth/code/verify', '/api/auth/logout',
+      '/api/session', '/api/devices', '/api/devices/refresh', '/api/settings', '/api/notifications/test',
+    ]).has(pathname) || /^\/api\/(devices|cameras)\//.test(pathname);
+  }
+
+  async function requestHandler(req, res) {
+    const { rawPath, hasQuery } = splitTarget(req);
+    try {
+      if (!rawPath.startsWith('/')) throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      if (rawPath === '/healthz' && req.method === 'GET') return sendJson(res, 200, { status: 'ok' });
+      if (rawPath === '/readyz' && req.method === 'GET') {
+        const ready = typeof readiness === 'function' ? await readiness() : readiness;
+        return sendJson(res, ready === true || ready?.ready === true ? 200 : 503, {
+          status: ready === true || ready?.ready === true ? 'ready' : 'not_ready',
+        });
+      }
+      if (hasQuery && (rawPath.startsWith('/api/') || rawPath === '/healthz' || rawPath === '/readyz')) {
+        throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      }
+      if (rawPath.startsWith('/api/')) {
+        if (await authRoute(req, res, rawPath) !== false) return;
+        if (await sessionAndDataRoutes(req, res, rawPath) !== false) return;
+        if (await cameraRoutes(req, res, rawPath) !== false) return;
+        if (knownApiPath(rawPath)) throw apiError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+        throw apiError(404, 'NOT_FOUND', 'Not found');
+      }
+      if ((rawPath === '/healthz' || rawPath === '/readyz') && req.method !== 'GET') {
+        throw apiError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+      }
+      return staticRoute(req, res, rawPath);
+    } catch (error) {
+      if (res.headersSent || res.destroyed || res.writableEnded) {
+        res.destroy();
+        return;
+      }
+      if (error?.apiStatus) {
+        sendFailure(res, error.apiStatus, error.apiCode, error.safeMessage);
+        return;
+      }
+      logSafe(logger, 'warn', 'http.request-failed', { method: req.method, path: rawPath.slice(0, 256) });
+      sendFailure(res, 500, 'INTERNAL_ERROR', 'Internal server error');
+    }
+  }
+
+  const server = http.createServer((req, res) => { void requestHandler(req, res); });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+
+  function rejectUpgrade(socket, status, code, message) {
+    if (socket.destroyed) return;
+    const payload = JSON.stringify({ ok: false, error: { code, message } });
+    socket.end(
+      `HTTP/1.1 ${status} ${http.STATUS_CODES[status] ?? 'Error'}\r\n`
+      + `Content-Type: ${JSON_TYPE}\r\nContent-Length: ${Buffer.byteLength(payload)}\r\nConnection: close\r\n\r\n${payload}`,
+    );
+  }
+
+  function closeSessionSockets(sessionId, code = 1008, reason = 'Session invalid') {
+    for (const ws of [...(wsBySession.get(sessionId) ?? [])]) {
+      try { ws.close(code, reason); } catch { ws.terminate(); }
+    }
+  }
+
+  function closeAllSessionSockets(code = 1008, reason = 'Session invalid') {
+    for (const sessionId of [...wsBySession.keys()]) closeSessionSockets(sessionId, code, reason);
+  }
+
+  function safeWsSend(ws, event) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    let payload;
+    try {
+      payload = JSON.stringify(structuredClone(event));
+      if (Buffer.byteLength(payload) > limits.maxWsEventBytes) return;
+      ws.send(payload, (error) => {
+        if (error) {
+          try { ws.terminate(); } catch { /* already closed */ }
+        }
+      });
+    } catch {
+      logSafe(logger, 'warn', 'websocket.event-dropped');
+    }
+  }
+
+  function attachWebSocket(ws, sessionId) {
+    const group = wsBySession.get(sessionId) ?? new Set();
+    group.add(ws);
+    wsBySession.set(sessionId, group);
+    ws.missedPongs = 0;
+    ws.on('pong', () => { ws.missedPongs = 0; });
+    let cleaned = false;
+    let unsubscribe = () => {};
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      unsubscribe();
+      wsCleanup.delete(ws);
+      group.delete(ws);
+      if (group.size === 0) wsBySession.delete(sessionId);
+    };
+    wsCleanup.set(ws, cleanup);
+    ws.once('close', cleanup);
+    ws.once('error', cleanup);
+    safeWsSend(ws, deviceRuntime.snapshot());
+    let subscribing = true;
+    try {
+      unsubscribe = normalizeRelease(deviceRuntime.subscribe((event) => {
+        if (subscribing && event?.type === 'devices.snapshot') return;
+        if (event?.type === 'session.invalid') {
+          closeSessionSockets(sessionId);
+          return;
+        }
+        safeWsSend(ws, event);
+      }));
+    } catch {
+      ws.close(1011, 'Subscription unavailable');
+    } finally {
+      subscribing = false;
+    }
+  }
+
+  server.on('upgrade', (req, socket, head) => {
+    void (async () => {
+      const { rawPath, hasQuery } = splitTarget(req);
+      if (closed || rawPath !== '/api/ws' || hasQuery || req.method !== 'GET') {
+        rejectUpgrade(socket, 404, 'NOT_FOUND', 'Not found');
+        return;
+      }
+      try {
+        assertOrigin(req, trustProxy);
+        const auth = await requireSession(req);
+        const group = wsBySession.get(auth.sessionId);
+        if ((group?.size ?? 0) >= limits.wsPerSession) {
+          rejectUpgrade(socket, 429, 'WEBSOCKET_LIMIT', 'WebSocket limit reached');
+          return;
+        }
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          wss.emit('connection', ws, req);
+          attachWebSocket(ws, auth.sessionId);
+        });
+      } catch (error) {
+        if (error?.apiStatus) rejectUpgrade(socket, error.apiStatus, error.apiCode, error.safeMessage);
+        else rejectUpgrade(socket, 500, 'INTERNAL_ERROR', 'Internal server error');
+      }
+    })();
+  });
+
+  const pingTimer = timers.setInterval(() => {
+    for (const ws of wss.clients) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (ws.missedPongs >= 2) {
+        try { ws.terminate(); } catch { /* already closing */ }
+        continue;
+      }
+      ws.missedPongs += 1;
+      try { ws.ping(); } catch { ws.terminate(); }
+    }
+  }, 30_000);
+  pingTimer?.unref?.();
+
+  function close() {
+    if (closingPromise) return closingPromise;
+    closingPromise = (async () => {
+      closed = true;
+      timers.clearInterval(pingTimer);
+      loginLimiter.clear();
+      requestCodeLimiter.clear();
+      frameLimiter.clear();
+      for (const cleanup of [...activeCameraClosers]) cleanup();
+      for (const [ws, cleanup] of [...wsCleanup]) {
+        cleanup();
+        try { ws.terminate(); } catch { /* already closed */ }
+      }
+      await new Promise((resolve) => wss.close(() => resolve()));
+      await new Promise((resolve) => {
+        if (!server.listening) return resolve();
+        server.close(() => resolve());
+        for (const socket of sockets) socket.destroy();
+      });
+    })();
+    return closingPromise;
+  }
+
+  return {
+    server,
+    listen(...args) { return server.listen(...args); },
+    close,
+  };
+}
