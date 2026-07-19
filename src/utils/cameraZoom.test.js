@@ -31,3 +31,30 @@ test('does not zoom cameras without a ready image URL', () => {
 
   assert.equal(state.canZoom, false);
 });
+
+test('uses NAS snapshot on the wall and MJPEG in zoom', () => {
+  const stream = {
+    success: true,
+    mode: 'nas-gateway',
+    snapshotUrl: '/frame',
+    url: '/stream',
+  };
+
+  const wallState = buildCameraZoomState({
+    key: 'NAS01',
+    stream,
+    imageState: { status: 'ready' },
+    purpose: 'wall',
+  });
+  const zoomState = buildCameraZoomState({
+    key: 'NAS01',
+    stream,
+    imageState: { status: 'ready' },
+    purpose: 'zoom',
+  });
+
+  assert.equal(wallState.imageUrl, '/frame');
+  assert.equal(wallState.isSnapshotStream, true);
+  assert.equal(zoomState.imageUrl, '/stream');
+  assert.equal(zoomState.isSnapshotStream, false);
+});

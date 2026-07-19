@@ -382,7 +382,7 @@ export function createWebRuntime({
         const result = await request('/api/settings');
         return result.success ? { success: true, settings: clone(result.data) } : result;
       },
-      async save(settings) {
+      async update(settings) {
         const result = await request('/api/settings', { method: 'PUT', body: settings });
         return result.success ? { success: true, settings: clone(result.data) } : result;
       },

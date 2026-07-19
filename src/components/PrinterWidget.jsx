@@ -7,14 +7,17 @@ import MiniMonitor from './monitor/MiniMonitor';
 import CameraWorkspace from './monitor/CameraWorkspace';
 import CameraZoom from './monitor/CameraZoom';
 import SettingsSheet from './monitor/SettingsSheet';
-import { electronApp, electronCamera, electronEvents, electronWindow, isElectronEnvironment } from '../services/electron';
+import { electronEvents } from '../services/electron';
 import {
+  buildCameraStartPayload,
+  buildServerCameraConfig,
   createDefaultCameraConfig,
   getCameraTransport,
   getCameraConfig,
   getCustomCameraUrl,
   getPrinterCameraKey,
   isAutoCameraSupported,
+  mergeCameraConfig,
   saveCameraConfig,
 } from '../services/camera';
 import { buildCameraZoomState } from '../utils/cameraZoom';
@@ -41,11 +44,14 @@ import {
   cameraStartWithTimeout,
   DEFAULT_CAMERA_START_TIMEOUT_MS,
   getCameraRetryDelay,
+  isCameraSourceRetryable,
 } from '../utils/cameraStartup';
 import {
   buildIntegrationSnippet,
+  buildServerNotificationConfig,
   createDefaultNotificationConfig,
   getNotificationConfig,
+  mergeNotificationConfig,
   saveNotificationConfig,
   sendTestNotification,
 } from '../services/notifications';
@@ -450,6 +456,7 @@ async function copyTextToClipboard(text) {
 }
 
 export default function PrinterWidget({
+  runtime,
   printers,
   onUpdateIp,
   onRefreshDevices,
@@ -458,10 +465,17 @@ export default function PrinterWidget({
   deviceSyncError = '',
   onSignOut,
 }) {
+  const capabilities = runtime?.capabilities || {};
+  const isElectron = runtime?.kind === 'electron';
   const [isLocked, setIsLocked] = useState(false);
-  const [viewMode, setViewMode] = useState(() => localStorage.getItem(VIEW_MODE_KEY) || 'full');
-  const [isAlwaysOnTop, setIsAlwaysOnTop] = useState(() => localStorage.getItem(ALWAYS_ON_TOP_KEY) !== 'false');
+  const [viewMode, setViewMode] = useState(() => (
+    capabilities.nativeWindow ? (localStorage.getItem(VIEW_MODE_KEY) || 'full') : 'full'
+  ));
+  const [isAlwaysOnTop, setIsAlwaysOnTop] = useState(() => (
+    capabilities.nativeWindow && localStorage.getItem(ALWAYS_ON_TOP_KEY) !== 'false'
+  ));
   const [windowOpacity, setWindowOpacityState] = useState(() => {
+    if (!capabilities.nativeWindow) return 1;
     const stored = Number(localStorage.getItem(OPACITY_KEY));
     return Number.isFinite(stored) && stored >= 0.5 && stored <= 1 ? stored : 1;
   });
@@ -494,7 +508,7 @@ export default function PrinterWidget({
   const isCompact = viewMode === 'compact';
   const isMini = viewMode === 'mini';
   const zoomPrinter = cameraZoomKey ? printers.find((printer) => getPrinterCameraKey(printer) === cameraZoomKey) : null;
-  const zoomState = cameraZoomKey ? buildCameraZoomState({ key: cameraZoomKey, printer: zoomPrinter, stream: cameraStreams[cameraZoomKey], imageState: cameraImageStates[cameraZoomKey] }) : null;
+  const zoomState = cameraZoomKey ? buildCameraZoomState({ key: cameraZoomKey, printer: zoomPrinter, stream: cameraStreams[cameraZoomKey], imageState: cameraImageStates[cameraZoomKey], purpose: 'zoom' }) : null;
   const isCameraZoomActive = Boolean(zoomState?.canZoom);
   const nativeMode = isCameraZoomActive ? 'zoom' : (cameraOpen ? 'full' : viewMode);
   const activeDialog = ipDialog ? 'ip' : (settingsOpen ? 'settings' : '');
@@ -527,6 +541,7 @@ export default function PrinterWidget({
       customUrl: getCustomCameraUrl(cameraConfig, printer),
       cameraMode: getCameraTransport(printer),
       autoCameraSupported: isAutoCameraSupported(printer),
+      serverManaged: Boolean(capabilities.serverSettings),
     };
   }));
   cameraWallOpenRef.current = cameraOpen;
@@ -570,19 +585,10 @@ export default function PrinterWidget({
     updateCameraState(source.key, initialState);
     try {
       if (stopFirst) {
-        await electronCamera.stop({ serialNumber: source.key });
+        await runtime.camera.stop({ serialNumber: source.key });
       }
       const result = await cameraStartWithTimeout(
-        electronCamera.start({
-          serialNumber: source.key,
-          cloudId: source.cloudId,
-          name: source.name,
-          model: source.model,
-          modelCode: source.modelCode,
-          cameraMode: source.cameraMode,
-          ip: source.ip,
-          accessCode: source.accessCode,
-        }),
+        runtime.camera.start(buildCameraStartPayload(runtime, source)),
         DEFAULT_CAMERA_START_TIMEOUT_MS,
         source.name || source.key,
       );
@@ -644,7 +650,7 @@ export default function PrinterWidget({
   }, []);
 
   useEffect(() => {
-    if (!isElectronEnvironment()) return undefined;
+    if (!capabilities.nativeWindow) return undefined;
     const offLock = electronEvents.onLockStatusChanged((locked) => setIsLocked(locked));
     const offTop = electronEvents.onAlwaysOnTopChanged((flag) => setIsAlwaysOnTop(Boolean(flag)));
     const offOpacity = electronEvents.onWindowOpacityChanged((opacity) => {
@@ -656,25 +662,27 @@ export default function PrinterWidget({
       offTop();
       offOpacity();
     };
-  }, []);
+  }, [capabilities.nativeWindow]);
 
   useEffect(() => {
     if (!['full', 'compact', 'mini'].includes(viewMode)) {
       setViewMode('full');
       return;
     }
-    localStorage.setItem(VIEW_MODE_KEY, viewMode);
-  }, [viewMode]);
+    if (capabilities.nativeWindow) localStorage.setItem(VIEW_MODE_KEY, viewMode);
+  }, [capabilities.nativeWindow, viewMode]);
 
   useEffect(() => {
+    if (!capabilities.nativeWindow) return;
     localStorage.setItem(ALWAYS_ON_TOP_KEY, String(isAlwaysOnTop));
-    electronWindow.setAlwaysOnTop(isAlwaysOnTop);
-  }, [isAlwaysOnTop]);
+    runtime.window.setAlwaysOnTop(isAlwaysOnTop);
+  }, [capabilities.nativeWindow, isAlwaysOnTop, runtime]);
 
   useEffect(() => {
+    if (!capabilities.nativeWindow) return;
     localStorage.setItem(OPACITY_KEY, String(windowOpacity));
-    electronWindow.setOpacity(windowOpacity);
-  }, [windowOpacity]);
+    runtime.window.setOpacity(windowOpacity);
+  }, [capabilities.nativeWindow, runtime, windowOpacity]);
 
   useEffect(() => {
     if (!isMini || activeMiniPrinters.length <= 1) {
@@ -690,15 +698,31 @@ export default function PrinterWidget({
   }, [isMini, activeMiniPrinters.length]);
 
   useEffect(() => {
-    setNotificationConfig(getNotificationConfig());
-    setCameraConfig(getCameraConfig());
-  }, []);
-
-  useEffect(() => {
-    if (!isElectronEnvironment()) return undefined;
+    if (!capabilities.serverSettings) {
+      setNotificationConfig(getNotificationConfig());
+      setCameraConfig(getCameraConfig());
+      return undefined;
+    }
 
     let cancelled = false;
-    electronApp.getStartupEnabled()
+    runtime.settings.get()
+      .then((result) => {
+        if (cancelled) return;
+        if (!result?.success) throw new Error(result?.error || '读取设置失败');
+        setCameraConfig((current) => mergeCameraConfig(current, result.settings?.camera));
+        setNotificationConfig((current) => mergeNotificationConfig(current, result.settings?.notifications));
+      })
+      .catch((error) => {
+        if (!cancelled) setNotificationFeedback(error?.message || '读取设置失败');
+      });
+    return () => { cancelled = true; };
+  }, [capabilities.serverSettings, runtime]);
+
+  useEffect(() => {
+    if (!capabilities.startup) return undefined;
+
+    let cancelled = false;
+    runtime.startup.getStartupEnabled()
       .then((result) => {
         if (!cancelled && result?.success) {
           setStartupEnabledState(Boolean(result.enabled));
@@ -711,7 +735,7 @@ export default function PrinterWidget({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [capabilities.startup, runtime]);
 
   useEffect(() => {
     if (cameraConfig.autoOpen && printers.length > 0) {
@@ -845,7 +869,7 @@ export default function PrinterWidget({
   }, [activeDialog]);
 
   useEffect(() => {
-    if (!cameraOpen || !isElectronEnvironment()) {
+    if (!cameraOpen) {
       return undefined;
     }
 
@@ -902,10 +926,9 @@ export default function PrinterWidget({
     cameraRetryAttemptsRef.current = {};
     setCameraStreams({});
     setCameraImageStates({});
-    if (!isElectronEnvironment()) return undefined;
-    electronCamera.stopAll().catch(() => {});
+    runtime.camera.stopAll().catch(() => {});
     return undefined;
-  }, [cameraOpen]);
+  }, [cameraOpen, runtime]);
 
   useEffect(() => {
     if (!cameraOpen) return undefined;
@@ -942,12 +965,7 @@ export default function PrinterWidget({
       sources = [];
     }
     const retryableKeys = new Set(sources
-      .filter((source) => (
-        !source.customUrl
-        && source.ip
-        && source.accessCode
-        && source.autoCameraSupported
-      ))
+      .filter(isCameraSourceRetryable)
       .map((source) => source.key));
 
     Object.entries(cameraImageStates).forEach(([key, imageState]) => {
@@ -963,28 +981,29 @@ export default function PrinterWidget({
   }, [cameraImageStates, cameraOpen, cameraSourceKey, clearCameraRetryTimer, scheduleCameraRetry]);
 
   useEffect(() => {
-    if (!isElectronEnvironment()) return undefined;
+    if (!capabilities.nativeWindow) return undefined;
     const frameId = requestAnimationFrame(() => {
       const sizes = readWindowSizeMap(localStorage.getItem(WINDOW_SIZE_STORAGE_KEY));
       const config = getWindowModeConfig(nativeMode);
       const size = normalizeSavedWindowSize(nativeMode, sizes[nativeMode]) || config.defaultSize;
-      electronWindow.setModeSize({
+      runtime.window.setModeSize({
         ...size,
         minWidth: config.minSize.width,
         minHeight: config.minSize.height,
       });
     });
     return () => cancelAnimationFrame(frameId);
-  }, [nativeMode]);
+  }, [capabilities.nativeWindow, nativeMode, runtime]);
 
   useEffect(() => {
+    if (!capabilities.nativeWindow) return undefined;
     const offBoundsChanged = electronEvents.onWindowBoundsChanged(persistWindowBounds);
     const offBoundsSaveRequest = electronEvents.onWindowBoundsSaveRequest(persistWindowBounds);
     return () => {
       offBoundsChanged();
       offBoundsSaveRequest();
     };
-  }, [persistWindowBounds]);
+  }, [capabilities.nativeWindow, persistWindowBounds]);
 
   const openIpDialog = (printer) => {
     setIpDialog({ serial: printer.dev_id, name: printer.name, value: printer.ip || '' });
@@ -1022,7 +1041,7 @@ export default function PrinterWidget({
     setTestingTargetId(target.id);
     setNotificationFeedback('');
     try {
-      const result = await sendTestNotification(target);
+      const result = await sendTestNotification(target, runtime);
       const failed = result?.results?.find((item) => !item.success);
       if (failed) {
         setNotificationFeedback(`${target.name} 测试失败：${failed.error || failed.status || '未知错误'}`);
@@ -1056,8 +1075,24 @@ export default function PrinterWidget({
       cameraConfig: draft.cameraConfig || createDefaultCameraConfig(),
       notificationConfig: draft.notificationConfig || createDefaultNotificationConfig(),
     };
+
+    if (capabilities.serverSettings) {
+      const result = await runtime.settings.update({
+        camera: buildServerCameraConfig(next.cameraConfig),
+        notifications: buildServerNotificationConfig(next.notificationConfig),
+      });
+      if (!result?.success) throw new Error(result?.error || '保存设置失败');
+      setCameraConfig((current) => mergeCameraConfig(current, result.settings?.camera || next.cameraConfig));
+      setNotificationConfig((current) => mergeNotificationConfig(
+        current,
+        result.settings?.notifications || next.notificationConfig,
+      ));
+      if (next.cameraConfig.autoOpen) openCameraWorkspace();
+      return;
+    }
+
     const setStartup = async (enabled) => {
-      const result = await electronApp.setStartupEnabled({ enabled });
+      const result = await runtime.startup.setStartupEnabled({ enabled });
       if (!result?.success) throw new Error(result?.error || '设置开机启动失败');
       setStartupEnabledState(Boolean(result.enabled));
     };
@@ -1092,7 +1127,7 @@ export default function PrinterWidget({
   const toggleMousePassthrough = () => {
     const nextLocked = !isLocked;
     setIsLocked(nextLocked);
-    electronWindow.setIgnoreMouseEvents(nextLocked);
+    runtime.window.setIgnoreMouseEvents(nextLocked);
   };
 
   const changeViewMode = (mode) => {
@@ -1121,7 +1156,7 @@ export default function PrinterWidget({
     const savedSizes = readWindowSizeMap(localStorage.getItem(WINDOW_SIZE_STORAGE_KEY));
     delete savedSizes[mode];
     localStorage.setItem(WINDOW_SIZE_STORAGE_KEY, JSON.stringify(savedSizes));
-    electronWindow.setModeSize({
+    runtime.window.setModeSize({
       ...defaultSize,
       minWidth: minSize.width,
       minHeight: minSize.height,
@@ -1176,7 +1211,7 @@ export default function PrinterWidget({
       {isCameraZoomActive ? (
         <CameraZoom key={cameraZoomKey} zoomState={zoomState} imageKey={cameraZoomKey} imageState={cameraImageStates[cameraZoomKey]} customUrl={zoomCustomUrl} onClose={closeCameraZoom} onImageStateChange={setCameraImageStates} />
       ) : (
-        <CameraWorkspace printers={displayPrinters} streams={cameraStreams} imageStates={cameraImageStates} cameraConfig={cameraConfig} onRetry={retryCamera} onZoom={openCameraZoom} onImageStateChange={setCameraImageStates} />
+        <CameraWorkspace printers={displayPrinters} streams={cameraStreams} imageStates={cameraImageStates} cameraConfig={cameraConfig} allowCustomUrls={isElectron} onRetry={retryCamera} onZoom={openCameraZoom} onImageStateChange={setCameraImageStates} />
       )}
     </div>
   );
@@ -1193,6 +1228,7 @@ export default function PrinterWidget({
       syncCopy={deviceSyncCopy}
       isAlwaysOnTop={isAlwaysOnTop}
       isLocked={isLocked}
+      capabilities={capabilities}
       onTabChange={changeWorkspaceTab}
       onRefresh={() => onRefreshDevices?.()}
       onToggleTop={toggleAlwaysOnTop}
@@ -1200,7 +1236,7 @@ export default function PrinterWidget({
       onChangeMode={changeViewMode}
       onToggleLock={toggleMousePassthrough}
       onResetSize={resetCurrentWindowSize}
-      onQuit={() => electronWindow.quit()}
+      onQuit={() => runtime.window?.quit()}
     >
       <div
         className="monitor-legacy-surface"
@@ -1244,6 +1280,7 @@ export default function PrinterWidget({
           dialogRef={settingsDialogRef}
           printers={displayPrinters}
           baseline={{ isAlwaysOnTop, windowOpacity, startupEnabled, cameraConfig, notificationConfig }}
+          capabilities={capabilities}
           testingTargetId={testingTargetId}
           externalFeedback={notificationFeedback || startupFeedback || cameraFeedback}
           onClose={() => setSettingsOpen(false)}

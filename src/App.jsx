@@ -1098,6 +1098,7 @@ function App() {
   return (
     <>
       <PrinterWidget
+        runtime={runtime}
         printers={printers}
         onUpdateIp={handleUpdateIp}
         onRefreshDevices={() => refreshDeviceInventory({ includeLan: true })}

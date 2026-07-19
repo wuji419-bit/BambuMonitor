@@ -39,7 +39,7 @@ export default function CameraZoom({ zoomState, imageKey, imageState, customUrl,
   }, []);
   const fit = fitState.imageKey === imageKey ? fitState.fit : 'contain';
   if (!zoomState?.canZoom) return null;
-  return <section ref={dialogRef} className="camera-zoom" role="dialog" aria-modal="true" aria-label={`${zoomState.title} 放大预览`} tabIndex={-1}>
+  return <section ref={dialogRef} className="camera-zoom" data-camera-purpose="zoom" role="dialog" aria-modal="true" aria-label={`${zoomState.title} 放大预览`} tabIndex={-1}>
     <header className="camera-zoom__titlebar">
       <div className="camera-zoom__identity"><strong>{zoomState.title}</strong><span>{zoomState.ip ? `IP ${zoomState.ip}` : '实时摄像头预览'}</span></div>
       <div className="camera-zoom__actions">

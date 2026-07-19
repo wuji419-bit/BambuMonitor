@@ -175,7 +175,7 @@ export function createElectronRuntime() {
     camera: electronCamera,
     settings: {
       get() { return unsupported(); },
-      save() { return unsupported(); },
+      update() { return unsupported(); },
     },
     notifications: electronNotifications,
     events: {

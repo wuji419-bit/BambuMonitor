@@ -7,6 +7,34 @@ export function createDefaultCameraConfig() {
   };
 }
 
+export function mergeCameraConfig(current = createDefaultCameraConfig(), incoming = {}) {
+  return {
+    autoOpen: Boolean(incoming?.autoOpen ?? current?.autoOpen),
+    customUrls: incoming?.customUrls && typeof incoming.customUrls === 'object'
+      ? { ...incoming.customUrls }
+      : { ...(current?.customUrls || {}) },
+  };
+}
+
+export function buildServerCameraConfig(config = {}) {
+  return mergeCameraConfig(createDefaultCameraConfig(), config);
+}
+
+export function buildCameraStartPayload(runtime, source = {}) {
+  const serialNumber = source.key || source.serialNumber || '';
+  if (runtime?.kind !== 'electron') return { serialNumber };
+  return {
+    serialNumber,
+    cloudId: source.cloudId,
+    name: source.name,
+    model: source.model,
+    modelCode: source.modelCode,
+    cameraMode: source.cameraMode,
+    ip: source.ip,
+    accessCode: source.accessCode,
+  };
+}
+
 export function getCameraConfig() {
   if (typeof localStorage === 'undefined') return createDefaultCameraConfig();
 

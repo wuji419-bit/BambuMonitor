@@ -57,6 +57,13 @@
   -webkit-app-region: no-drag;
 }
 
+.monitor-shell--web .monitor-drag-region,
+.monitor-shell--web .monitor-content .legacy-window-drag-region,
+.monitor-shell--web .monitor-content .legacy-window-drag-region * {
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+
 .monitor-identity {
   min-width: 0;
   display: grid;
@@ -650,6 +657,7 @@
   z-index: 400;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   overflow: auto;
   border-radius: 0;
   pointer-events: auto;
@@ -669,6 +677,7 @@
   width: 360px;
   max-width: 100%;
   height: 100%;
+  max-height: 100dvh;
   min-width: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -776,9 +785,10 @@
 @media (min-width: 520px) { .camera-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (min-width: 780px) { .camera-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 
-.camera-zoom { position: fixed; z-index: 350; inset: 0; display: grid; grid-template-rows: 48px minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; background: #070c13; -webkit-app-region: no-drag; }
+.camera-zoom { position: fixed; z-index: 350; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: grid; grid-template-rows: 48px minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; background: #070c13; -webkit-app-region: no-drag; }
 .monitor-content .camera-zoom__titlebar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; min-width: 0; padding: 0 8px 0 14px; border-bottom: 1px solid var(--line); background: #0d141e; cursor: move; -webkit-app-region: drag; }
 .monitor-shell.is-locked .monitor-content .camera-zoom__titlebar { cursor: default; -webkit-app-region: no-drag; }
+.monitor-shell--web .monitor-content .camera-zoom__titlebar { cursor: default; -webkit-app-region: no-drag; }
 .camera-zoom__identity { min-width: 0; pointer-events: none; }
 .camera-zoom__identity strong, .camera-zoom__identity span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .camera-zoom__identity strong { color: var(--text); font-size: 13px; }
@@ -814,4 +824,12 @@
     min-width: 68px;
     padding: 0 8px;
   }
+}
+
+@media (max-width: 519px) {
+  .camera-grid { scrollbar-gutter: auto; }
+  .camera-card__footer { padding-inline: 9px; }
+  .settings-sheet__header,
+  .settings-sheet__footer { padding-inline: 12px; }
+  .settings-section { padding-inline: 12px; }
 }

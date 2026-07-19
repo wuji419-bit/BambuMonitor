@@ -53,6 +53,35 @@ export function createDefaultNotificationConfig() {
   };
 }
 
+export function mergeNotificationConfig(
+  current = createDefaultNotificationConfig(),
+  incoming = {},
+) {
+  const currentTargets = Array.isArray(current?.targets) ? current.targets : [];
+  const incomingTargets = Array.isArray(incoming?.targets) ? incoming.targets : [];
+  const targetIds = new Set([
+    ...currentTargets.map((target) => target?.id),
+    ...incomingTargets.map((target) => target?.id),
+  ].filter(Boolean));
+  const targets = [...targetIds].map((id) => ({
+    ...(currentTargets.find((target) => target?.id === id) || {}),
+    ...(incomingTargets.find((target) => target?.id === id) || {}),
+  }));
+
+  return {
+    enabled: Boolean(incoming?.enabled ?? current?.enabled),
+    cooldownMs: Number(current?.cooldownMs) || DEFAULT_COOLDOWN_MS,
+    targets,
+  };
+}
+
+export function buildServerNotificationConfig(config = {}) {
+  return {
+    enabled: Boolean(config?.enabled),
+    targets: Array.isArray(config?.targets) ? config.targets.map((target) => ({ ...target })) : [],
+  };
+}
+
 export function getNotificationConfig() {
   if (typeof localStorage === 'undefined') {
     return createDefaultNotificationConfig();
@@ -280,11 +309,13 @@ export async function dispatchPrinterNotification(eventType, printer, options = 
   return electronNotifications.send({ targets, payload });
 }
 
-export async function sendTestNotification(target) {
-  if (!isElectronEnvironment()) return { skipped: true, reason: 'not-electron' };
+export async function sendTestNotification(target, runtime) {
+  if (runtime?.kind === 'web') return runtime.notifications.send();
+  const notificationRuntime = runtime?.notifications || electronNotifications;
+  if (!runtime && !isElectronEnvironment()) return { skipped: true, reason: 'not-electron' };
   if (!target?.url) throw new Error('请先填写 Webhook URL');
 
-  return electronNotifications.send({
+  return notificationRuntime.send({
     targets: [{
       id: target.id,
       name: target.name,

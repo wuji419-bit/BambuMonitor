@@ -1,7 +1,8 @@
 import { isChamberSnapshotStream } from './cameraFrame.js';
 
-export function buildCameraZoomState({ key, printer, stream, imageState } = {}) {
-  const isSnapshotStream = isChamberSnapshotStream(stream);
+export function buildCameraZoomState({ key, printer, stream, imageState, purpose = 'zoom' } = {}) {
+  const isNasWallSnapshot = stream?.mode === 'nas-gateway' && purpose === 'wall';
+  const isSnapshotStream = isNasWallSnapshot || isChamberSnapshotStream(stream);
   const imageUrl = isSnapshotStream ? stream?.snapshotUrl : stream?.url;
   const canZoom = Boolean(key && stream?.success && imageUrl && imageState?.status !== 'error');
 

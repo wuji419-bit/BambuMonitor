@@ -201,7 +201,7 @@ test('device, settings, and notification mutations preserve exact payloads and a
     success: true, device: updated,
   });
   assert.deepEqual(await runtime.settings.get(), { success: true, settings: { camera: { enabled: true } } });
-  assert.deepEqual(await runtime.settings.save({ camera: { enabled: false } }), {
+  assert.deepEqual(await runtime.settings.update({ camera: { enabled: false } }), {
     success: true, settings: { camera: { enabled: false } },
   });
   assert.deepEqual(await runtime.notifications.send(), { success: true, sent: true });

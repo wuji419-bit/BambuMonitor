@@ -5,9 +5,27 @@ export function getCameraRetryDelay(attempt) {
   return CAMERA_RETRY_DELAYS_MS[Number(attempt)] ?? null;
 }
 
+export function isCameraSourceRetryable(source = {}) {
+  return Boolean(source.serverManaged || (
+    !source.customUrl
+    && source.ip
+    && source.accessCode
+    && source.autoCameraSupported
+  ));
+}
+
 export function buildInitialCameraState(source = {}) {
   const key = source.key;
   if (!key) return null;
+
+  if (source.serverManaged) {
+    return {
+      key,
+      shouldStart: true,
+      stream: { success: false, pending: true },
+      imageState: { status: 'loading' },
+    };
+  }
 
   if (source.customUrl) {
     return {

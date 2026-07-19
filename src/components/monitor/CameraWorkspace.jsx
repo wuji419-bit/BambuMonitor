@@ -39,13 +39,29 @@ export function ChamberSnapshotCanvas({ snapshotUrl, imageKey, alt, isReady, set
   useEffect(() => {
     if (!snapshotUrl || !imageKey) return undefined;
     let stopped = false; let frame = 0; let timer = 0; let activeController = null;
+    let cardVisible = typeof IntersectionObserver !== 'function';
+    let documentVisible = document.visibilityState !== 'hidden';
     const markReady = () => setCameraImageStates((prev) => prev[imageKey]?.status === 'ready' ? prev : ({ ...prev, [imageKey]: { status: 'ready' } }));
     const markWaiting = () => setCameraImageStates((prev) => prev[imageKey]?.status === 'ready' ? prev : ({ ...prev, [imageKey]: { status: 'loading', message: '正在等待摄像头画面...' } }));
+    const canPoll = () => !stopped && cardVisible && documentVisible;
+    const suspend = () => {
+      window.clearTimeout(timer);
+      timer = 0;
+      activeController?.abort();
+      activeController = null;
+    };
+    const schedule = (delay = 0) => {
+      if (!canPoll() || timer || activeController) return;
+      timer = window.setTimeout(paintNextFrame, delay);
+    };
     const paintNextFrame = async () => {
-      activeController = new AbortController();
+      timer = 0;
+      if (!canPoll()) return;
+      const controller = new AbortController();
+      activeController = controller;
       const requestUrl = buildCameraFrameUrl(snapshotUrl, frame += 1);
       try {
-        const response = await fetch(requestUrl, { cache: 'no-store', headers: { accept: 'image/jpeg' }, signal: activeController.signal });
+        const response = await fetch(requestUrl, { cache: 'no-store', headers: { accept: 'image/jpeg' }, signal: controller.signal });
         if (!response.ok) throw new Error(`camera frame request failed: ${response.status}`);
         const blob = await response.blob();
         const image = await decodeCameraFrame(blob);
@@ -54,12 +70,31 @@ export function ChamberSnapshotCanvas({ snapshotUrl, imageKey, alt, isReady, set
       } catch (error) {
         if (!stopped && error?.name !== 'AbortError') markWaiting();
       } finally {
-        activeController = null;
-        if (!stopped) timer = window.setTimeout(paintNextFrame, 700);
+        if (activeController === controller) activeController = null;
+        schedule(700);
       }
     };
-    paintNextFrame();
-    return () => { stopped = true; window.clearTimeout(timer); if (activeController) activeController.abort(); };
+    const handleVisibilityChange = () => {
+      documentVisible = document.visibilityState !== 'hidden';
+      if (documentVisible) schedule();
+      else suspend();
+    };
+    const observer = typeof IntersectionObserver === 'function'
+      ? new IntersectionObserver(([entry]) => {
+        cardVisible = Boolean(entry?.isIntersecting);
+        if (cardVisible) schedule();
+        else suspend();
+      })
+      : null;
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    if (canvasRef.current) observer?.observe(canvasRef.current);
+    schedule();
+    return () => {
+      stopped = true;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      observer?.disconnect();
+      suspend();
+    };
   }, [imageKey, setCameraImageStates, snapshotUrl]);
   return <canvas ref={canvasRef} role="img" aria-label={alt} className="camera-media__image" style={{ opacity: isReady ? 1 : 0.35 }} />;
 }
@@ -71,13 +106,13 @@ export function CameraMedia({ zoomState, imageKey, title, imageState, customUrl,
   return <img className="camera-media__image" src={zoomState.imageUrl} alt={`${title} 摄像头`} style={{ objectFit: fit, opacity: ready ? 1 : 0.35 }} onLoad={() => onImageStateChange((prev) => ({ ...prev, [imageKey]: { status: 'ready' } }))} onError={() => onImageStateChange((prev) => ({ ...prev, [imageKey]: { status: 'error', message: customUrl ? '自定义摄像头地址无法显示' : '摄像头暂时无法打开' } }))} />;
 }
 
-export default function CameraWorkspace({ printers = [], streams = {}, imageStates = {}, cameraConfig = {}, onRetry, onZoom, onImageStateChange }) {
+export default function CameraWorkspace({ printers = [], streams = {}, imageStates = {}, cameraConfig = {}, allowCustomUrls = true, onRetry, onZoom, onImageStateChange }) {
   const isPublicCapture = typeof window !== 'undefined' && isPublicCaptureSearch(window.location.search);
   return <div className="camera-grid" data-testid="camera-grid" role="region" aria-label="摄像头列表" tabIndex={-1}>
     {!printers.length ? <div className="camera-empty" role="status">正在等待打印机列表...</div> : null}
     {printers.map((printer) => {
       const key = getPrinterCameraKey(printer); const stream = streams[key]; const state = imageStates[key];
-      const customUrl = getCustomCameraUrl(cameraConfig, printer); const zoomState = buildCameraZoomState({ key, printer, stream, imageState: state });
+      const customUrl = allowCustomUrls ? getCustomCameraUrl(cameraConfig, printer) : ''; const zoomState = buildCameraZoomState({ key, printer, stream, imageState: state, purpose: 'wall' });
       const ready = state?.status === 'ready';
       const presentation = buildCameraCardPresentation({ imageState: state, stream, customUrl, hasIp: Boolean(printer.ip) });
       const note = cameraCompatibilityNote(printer);

@@ -21,6 +21,7 @@ export default function MonitorShell({
   syncCopy,
   isAlwaysOnTop,
   isLocked,
+  capabilities = {},
   onTabChange,
   onRefresh,
   onToggleTop,
@@ -91,17 +92,23 @@ export default function MonitorShell({
   };
 
   const menuItems = [
-    { label: '紧凑模式', icon: <Rows3 size={14} aria-hidden="true" />, action: () => onChangeMode('compact') },
-    { label: '超迷你模式', icon: <Minimize2 size={14} aria-hidden="true" />, action: () => onChangeMode('mini') },
-    { label: isLocked ? '解除穿透' : '锁定穿透', icon: <Lock size={14} aria-hidden="true" />, action: onToggleLock },
+    ...(capabilities.nativeWindow ? [
+      { label: '紧凑模式', icon: <Rows3 size={14} aria-hidden="true" />, action: () => onChangeMode('compact') },
+      { label: '超迷你模式', icon: <Minimize2 size={14} aria-hidden="true" />, action: () => onChangeMode('mini') },
+    ] : []),
+    ...(capabilities.mousePassthrough ? [
+      { label: isLocked ? '解除穿透' : '锁定穿透', icon: <Lock size={14} aria-hidden="true" />, action: onToggleLock },
+    ] : []),
     { label: '设置', icon: <Settings size={14} aria-hidden="true" />, action: onOpenSettings },
-    { label: '重置窗口大小', icon: <RotateCcw size={14} aria-hidden="true" />, action: onResetSize },
-    { label: '退出', icon: <Power size={14} aria-hidden="true" />, action: onQuit, danger: true },
+    ...(capabilities.nativeWindow ? [
+      { label: '重置窗口大小', icon: <RotateCcw size={14} aria-hidden="true" />, action: onResetSize },
+      { label: '退出', icon: <Power size={14} aria-hidden="true" />, action: onQuit, danger: true },
+    ] : []),
   ];
 
   return (
     <main
-      className={`monitor-shell monitor-shell--${mode}${isLocked ? ' is-locked' : ''}`}
+      className={`monitor-shell monitor-shell--${mode}${capabilities.nativeWindow ? '' : ' monitor-shell--web'}${isLocked ? ' is-locked' : ''}`}
       data-testid="monitor-shell"
     >
       {mode !== 'mini' ? <header className="monitor-appbar">
@@ -116,7 +123,7 @@ export default function MonitorShell({
           <button type="button" aria-label="同步设备" title="同步设备" onClick={onRefresh}>
             <RefreshCw size={15} aria-hidden="true" />
           </button>
-          <button
+          {capabilities.nativeWindow ? <button
             type="button"
             className={isAlwaysOnTop ? 'is-active' : ''}
             aria-label={isAlwaysOnTop ? '取消置顶' : '窗口置顶'}
@@ -127,7 +134,7 @@ export default function MonitorShell({
             {isAlwaysOnTop
               ? <PinOff size={15} aria-hidden="true" />
               : <Pin size={15} aria-hidden="true" />}
-          </button>
+          </button> : null}
 
           <div className="monitor-menu-area" ref={menuAreaRef}>
             <button
@@ -197,7 +204,7 @@ export default function MonitorShell({
       ) : null}
 
       <section className="monitor-content">{children}</section>
-      <span className="monitor-resize-grip" aria-hidden="true" />
+      {capabilities.nativeWindow ? <span className="monitor-resize-grip" aria-hidden="true" /> : null}
     </main>
   );
 }
