@@ -11,6 +11,25 @@ function jsonResponse(body, status = 200) {
   };
 }
 
+function malformedResponse(status, body = '<html>private upstream failure</html>') {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    body,
+    async json() { throw new SyntaxError('Unexpected token <'); },
+  };
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 function createFetchQueue(responses) {
   const calls = [];
   const fetchImpl = async (url, options = {}) => {
@@ -361,5 +380,149 @@ test('websocket drops multibyte events above the byte bound before dispatch', as
     devices: [{ dev_id: 'A', name: '中'.repeat(100_000) }],
   });
   assert.equal(snapshots.length, 1, 'only the small HTTP fallback is delivered');
+  runtime.events.close();
+});
+
+test('late old-session 401 cannot invalidate a newer login or its CSRF and socket', async () => {
+  const oldRefresh = createDeferred();
+  const calls = [];
+  let loginCount = 0;
+  let refreshCount = 0;
+  const runtime = createRuntime(async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/auth/login') {
+      loginCount += 1;
+      return jsonResponse({
+        ok: true,
+        data: { csrfToken: loginCount === 1 ? 'csrf-old' : 'csrf-new', accountMasked: 'a***' },
+      });
+    }
+    if (url === '/api/devices') {
+      return jsonResponse({ ok: true, data: { type: 'devices.snapshot', devices: [] } });
+    }
+    if (url === '/api/devices/refresh') {
+      refreshCount += 1;
+      if (refreshCount === 1) return oldRefresh.promise;
+      return jsonResponse({ ok: true, data: { type: 'devices.snapshot', devices: [] } });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  let invalidations = 0;
+  runtime.events.onSessionInvalid(() => { invalidations += 1; });
+
+  await runtime.auth.cloudLogin({ account: 'old', password: 'old-password' });
+  const staleRequest = runtime.devices.refresh();
+  await runtime.auth.cloudLogin({ account: 'new', password: 'new-password' });
+  const currentSocket = FakeWebSocket.instances.at(-1);
+  oldRefresh.resolve(malformedResponse(401));
+
+  assert.deepEqual(await staleRequest, {
+    success: false, error: '登录状态已失效', code: 'UNAUTHORIZED', status: 401,
+  });
+  assert.equal(invalidations, 0);
+  assert.equal(currentSocket.closeCalls.length, 0);
+  assert.equal((await runtime.devices.refresh()).success, true);
+  const refreshCalls = calls.filter(({ url }) => url === '/api/devices/refresh');
+  assert.equal(refreshCalls[0].options.headers['X-CSRF-Token'], 'csrf-old');
+  assert.equal(refreshCalls[1].options.headers['X-CSRF-Token'], 'csrf-new');
+  runtime.events.close();
+});
+
+test('malformed or empty current-session 401 preserves HTTP status and invalidates once', async () => {
+  for (const body of ['', '<html>do not echo this body</html>']) {
+    const queue = createFetchQueue([
+      jsonResponse({ ok: true, data: { csrfToken: 'csrf', accountMasked: 'a***' } }),
+      jsonResponse({ ok: true, data: { type: 'devices.snapshot', devices: [] } }),
+      malformedResponse(401, body),
+    ]);
+    const runtime = createRuntime(queue.fetchImpl);
+    let invalidations = 0;
+    runtime.events.onSessionInvalid(() => { invalidations += 1; });
+    await runtime.auth.cloudLogin({ account: 'a', password: 'private-password' });
+
+    const result = await runtime.auth.getDeviceList();
+    assert.deepEqual(result, {
+      success: false, error: '登录状态已失效', code: 'UNAUTHORIZED', status: 401,
+    });
+    assert.equal(invalidations, 1);
+    if (body) assert.equal(JSON.stringify(result).includes(body), false);
+    runtime.events.close();
+  }
+});
+
+test('non-JSON success and error responses return safe protocol errors without body disclosure', async () => {
+  const queue = createFetchQueue([
+    malformedResponse(200, '<html>secret success body</html>'),
+    malformedResponse(502, '<html>private gateway page</html>'),
+  ]);
+  const runtime = createRuntime(queue.fetchImpl);
+
+  assert.deepEqual(await runtime.auth.requestVerifyCode({ account: 'a@example.com' }), {
+    success: false, error: '服务器响应格式无效', code: 'INVALID_RESPONSE', status: 200,
+  });
+  assert.deepEqual(await runtime.auth.requestVerifyCode({ account: 'a@example.com' }), {
+    success: false, error: '请求失败', code: 'HTTP_ERROR', status: 502,
+  });
+  runtime.events.close();
+});
+
+test('delayed session restore cannot overwrite a newer successful manual login', async () => {
+  const restore = createDeferred();
+  const calls = [];
+  const runtime = createRuntime(async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/session') return restore.promise;
+    if (url === '/api/auth/login') {
+      return jsonResponse({ ok: true, data: { csrfToken: 'csrf-manual', accountMasked: 'm***' } });
+    }
+    if (url === '/api/devices/refresh') {
+      return jsonResponse({ ok: true, data: { type: 'devices.snapshot', devices: [] } });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  const staleRestore = runtime.auth.getSavedSession();
+  assert.equal((await runtime.auth.cloudLogin({ account: 'manual', password: 'password' })).success, true);
+  restore.resolve(jsonResponse({
+    ok: true,
+    data: { authenticated: true, accountMasked: 'o***', csrfToken: 'csrf-restore' },
+  }));
+
+  assert.deepEqual(await staleRestore, {
+    success: false, stale: true, code: 'STALE_AUTH_ATTEMPT', status: 0,
+  });
+  await runtime.devices.refresh();
+  const refreshCall = calls.find(({ url }) => url === '/api/devices/refresh');
+  assert.equal(refreshCall.options.headers['X-CSRF-Token'], 'csrf-manual');
+  runtime.events.close();
+});
+
+test('latest manual login wins when successful login responses complete out of order', async () => {
+  const first = createDeferred();
+  const second = createDeferred();
+  const calls = [];
+  let loginCount = 0;
+  const runtime = createRuntime(async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/auth/login') {
+      loginCount += 1;
+      return loginCount === 1 ? first.promise : second.promise;
+    }
+    if (url === '/api/devices/refresh') {
+      return jsonResponse({ ok: true, data: { type: 'devices.snapshot', devices: [] } });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  const older = runtime.auth.cloudLogin({ account: 'older', password: 'older-password' });
+  const newer = runtime.auth.cloudLogin({ account: 'newer', password: 'newer-password' });
+  second.resolve(jsonResponse({ ok: true, data: { csrfToken: 'csrf-newer', accountMasked: 'n***' } }));
+  assert.equal((await newer).success, true);
+  first.resolve(jsonResponse({ ok: true, data: { csrfToken: 'csrf-older', accountMasked: 'o***' } }));
+  assert.equal((await older).stale, true);
+
+  await runtime.devices.refresh();
+  const refreshCall = calls.find(({ url }) => url === '/api/devices/refresh');
+  assert.equal(refreshCall.options.headers['X-CSRF-Token'], 'csrf-newer');
   runtime.events.close();
 });

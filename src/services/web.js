@@ -17,6 +17,21 @@ function safeApiError(body, status) {
   return { success: false, error, code, status };
 }
 
+function safeHttpError(status) {
+  if (status === 401) {
+    return { success: false, error: '登录状态已失效', code: 'UNAUTHORIZED', status };
+  }
+  return { success: false, error: '请求失败', code: 'HTTP_ERROR', status };
+}
+
+function protocolError(status) {
+  return { success: false, error: '服务器响应格式无效', code: 'INVALID_RESPONSE', status };
+}
+
+function staleAuthAttempt() {
+  return { success: false, stale: true, code: 'STALE_AUTH_ATTEMPT', status: 0 };
+}
+
 function adaptSnapshot(data) {
   return {
     success: true,
@@ -64,6 +79,8 @@ export function createWebRuntime({
   let csrfToken = '';
   let authenticated = false;
   let invalidEmitted = false;
+  let sessionGeneration = 0;
+  let authAttemptGeneration = 0;
   let eventGeneration = 0;
   let socket = null;
   let reconnectTimer = null;
@@ -104,28 +121,32 @@ export function createWebRuntime({
     }
   }
 
-  function invalidateSession() {
+  function invalidateSession(expectedGeneration = sessionGeneration) {
+    if (expectedGeneration !== sessionGeneration) return false;
+    sessionGeneration += 1;
     csrfToken = '';
     authenticated = false;
     stopEventGeneration();
-    if (invalidEmitted) return;
+    if (invalidEmitted) return true;
     invalidEmitted = true;
     emit('session.invalid', { type: 'session.invalid' });
+    return true;
   }
 
   async function request(path, { method = 'GET', body } = {}) {
     if (typeof fetchImpl !== 'function') {
       return { success: false, error: '网络请求不可用', code: 'NETWORK_UNAVAILABLE', status: 0 };
     }
+    const requestSessionGeneration = sessionGeneration;
+    const requestCsrfToken = csrfToken;
     const headers = { Accept: 'application/json' };
     const mutation = ['POST', 'PATCH', 'PUT'].includes(method);
     if (mutation) {
       headers['Content-Type'] = 'application/json';
-      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+      if (requestCsrfToken) headers['X-CSRF-Token'] = requestCsrfToken;
     }
 
     let response;
-    let payload;
     try {
       response = await fetchImpl(path, {
         method,
@@ -133,12 +154,19 @@ export function createWebRuntime({
         headers,
         ...(mutation ? { body: JSON.stringify(body ?? {}) } : {}),
       });
-      payload = await response.json();
     } catch {
       return { success: false, error: '网络请求失败', code: 'NETWORK_ERROR', status: 0 };
     }
 
-    if (response.status === 401) invalidateSession();
+    if (response.status === 401) invalidateSession(requestSessionGeneration);
+
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      return response.ok ? protocolError(response.status) : safeHttpError(response.status);
+    }
+
     if (!response.ok || payload?.ok !== true) return safeApiError(payload, response.status);
     return { success: true, data: payload.data, status: response.status };
   }
@@ -172,7 +200,7 @@ export function createWebRuntime({
       const event = knownEvent(parsed);
       if (!event) return;
       if (event.type === 'session.invalid') {
-        invalidateSession();
+        invalidateSession(sessionGeneration);
         return;
       }
       emit(event.type, event);
@@ -211,10 +239,12 @@ export function createWebRuntime({
   }
 
   function beginAuthenticatedSession(data) {
+    sessionGeneration += 1;
     csrfToken = typeof data?.csrfToken === 'string' ? data.csrfToken : '';
     authenticated = true;
     invalidEmitted = false;
     if (hasListeners()) startEventGeneration();
+    else stopEventGeneration();
   }
 
   function subscribe(type, listener) {
@@ -231,6 +261,8 @@ export function createWebRuntime({
   }
 
   function closeEvents() {
+    authAttemptGeneration += 1;
+    sessionGeneration += 1;
     csrfToken = '';
     authenticated = false;
     invalidEmitted = false;
@@ -238,7 +270,9 @@ export function createWebRuntime({
   }
 
   async function completeLogin(path, payload) {
+    const attempt = ++authAttemptGeneration;
     const result = await request(path, { method: 'POST', body: payload });
+    if (attempt !== authAttemptGeneration) return staleAuthAttempt();
     if (!result.success) return result;
     beginAuthenticatedSession(result.data);
     return {
@@ -279,9 +313,12 @@ export function createWebRuntime({
         return result.success ? adaptSnapshot(result.data) : result;
       },
       async getSavedSession() {
+        const attempt = ++authAttemptGeneration;
         const result = await request('/api/session');
+        if (attempt !== authAttemptGeneration) return staleAuthAttempt();
         if (!result.success) return result;
         if (!result.data?.authenticated) {
+          sessionGeneration += 1;
           csrfToken = '';
           authenticated = false;
           stopEventGeneration();
@@ -298,12 +335,16 @@ export function createWebRuntime({
         return { success: true };
       },
       async clearSavedSession() {
-        const result = await request('/api/auth/logout', { method: 'POST', body: {} });
-        if (!result.success) return result;
+        const attempt = ++authAttemptGeneration;
+        const pending = request('/api/auth/logout', { method: 'POST', body: {} });
+        sessionGeneration += 1;
         csrfToken = '';
         authenticated = false;
         invalidEmitted = false;
         stopEventGeneration();
+        const result = await pending;
+        if (attempt !== authAttemptGeneration) return staleAuthAttempt();
+        if (!result.success) return result;
         return { success: true, authenticated: result.data?.authenticated === true };
       },
     },

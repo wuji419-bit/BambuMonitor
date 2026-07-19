@@ -182,7 +182,15 @@ function ConnectionScreen({
   const [successMsg, setSuccessMsg] = useState('');
   const [countdown, setCountdown] = useState(0);
   const [agreed, setAgreed] = useState(() => localStorage.getItem(AGREEMENT_KEY) === 'true');
-  const autoLoginAttemptedRef = useRef(false);
+  const authAttemptGenerationRef = useRef(0);
+
+  const beginAuthAttempt = () => {
+    authAttemptGenerationRef.current = beginConnectionGeneration(authAttemptGenerationRef.current);
+    return authAttemptGenerationRef.current;
+  };
+  const isAuthAttemptCurrent = (expectedAttempt) => (
+    authAttemptGenerationRef.current === expectedAttempt
+  );
 
   useEffect(() => {
     document.body.classList.remove('transparent-mode');
@@ -190,6 +198,7 @@ function ConnectionScreen({
     if (savedAccount) setAccount(savedAccount);
 
     return () => {
+      authAttemptGenerationRef.current = beginConnectionGeneration(authAttemptGenerationRef.current);
       document.body.classList.add('transparent-mode');
     };
   }, []);
@@ -217,9 +226,11 @@ function ConnectionScreen({
     setErrorMsg('');
     setSuccessMsg('');
     setCountdown(60);
+    const expectedAttempt = authAttemptGenerationRef.current;
 
     try {
       const result = await runtime.auth.requestVerifyCode({ account });
+      if (!isAuthAttemptCurrent(expectedAttempt)) return;
 
       if (result.success) {
         setSuccessMsg(result.message || '验证码已发送，请查看短信或邮箱');
@@ -228,6 +239,7 @@ function ConnectionScreen({
         setErrorMsg(result.error || '验证码发送失败');
       }
     } catch (err) {
+      if (!isAuthAttemptCurrent(expectedAttempt)) return;
       setCountdown(0);
       console.error('Send code error:', err);
       setErrorMsg(err.message || '验证码发送失败');
@@ -260,27 +272,33 @@ function ConnectionScreen({
     });
   };
 
-  const clearSavedLogin = async () => {
+  const clearSavedLogin = async (expectedAttempt) => {
+    if (!isAuthAttemptCurrent(expectedAttempt)) return false;
     if (isElectron) localStorage.removeItem('bambu_token');
     try {
       await runtime.auth.clearSavedSession();
     } catch (err) {
+      if (!isAuthAttemptCurrent(expectedAttempt)) return false;
       console.warn('Clear saved session failed:', err);
     }
+    return isAuthAttemptCurrent(expectedAttempt);
   };
 
-  const fetchDeviceList = async (token, options = {}) => {
+  const fetchDeviceList = async (token, options = {}, expectedAttempt) => {
+    if (!isAuthAttemptCurrent(expectedAttempt)) return;
     setLoading(true);
 
     try {
       const result = await runtime.auth.getDeviceList(
         isElectron ? { accessToken: token } : undefined,
       );
+      if (!isAuthAttemptCurrent(expectedAttempt)) return;
 
       if (!result.success) {
         const errorText = result.error || '获取设备列表失败';
-        if (isTokenInvalidError(errorText)) {
-          await clearSavedLogin();
+        if (result.status === 401 || isTokenInvalidError(errorText)) {
+          await clearSavedLogin(expectedAttempt);
+          if (!isAuthAttemptCurrent(expectedAttempt)) return;
           setSuccessMsg('');
           setErrorMsg(options.autoLogin ? '登录状态已过期，请重新登录' : '登录已过期，请重新登录');
         } else {
@@ -312,10 +330,12 @@ function ConnectionScreen({
       });
       if (isElectron) refreshLanDevicesInBackground(cloudDevices, connectionGeneration);
     } catch (err) {
+      if (!isAuthAttemptCurrent(expectedAttempt)) return;
       console.error('Fetch device list error:', err);
       const errorText = err.message || '获取设备失败';
       if (isTokenInvalidError(errorText)) {
-        await clearSavedLogin();
+        await clearSavedLogin(expectedAttempt);
+        if (!isAuthAttemptCurrent(expectedAttempt)) return;
         setSuccessMsg('');
         setErrorMsg('登录状态已过期，请重新登录');
       } else {
@@ -327,6 +347,7 @@ function ConnectionScreen({
 
   const handleLogin = async (event) => {
     event.preventDefault();
+    const expectedAttempt = beginAuthAttempt();
 
     if (!agreed) {
       setErrorMsg('请先勾选用户协议与隐私政策');
@@ -353,14 +374,21 @@ function ConnectionScreen({
       const result = isPasswordMode
         ? await runtime.auth.cloudLogin({ account, password })
         : await runtime.auth.cloudLoginCode({ account, code: verifyCode });
+      if (!isAuthAttemptCurrent(expectedAttempt) || result?.stale) return;
 
       if (result.success) {
         setSuccessMsg('登录成功，正在同步设备...');
         localStorage.setItem('bambu_account', account);
         if (isElectron) {
           await runtime.auth.saveSession({ account, accessToken: result.accessToken });
+          if (!isAuthAttemptCurrent(expectedAttempt)) return;
         }
-        await fetchDeviceList(isElectron ? result.accessToken : undefined);
+        await fetchDeviceList(
+          isElectron ? result.accessToken : undefined,
+          {},
+          expectedAttempt,
+        );
+        if (!isAuthAttemptCurrent(expectedAttempt)) return;
         return;
       }
 
@@ -370,10 +398,12 @@ function ConnectionScreen({
 
         try {
           await runtime.auth.requestVerifyCode({ account });
+          if (!isAuthAttemptCurrent(expectedAttempt)) return;
           setCountdown(60);
           setSuccessMsg('检测到新设备登录，请输入验证码完成安全验证。');
           setErrorMsg('');
         } catch {
+          if (!isAuthAttemptCurrent(expectedAttempt)) return;
           setErrorMsg('验证码发送失败，请手动点击发送验证码');
         }
         return;
@@ -386,18 +416,18 @@ function ConnectionScreen({
 
       setErrorMsg(result.error || '登录失败，请检查账号和密码');
     } catch (err) {
+      if (!isAuthAttemptCurrent(expectedAttempt)) return;
       console.error('Login error:', err);
       setErrorMsg(err.message || '登录失败');
     } finally {
-      setLoading(false);
+      if (isAuthAttemptCurrent(expectedAttempt)) setLoading(false);
     }
   };
 
   /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
-    if (autoLoginAttemptedRef.current) return;
-    autoLoginAttemptedRef.current = true;
     if (suppressAutoLogin) return;
+    const expectedAttempt = beginAuthAttempt();
 
     const restoreLogin = async () => {
       if (isElectron) localStorage.removeItem('bambu_token');
@@ -407,6 +437,7 @@ function ConnectionScreen({
 
       try {
         const result = await runtime.auth.getSavedSession();
+        if (!isAuthAttemptCurrent(expectedAttempt) || result?.stale) return;
         const session = result?.session;
         if (session?.accessToken || session?.serverSession) {
           hasSavedSession = true;
@@ -415,17 +446,27 @@ function ConnectionScreen({
           if (savedAccount) localStorage.setItem('bambu_account', savedAccount);
         }
       } catch (err) {
+        if (!isAuthAttemptCurrent(expectedAttempt)) return;
         console.warn('Read saved session failed:', err);
       }
 
+      if (!isAuthAttemptCurrent(expectedAttempt)) return;
       if (savedAccount) setAccount(savedAccount);
       if (savedToken || hasSavedSession) {
         setSuccessMsg('检测到已登录会话，正在自动连接...');
-        fetchDeviceList(savedToken, { autoLogin: true });
+        await fetchDeviceList(savedToken, { autoLogin: true }, expectedAttempt);
+        if (!isAuthAttemptCurrent(expectedAttempt)) return;
       }
     };
 
-    restoreLogin();
+    void restoreLogin();
+    return () => {
+      if (isAuthAttemptCurrent(expectedAttempt)) {
+        authAttemptGenerationRef.current = beginConnectionGeneration(
+          authAttemptGenerationRef.current,
+        );
+      }
+    };
   }, [isElectron, runtime, suppressAutoLogin]);
   /* eslint-enable react-hooks/exhaustive-deps */
 
