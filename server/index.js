@@ -218,14 +218,26 @@ function invokeLifecycle(target, method) {
   }
 }
 
-function withDeadline(promises, timers, timeoutMs = SHUTDOWN_DEADLINE_MS) {
+function withDeadline(work, timers, timeoutResult, timeoutMs = SHUTDOWN_DEADLINE_MS) {
   let timeout;
   const deadline = new Promise((resolve) => {
-    timeout = timers.setTimeout(resolve, timeoutMs);
+    timeout = timers.setTimeout(() => resolve(timeoutResult()), timeoutMs);
     timeout?.unref?.();
   });
-  return Promise.race([Promise.allSettled(promises), deadline])
+  return Promise.race([work, deadline])
     .finally(() => timers.clearTimeout(timeout));
+}
+
+async function shutdownInOrder(stages, failures, logger) {
+  for (const [name, target, method] of stages) {
+    try {
+      await invokeLifecycle(target, method);
+    } catch {
+      failures.push(name);
+      logger?.warn?.('server', 'shutdown-stage-failed', { stage: name });
+    }
+  }
+  return { timedOut: false, failures: [...failures] };
 }
 
 function createController({ app, components, readiness, timers, writer }) {
@@ -239,12 +251,17 @@ function createController({ app, components, readiness, timers, writer }) {
     close() {
       if (closingPromise) return closingPromise;
       readiness.ready = false;
-      const pending = [
-        invokeLifecycle(app, 'close'),
-        invokeLifecycle(components.cameraManager, 'shutdown'),
-        invokeLifecycle(components.deviceRuntime, 'shutdown'),
+      const failures = [];
+      const stages = [
+        ['app', app, 'close'],
+        ['camera', components.cameraManager, 'shutdown'],
+        ['runtime', components.deviceRuntime, 'shutdown'],
       ];
-      closingPromise = withDeadline(pending, timers)
+      const orderedShutdown = shutdownInOrder(stages, failures, components.logger);
+      closingPromise = withDeadline(orderedShutdown, timers, () => {
+        components.logger?.warn?.('server', 'shutdown-deadline-exceeded');
+        return { timedOut: true, failures: [...failures] };
+      })
         .finally(() => {
           removeSignals();
           writer.close();
@@ -405,7 +422,7 @@ export async function composeServer({
     if (components.cameraManager) pending.push(invokeLifecycle(components.cameraManager, 'shutdown'));
     if (components.deviceRuntime) pending.push(invokeLifecycle(components.deviceRuntime, 'shutdown'));
     else if (components.mqtt) pending.push(invokeLifecycle(components.mqtt, 'shutdown'));
-    await withDeadline(pending, timers);
+    await withDeadline(Promise.allSettled(pending), timers, () => undefined);
     writer.close();
     throw error;
   }
@@ -439,12 +456,17 @@ export async function startServer({ listenPort, ...options } = {}) {
   }
 }
 
-export function installShutdownSignals(controller, { processImpl = process } = {}) {
+export function installShutdownSignals(controller, {
+  processImpl = process,
+  forceExit = (code) => processImpl.exit(code),
+} = {}) {
   if (!controller || typeof controller.close !== 'function') throw new TypeError('Invalid server controller');
+  if (typeof forceExit !== 'function') throw new TypeError('Invalid force exit function');
   const installed = signalInstallations.get(processImpl);
   if (installed) return installed.remove;
 
-  let handled = false;
+  let closing = false;
+  let forced = false;
   let removed = false;
   const remove = () => {
     if (removed) return;
@@ -453,13 +475,38 @@ export function installShutdownSignals(controller, { processImpl = process } = {
     processImpl.removeListener('SIGINT', onSignal);
     signalInstallations.delete(processImpl);
   };
+  const forceOnce = () => {
+    if (forced) return;
+    forced = true;
+    processImpl.exitCode = 1;
+    remove();
+    try { forceExit(1); } catch { /* The exit status remains available if forceExit returns or fails. */ }
+  };
   const onSignal = () => {
-    if (handled) return;
-    handled = true;
-    Promise.resolve(controller.close()).then(
-      () => { processImpl.exitCode = 0; },
-      () => { processImpl.exitCode = 1; },
-    ).finally(remove);
+    if (closing) {
+      forceOnce();
+      return;
+    }
+    closing = true;
+    let closeResult;
+    try {
+      closeResult = controller.close();
+    } catch {
+      forceOnce();
+      return;
+    }
+    Promise.resolve(closeResult).then(
+      (result) => {
+        if (forced) return;
+        if (result?.timedOut === true) {
+          forceOnce();
+          return;
+        }
+        processImpl.exitCode = 0;
+        remove();
+      },
+      () => forceOnce(),
+    );
   };
   processImpl.on('SIGTERM', onSignal);
   processImpl.on('SIGINT', onSignal);

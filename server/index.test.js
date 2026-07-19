@@ -78,6 +78,16 @@ function request(server, { path = '/', method = 'GET', headers = {}, body } = {}
   });
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 test('parseServerEnv applies production defaults and explicit trust proxy semantics', () => {
   assert.deepEqual(parseServerEnv({}), { port: 3080, dataDir: '/app/data', trustProxy: false, timezone: undefined });
   assert.equal(parseServerEnv({ PORT: '65535', DATA_DIR: '/volume/data', TRUST_PROXY: '1', TZ: 'Asia/Shanghai' }).trustProxy, true);
@@ -190,35 +200,61 @@ test('restore network failure leaves the server ready for login', async () => {
   await controller.close();
 });
 
-test('close invokes app, camera, and runtime once in order and settles rejections', async () => {
+test('close awaits app, camera, and runtime in order while continuing after rejection', async () => {
+  const appClose = deferred();
+  const cameraClose = deferred();
+  const runtimeClose = deferred();
+  const cleared = [];
+  const timers = {
+    setTimeout(callback, delay) { return { callback, delay, unref() {} }; },
+    clearTimeout(handle) { cleared.push(handle); },
+  };
   const harness = fakeComponents();
-  harness.app.close = async () => { harness.order.push('app.close'); throw new Error('app close'); };
-  harness.cameraManager.shutdown = async () => { harness.order.push('camera.shutdown'); throw new Error('camera close'); };
-  harness.deviceRuntime.shutdown = async () => { harness.order.push('runtime.shutdown'); throw new Error('runtime close'); };
-  const controller = await composeServer({ env: VALID_ENV, factories: harness.factories, writer: () => {} });
+  harness.app.close = () => { harness.order.push('app.close'); return appClose.promise; };
+  harness.cameraManager.shutdown = () => { harness.order.push('camera.shutdown'); return cameraClose.promise; };
+  harness.deviceRuntime.shutdown = () => { harness.order.push('runtime.shutdown'); return runtimeClose.promise; };
+  const controller = await composeServer({ env: VALID_ENV, factories: harness.factories, writer: () => {}, timers });
   harness.order.length = 0;
   const first = controller.close();
   const second = controller.close();
   assert.equal(first, second);
-  await first;
+  assert.deepEqual(harness.order, ['app.close']);
+
+  appClose.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(harness.order, ['app.close', 'camera.shutdown']);
+
+  cameraClose.reject(new Error('camera close'));
+  await Promise.resolve();
+  await Promise.resolve();
   assert.deepEqual(harness.order, ['app.close', 'camera.shutdown', 'runtime.shutdown']);
+
+  runtimeClose.resolve();
+  assert.deepEqual(await first, { timedOut: false, failures: ['camera'] });
+  assert.equal(cleared.length, 1);
 });
 
-test('close has an injected ten second overall deadline', async () => {
+test('close reports when the injected ten second overall deadline wins', async () => {
   let deadline;
+  const cleared = [];
   const timers = {
     setTimeout(callback, delay) { deadline = { callback, delay }; return 9; },
-    clearTimeout() {},
+    clearTimeout(handle) { cleared.push(handle); },
   };
   const harness = fakeComponents();
-  harness.app.close = () => new Promise(() => {});
-  harness.cameraManager.shutdown = () => new Promise(() => {});
-  harness.deviceRuntime.shutdown = () => new Promise(() => {});
+  harness.app.close = () => { harness.order.push('app.close'); return new Promise(() => {}); };
+  harness.cameraManager.shutdown = () => { harness.order.push('camera.shutdown'); };
+  harness.deviceRuntime.shutdown = () => { harness.order.push('runtime.shutdown'); };
   const controller = await composeServer({ env: VALID_ENV, factories: harness.factories, writer: () => {}, timers });
+  harness.order.length = 0;
   const closing = controller.close();
   assert.equal(deadline.delay, 10_000);
+  assert.deepEqual(harness.order, ['app.close']);
   deadline.callback();
-  await closing;
+  assert.deepEqual(await closing, { timedOut: true, failures: [] });
+  assert.deepEqual(harness.order, ['app.close']);
+  assert.deepEqual(cleared, [9]);
 });
 
 test('startup failure cleans already-created runtime components', async () => {
@@ -236,19 +272,58 @@ test('runtime construction failure shuts down the MQTT manager it would have own
   assert.deepEqual(harness.order.slice(-2), ['runtime', 'mqtt.shutdown']);
 });
 
-test('signal handlers share close, set exitCode after cleanup, and remove themselves', async () => {
+test('signal cleanup sets exitCode without force exit after normal shutdown', async () => {
   const processImpl = new EventEmitter();
   processImpl.exitCode = undefined;
   let closes = 0;
-  const controller = { close: async () => { closes += 1; } };
-  const remove = installShutdownSignals(controller, { processImpl });
+  const forced = [];
+  const controller = { close: async () => { closes += 1; return { timedOut: false, failures: [] }; } };
+  const remove = installShutdownSignals(controller, { processImpl, forceExit: (code) => forced.push(code) });
   assert.equal(processImpl.listenerCount('SIGTERM'), 1);
   assert.equal(processImpl.listenerCount('SIGINT'), 1);
   processImpl.emit('SIGTERM');
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(closes, 1);
   assert.equal(processImpl.exitCode, 0);
+  assert.deepEqual(forced, []);
   assert.equal(processImpl.listenerCount('SIGTERM'), 0);
   assert.equal(processImpl.listenerCount('SIGINT'), 0);
   remove();
+});
+
+test('signal cleanup force exits once when the shutdown deadline wins', async () => {
+  const processImpl = new EventEmitter();
+  processImpl.exitCode = undefined;
+  const forced = [];
+  const controller = { close: async () => ({ timedOut: true, failures: [] }) };
+  installShutdownSignals(controller, { processImpl, forceExit: (code) => forced.push(code) });
+  processImpl.emit('SIGINT');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(forced, [1]);
+  assert.equal(processImpl.exitCode, 1);
+  assert.equal(processImpl.listenerCount('SIGTERM'), 0);
+  assert.equal(processImpl.listenerCount('SIGINT'), 0);
+});
+
+test('a second signal force exits immediately while ordered close is still pending', async () => {
+  const processImpl = new EventEmitter();
+  processImpl.exitCode = undefined;
+  const closing = deferred();
+  const forced = [];
+  let closes = 0;
+  const controller = {
+    close() { closes += 1; return closing.promise; },
+  };
+  installShutdownSignals(controller, { processImpl, forceExit: (code) => forced.push(code) });
+  processImpl.emit('SIGTERM');
+  assert.equal(closes, 1);
+  assert.deepEqual(forced, []);
+  processImpl.emit('SIGINT');
+  assert.deepEqual(forced, [1]);
+  assert.equal(processImpl.exitCode, 1);
+  closing.resolve({ timedOut: true, failures: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(forced, [1]);
+  assert.equal(processImpl.listenerCount('SIGTERM'), 0);
+  assert.equal(processImpl.listenerCount('SIGINT'), 0);
 });
