@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import WebSocket from 'ws';
 
+import { createDeviceRuntime } from './device-runtime.js';
 import { createHttpApp } from './http-app.js';
 
 const SESSION_ID = Buffer.alloc(32, 7).toString('base64url');
@@ -55,7 +56,8 @@ function createHarness(overrides = {}) {
   const calls = {
     authenticate: [], cameraAcquire: [], cameraConfigure: [], cameraRelease: 0,
     cameraSubscribe: [], cameraUnsubscribe: 0, clear: 0, cloud: [], refresh: 0,
-    cloudRaw: [], runtimeShutdown: 0, start: [], updateDevice: [], updateSettings: [], notifications: [],
+    cloudRaw: [], runtimeShutdown: 0, runtimeStopSession: 0, start: [], updateDevice: [],
+    updateSettings: [], notifications: [],
   };
   let snapshot = {
     type: 'devices.snapshot',
@@ -63,7 +65,8 @@ function createHarness(overrides = {}) {
     syncedAt: 100,
     cloudState: 'connected',
   };
-  let settings = {
+  let restartSnapshot = structuredClone(snapshot);
+  let settings = overrides.settings ?? {
     version: 1,
     camera: { autoOpen: false, customUrls: {} },
     notifications: { enabled: true, targets: [{ id: 'private', token: 'notification-secret' }] },
@@ -111,7 +114,23 @@ function createHarness(overrides = {}) {
     getDevice(serial) {
       return snapshot.devices.find((device) => device.dev_id === serial) ?? null;
     },
-    async start(session) { calls.start.push(structuredClone(session)); return structuredClone(snapshot); },
+    getCameraConfig(serial) {
+      const device = snapshot.devices.find((item) => item.dev_id === serial);
+      if (!device) return null;
+      return {
+        serialNumber: device.dev_id,
+        dev_id: device.dev_id,
+        ip: device.ip,
+        name: device.name,
+        model: device.model,
+        accessCode: `private-code-${device.dev_id}`,
+      };
+    },
+    async start(session) {
+      calls.start.push(structuredClone(session));
+      if (snapshot.devices.length === 0) snapshot = structuredClone(restartSnapshot);
+      return structuredClone(snapshot);
+    },
     async refresh() { calls.refresh += 1; return structuredClone(snapshot); },
     async updateDevice(serial, patch) {
       calls.updateDevice.push([serial, structuredClone(patch)]);
@@ -125,6 +144,13 @@ function createHarness(overrides = {}) {
       listener(structuredClone(snapshot));
       let active = true;
       return () => { if (active) { active = false; runtimeListeners.delete(listener); } };
+    },
+    async stopSession() {
+      calls.runtimeStopSession += 1;
+      if (snapshot.devices.length > 0) restartSnapshot = structuredClone(snapshot);
+      snapshot = { type: 'devices.snapshot', devices: [], syncedAt: null, cloudState: 'idle' };
+      for (const listener of runtimeListeners) listener(structuredClone(snapshot));
+      return structuredClone(snapshot);
     },
     async shutdown() { calls.runtimeShutdown += 1; },
   };
@@ -189,7 +215,7 @@ function createHarness(overrides = {}) {
     get activeCameraLeases() { return activeCameraLeases; },
     get cameraSourceStarts() { return cameraSourceStarts; },
     setLatestFrame(frame) { latestFrame = frame && Buffer.from(frame); },
-    setSnapshot(value) { snapshot = structuredClone(value); },
+    setSnapshot(value) { snapshot = structuredClone(value); restartSnapshot = structuredClone(value); },
   };
 }
 
@@ -249,15 +275,32 @@ function openSocket(base, { id = SESSION_ID, origin = base } = {}) {
       if (waiter) waiter(message);
       else ws.testMessages.push(message);
     });
-    ws.once('open', () => resolve(ws));
-    ws.once('unexpected-response', (_request, response) => reject(Object.assign(new Error('upgrade rejected'), { statusCode: response.statusCode })));
-    ws.once('error', reject);
+    const timeout = setTimeout(() => reject(new Error('websocket open timed out')), 1_000);
+    ws.once('open', () => { clearTimeout(timeout); resolve(ws); });
+    ws.once('unexpected-response', (_request, response) => {
+      clearTimeout(timeout);
+      reject(Object.assign(new Error('upgrade rejected'), { statusCode: response.statusCode }));
+    });
+    ws.once('error', (error) => { clearTimeout(timeout); reject(error); });
   });
 }
 
-function nextMessage(ws) {
+function nextMessage(ws, timeoutMs = 1_000) {
   if (ws.testMessages.length) return Promise.resolve(ws.testMessages.shift());
-  return new Promise((resolve) => ws.testMessageWaiters.push(resolve));
+  return new Promise((resolve, reject) => {
+    let timer;
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.removeListener('close', onClose);
+      const index = ws.testMessageWaiters.indexOf(waiter);
+      if (index >= 0) ws.testMessageWaiters.splice(index, 1);
+    };
+    const waiter = (message) => { cleanup(); resolve(message); };
+    const onClose = () => { cleanup(); reject(new Error('websocket closed before message')); };
+    timer = setTimeout(() => { cleanup(); reject(new Error('websocket message timed out')); }, timeoutMs);
+    ws.once('close', onClose);
+    ws.testMessageWaiters.push(waiter);
+  });
 }
 
 async function closeSocket(ws) {
@@ -360,23 +403,74 @@ test('session is minimal, protected mutations require CSRF, and logout clears st
   assert.deepEqual((await request(base, '/api/session')).body, { ok: true, data: { authenticated: false } });
   const authenticated = await request(base, '/api/session', { headers: { Cookie: cookie() } });
   assert.deepEqual(authenticated.body.data, {
-    authenticated: true, accountMasked: 't***@example.com', csrfToken: CSRF, expiresAt: 2_000_000_000_000,
+    authenticated: true, accountMasked: 't***@example.com', csrfToken: CSRF,
   });
 
   const missingCsrf = await request(base, '/api/devices/refresh', { method: 'POST', headers: { Cookie: cookie(), Origin: base } });
   assert.equal(missingCsrf.response.status, 403);
+  const refreshMissingType = await request(base, '/api/devices/refresh', {
+    method: 'POST', headers: { Cookie: cookie(), Origin: base, 'X-CSRF-Token': CSRF }, body: '{}',
+  });
+  assert.equal(refreshMissingType.response.status, 415);
+  const refreshWrongType = await request(base, '/api/devices/refresh', {
+    method: 'POST', headers: { Cookie: cookie(), Origin: base, 'X-CSRF-Token': CSRF, 'Content-Type': 'text/plain' }, body: '{}',
+  });
+  assert.equal(refreshWrongType.response.status, 415);
+  const refreshExtra = await request(base, '/api/devices/refresh', {
+    method: 'POST', headers: apiHeaders(base), body: JSON.stringify({ force: true }),
+  });
+  assert.equal(refreshExtra.response.status, 400);
   const refreshed = await request(base, '/api/devices/refresh', { method: 'POST', headers: apiHeaders(base), body: '{}' });
   assert.equal(refreshed.response.status, 200);
 
+  const logoutMissingType = await request(base, '/api/auth/logout', {
+    method: 'POST', headers: { Cookie: cookie(), Origin: base, 'X-CSRF-Token': CSRF }, body: '{}',
+  });
+  assert.equal(logoutMissingType.response.status, 415);
+  const logoutWrongType = await request(base, '/api/auth/logout', {
+    method: 'POST', headers: { Cookie: cookie(), Origin: base, 'X-CSRF-Token': CSRF, 'Content-Type': 'text/plain' }, body: '{}',
+  });
+  assert.equal(logoutWrongType.response.status, 415);
+  const logoutExtra = await request(base, '/api/auth/logout', {
+    method: 'POST', headers: apiHeaders(base), body: JSON.stringify({ all: true }),
+  });
+  assert.equal(logoutExtra.response.status, 400);
   const logout = await request(base, '/api/auth/logout', { method: 'POST', headers: apiHeaders(base), body: '{}' });
   assert.equal(logout.response.status, 200);
   assert.match(logout.response.headers.get('set-cookie'), /bambu_session=;.*Max-Age=0/);
   assert.equal(harness.calls.clear, 1);
-  assert.equal(harness.calls.runtimeShutdown, 1);
+  assert.equal(harness.calls.runtimeStopSession, 1);
+  assert.equal(harness.calls.runtimeShutdown, 0);
 
+  const idempotentWrongType = await request(base, '/api/auth/logout', { method: 'POST', headers: { Origin: base }, body: '{}' });
+  assert.equal(idempotentWrongType.response.status, 415);
   const idempotent = await request(base, '/api/auth/logout', { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' }, body: '{}' });
   assert.equal(idempotent.response.status, 200);
   assert.match(idempotent.response.headers.get('set-cookie'), /Max-Age=0/);
+});
+
+test('logout resets the runtime and a later login starts and synchronizes it again', async (t) => {
+  const harness = createHarness();
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const logout = await request(base, '/api/auth/logout', {
+    method: 'POST', headers: apiHeaders(base), body: '{}',
+  });
+  assert.equal(logout.response.status, 200);
+  assert.equal(harness.calls.runtimeStopSession, 1);
+  assert.equal(harness.deviceRuntime.snapshot().devices.length, 0);
+
+  const login = await request(base, '/api/auth/login', {
+    method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account: 'test@example.com', password: 'private-password' }),
+  });
+  assert.equal(login.response.status, 200);
+  assert.equal(harness.calls.start.length, 1);
+  const devices = await request(base, '/api/devices', { headers: { Cookie: cookie() } });
+  assert.equal(devices.response.status, 200);
+  assert.deepEqual(devices.body.data.devices.map((device) => device.dev_id), ['SERIAL_A']);
+  assert.equal(harness.calls.runtimeShutdown, 0);
 });
 
 test('logout closes every websocket invalidated by the cleared persisted session store', async (t) => {
@@ -479,6 +573,129 @@ test('camera frame auth, origin, timeout, cleanup, latest frame, and four-per-se
   assert.equal(harness.activeCameraLeases, 0);
 });
 
+test('camera routes configure from private runtime state plus server-side custom URL without payload leaks', async (t) => {
+  const harness = createHarness({
+    settings: {
+      version: 1,
+      camera: { autoOpen: false, customUrls: { SERIAL_A: 'https://camera.example.test/live' } },
+      notifications: { enabled: false, targets: [] },
+      debug: false,
+    },
+  });
+  harness.setLatestFrame(JPEG);
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const devices = await request(base, '/api/devices', { headers: { Cookie: cookie() } });
+  const ws = await openSocket(base);
+  const initial = await nextMessage(ws);
+  const frame = await request(base, '/api/cameras/SERIAL_A/frame', { headers: { Cookie: cookie() } });
+  assert.equal(frame.response.status, 200);
+  assert.deepEqual(harness.calls.cameraConfigure.at(-1), {
+    serialNumber: 'SERIAL_A',
+    dev_id: 'SERIAL_A',
+    ip: '192.168.1.20',
+    name: 'Printer A',
+    model: 'P1S',
+    accessCode: 'private-code-SERIAL_A',
+    customUrl: 'https://camera.example.test/live',
+  });
+  for (const payload of [devices.body, initial, frame.bytes]) {
+    assert.equal(JSON.stringify(payload).includes('private-code-SERIAL_A'), false);
+  }
+  await closeSocket(ws);
+});
+
+test('real device runtime passes private camera access code to HTTP camera manager only', async (t) => {
+  const mqttListeners = new Set();
+  let mqttShutdownCalls = 0;
+  const runtime = createDeviceRuntime({
+    cloud: {
+      async listDevices() {
+        return {
+          success: true,
+          devices: [{
+            id: 'SERIAL_REAL', name: 'Real Printer', model: 'P1S',
+            accessCode: 'real-private-access-code', online: true,
+          }],
+          username: 'real-user',
+        };
+      },
+    },
+    mqtt: {
+      async connect() {},
+      async disconnect() {},
+      subscribe(listener) { mqttListeners.add(listener); return () => mqttListeners.delete(listener); },
+      async shutdown() { mqttShutdownCalls += 1; },
+    },
+    discovery: { async scan() { return []; } },
+    configStore: {
+      getDeviceCache() {
+        return { version: 1, devices: { SERIAL_REAL: { ip: '192.168.1.88', model: 'P1S' } } };
+      },
+      async updateDevice() { return {}; },
+    },
+    now: () => 100,
+  });
+  await runtime.start({ accessToken: 'real-private-cloud-token', username: 'real-user' });
+  const harness = createHarness({ deviceRuntime: runtime });
+  harness.setLatestFrame(JPEG);
+  const base = await startHarness(harness);
+  t.after(async () => {
+    await harness.app.close();
+    await runtime.shutdown();
+  });
+
+  const devices = await request(base, '/api/devices', { headers: { Cookie: cookie() } });
+  const frame = await request(base, '/api/cameras/SERIAL_REAL/frame', { headers: { Cookie: cookie() } });
+  assert.equal(frame.response.status, 200);
+  assert.equal(harness.calls.cameraConfigure.at(-1).accessCode, 'real-private-access-code');
+  assert.equal(harness.calls.cameraConfigure.at(-1).customUrl, undefined);
+  assert.equal(JSON.stringify(harness.calls.cameraConfigure).includes('real-private-cloud-token'), false);
+  assert.equal(JSON.stringify(devices.body).includes('real-private-access-code'), false);
+  assert.equal(JSON.stringify(devices.body).includes('real-private-cloud-token'), false);
+  assert.equal(mqttShutdownCalls, 0);
+});
+
+test('camera routes fail safely when private camera configuration is unavailable', async (t) => {
+  const harness = createHarness();
+  harness.deviceRuntime.getCameraConfig = () => null;
+  harness.setLatestFrame(JPEG);
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const frame = await request(base, '/api/cameras/SERIAL_A/frame', { headers: { Cookie: cookie() } });
+  assert.equal(frame.response.status, 503);
+  assert.deepEqual(frame.body, {
+    ok: false, error: { code: 'CAMERA_UNAVAILABLE', message: 'Camera is unavailable' },
+  });
+  assert.equal(harness.calls.cameraConfigure.length, 0);
+  assert.equal(harness.calls.cameraAcquire.length, 0);
+
+  harness.deviceRuntime.getCameraConfig = () => ({
+    serialNumber: 'SERIAL_A', accessCode: 'orphaned-private-code',
+  });
+  const invalid = await request(base, '/api/cameras/SERIAL_A/frame', { headers: { Cookie: cookie() } });
+  assert.equal(invalid.response.status, 503);
+  assert.equal(JSON.stringify(invalid.body).includes('orphaned-private-code'), false);
+  assert.equal(harness.calls.cameraConfigure.length, 0);
+});
+
+test('camera routes accept manager-valid built-in config without model metadata', async (t) => {
+  const harness = createHarness();
+  harness.deviceRuntime.getCameraConfig = () => ({
+    serialNumber: 'SERIAL_A', dev_id: 'SERIAL_A',
+    ip: '192.168.1.20', accessCode: 'private-code-without-model',
+  });
+  harness.setLatestFrame(JPEG);
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const frame = await request(base, '/api/cameras/SERIAL_A/frame', { headers: { Cookie: cookie() } });
+  assert.equal(frame.response.status, 200);
+  assert.equal(harness.calls.cameraConfigure.at(-1).accessCode, 'private-code-without-model');
+});
+
 test('camera frame releases a subscription that emits synchronously during setup', async (t) => {
   let releases = 0;
   let unsubscribes = 0;
@@ -561,7 +778,12 @@ test('camera streams cap before acquire, share one source, replace closed slots,
 });
 
 test('global camera stream limit applies across cameras before manager subscription', async (t) => {
-  const devices = Array.from({ length: 21 }, (_, index) => ({ dev_id: `SERIAL_${index}`, name: `P${index}` }));
+  const devices = Array.from({ length: 21 }, (_, index) => ({
+    dev_id: `SERIAL_${index}`,
+    name: `P${index}`,
+    model: 'P1S',
+    ip: `192.168.1.${index + 1}`,
+  }));
   const harness = createHarness({ limits: { streamsPerCamera: 4, streamsGlobal: 20 } });
   harness.setSnapshot({ type: 'devices.snapshot', devices, syncedAt: 1, cloudState: 'connected' });
   const base = await startHarness(harness);
@@ -606,9 +828,13 @@ test('websocket upgrade rejects origin/session/socket overflow and session inval
   const second = await openSocket(base);
   await Promise.all([nextMessage(first), nextMessage(second)]);
   await assert.rejects(openSocket(base), (error) => error.statusCode === 429);
+  const invalidMessages = [nextMessage(first, 500), nextMessage(second, 500)];
   const firstClosed = once(first, 'close');
   const secondClosed = once(second, 'close');
   harness.emitRuntime({ type: 'session.invalid' });
+  assert.deepEqual(await Promise.all(invalidMessages), [
+    { type: 'session.invalid' }, { type: 'session.invalid' },
+  ]);
   await Promise.all([firstClosed, secondClosed]);
   assert.equal(harness.runtimeListeners.size, 0);
 });

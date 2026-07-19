@@ -282,7 +282,9 @@ function validateDependencies(deps) {
   const required = [
     [deps.cloud, ['loginPassword', 'requestVerifyCode', 'loginCode']],
     [deps.sessionStore, ['create', 'authenticate', 'clear']],
-    [deps.deviceRuntime, ['start', 'refresh', 'updateDevice', 'snapshot', 'subscribe']],
+    [deps.deviceRuntime, [
+      'start', 'stopSession', 'refresh', 'updateDevice', 'snapshot', 'getCameraConfig', 'subscribe',
+    ]],
     [deps.cameraManager, ['configure', 'acquire', 'getLatestFrame', 'subscribe']],
     [deps.configStore, ['get', 'update']],
   ];
@@ -338,6 +340,11 @@ export function createHttpApp(deps = {}) {
     } catch {
       throw apiError(403, 'FORBIDDEN', 'Request verification failed');
     }
+  }
+
+  async function requireEmptyJson(req) {
+    const body = await jsonBody(req, limits.bodyBytes);
+    if (!hasOnlyKeys(body, [])) throw apiError(400, 'BAD_REQUEST', 'Invalid request');
   }
 
   async function completeLogin(req, res, body, method) {
@@ -407,11 +414,11 @@ export function createHttpApp(deps = {}) {
     if (pathname === '/api/auth/logout' && req.method === 'POST') {
       assertOrigin(req, trustProxy);
       const auth = await authenticate(req);
+      if (auth) assertMutation(req, auth);
+      await requireEmptyJson(req);
       if (auth) {
-        assertMutation(req, auth);
         await sessionStore.clear();
-        const stop = deviceRuntime.clear ?? deviceRuntime.stop ?? deviceRuntime.shutdown;
-        if (typeof stop === 'function') await stop.call(deviceRuntime);
+        await deviceRuntime.stopSession();
         closeAllSessionSockets(1008, 'Session ended');
       }
       return sendSuccess(res, { authenticated: false }, 200, {
@@ -429,7 +436,6 @@ export function createHttpApp(deps = {}) {
         authenticated: true,
         accountMasked: maskAccount(auth.session.account),
         csrfToken: auth.session.csrfToken,
-        expiresAt: auth.session.expiresAt,
       });
     }
     if (pathname === '/api/devices' && req.method === 'GET') {
@@ -439,6 +445,7 @@ export function createHttpApp(deps = {}) {
     if (pathname === '/api/devices/refresh' && req.method === 'POST') {
       const auth = await requireSession(req);
       assertMutation(req, auth);
+      await requireEmptyJson(req);
       return sendSuccess(res, await deviceRuntime.refresh());
     }
     const deviceMatch = /^\/api\/devices\/([^/]+)$/.exec(pathname);
@@ -489,14 +496,43 @@ export function createHttpApp(deps = {}) {
     return false;
   }
 
+  function cameraUnavailable() {
+    return apiError(503, 'CAMERA_UNAVAILABLE', 'Camera is unavailable');
+  }
+
   function canonicalCamera(serial) {
-    const device = typeof deviceRuntime.getDevice === 'function'
-      ? deviceRuntime.getDevice(serial)
-      : deviceRuntime.snapshot()?.devices?.find((item) => item?.dev_id === serial);
-    if (!device) throw apiError(404, 'DEVICE_NOT_FOUND', 'Device not found');
-    const canonical = String(device.dev_id ?? serial);
-    cameraManager.configure(device);
-    return { canonical, device };
+    let privateConfig;
+    let settings;
+    try {
+      privateConfig = deviceRuntime.getCameraConfig(serial);
+      settings = configStore.get();
+    } catch {
+      throw cameraUnavailable();
+    }
+    if (!isPlainObject(privateConfig)) throw cameraUnavailable();
+    const canonical = privateConfig.serialNumber ?? privateConfig.dev_id;
+    if (typeof canonical !== 'string' || canonical.length < 1 || canonical.length > 256
+      || canonical.includes('/') || canonical.includes('\\') || canonical.includes('\0')) {
+      throw cameraUnavailable();
+    }
+    const customUrl = settings?.camera?.customUrls?.[canonical];
+    const cameraConfig = { serialNumber: canonical, dev_id: canonical };
+    for (const field of ['ip', 'name', 'model', 'cameraMode', 'accessCode']) {
+      if (typeof privateConfig[field] === 'string' && privateConfig[field].trim()) {
+        cameraConfig[field] = privateConfig[field];
+      }
+    }
+    if (typeof customUrl === 'string' && customUrl.trim()) cameraConfig.customUrl = customUrl;
+    const hasExternalSource = typeof cameraConfig.customUrl === 'string';
+    const hasBuiltInSource = typeof cameraConfig.ip === 'string'
+      && typeof cameraConfig.accessCode === 'string';
+    if (!hasExternalSource && !hasBuiltInSource) throw cameraUnavailable();
+    try {
+      cameraManager.configure(cameraConfig);
+    } catch {
+      throw cameraUnavailable();
+    }
+    return { canonical };
   }
 
   async function cameraFrame(req, res, serial, auth) {
@@ -758,19 +794,23 @@ export function createHttpApp(deps = {}) {
     for (const sessionId of [...wsBySession.keys()]) closeSessionSockets(sessionId, code, reason);
   }
 
-  function safeWsSend(ws, event) {
-    if (ws.readyState !== WebSocket.OPEN) return;
+  function safeWsSend(ws, event, afterSend) {
+    if (ws.readyState !== WebSocket.OPEN) return false;
     let payload;
     try {
       payload = JSON.stringify(structuredClone(event));
-      if (Buffer.byteLength(payload) > limits.maxWsEventBytes) return;
+      if (Buffer.byteLength(payload) > limits.maxWsEventBytes) return false;
       ws.send(payload, (error) => {
         if (error) {
           try { ws.terminate(); } catch { /* already closed */ }
+          return;
         }
+        try { afterSend?.(); } catch { ws.terminate(); }
       });
+      return true;
     } catch {
       logSafe(logger, 'warn', 'websocket.event-dropped');
+      return false;
     }
   }
 
@@ -799,7 +839,12 @@ export function createHttpApp(deps = {}) {
       unsubscribe = normalizeRelease(deviceRuntime.subscribe((event) => {
         if (subscribing && event?.type === 'devices.snapshot') return;
         if (event?.type === 'session.invalid') {
-          closeSessionSockets(sessionId);
+          const sent = safeWsSend(ws, event, () => {
+            try { ws.close(1008, 'Session invalid'); } catch { ws.terminate(); }
+          });
+          if (!sent) {
+            try { ws.close(1008, 'Session invalid'); } catch { ws.terminate(); }
+          }
           return;
         }
         safeWsSend(ws, event);

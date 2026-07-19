@@ -131,6 +131,7 @@ export function createDeviceRuntime({
   let syncedAt = null;
   let cloudState = 'idle';
   let stopped = false;
+  let stopSessionPromise = null;
   let shutdownPromise = null;
   let removeMqttListener = null;
 
@@ -191,6 +192,22 @@ export function createDeviceRuntime({
   function getDevice(serialNumber) {
     const record = getRecord(serialNumber);
     return record ? publicDevice(record) : null;
+  }
+
+  function getCameraConfig(serialNumber) {
+    const record = getRecord(serialNumber);
+    if (!record) return null;
+    const config = {
+      serialNumber: record.serialNumber,
+      dev_id: record.serialNumber,
+    };
+    for (const field of ['ip', 'name', 'model', 'cameraMode']) {
+      const value = text(record.device[field]);
+      if (value) config[field] = value;
+    }
+    const accessCode = text(record.accessCode);
+    if (accessCode) config.accessCode = accessCode;
+    return clone(config);
   }
 
   function buildConnection(record) {
@@ -503,6 +520,7 @@ export function createDeviceRuntime({
   }
 
   async function start({ accessToken, username }) {
+    if (stopSessionPromise) await stopSessionPromise;
     if (stopped) return snapshot();
     const expectedGeneration = ++generation;
     refreshSequence += 1;
@@ -520,6 +538,34 @@ export function createDeviceRuntime({
     return snapshot();
   }
 
+  function stopSession() {
+    if (stopSessionPromise) return stopSessionPromise;
+    if (stopped) return Promise.resolve(snapshot());
+    const hadSession = records.size > 0 || order.length > 0 || activeScan !== null
+      || text(credentials.accessToken) !== '' || text(credentials.username) !== '';
+    if (!hadSession) return Promise.resolve(snapshot());
+
+    generation += 1;
+    refreshSequence += 1;
+    activeScan?.controller.abort();
+    const serialNumbers = [...records.keys()];
+    records.clear();
+    cache.clear();
+    order = [];
+    credentials = { accessToken: '', username: '' };
+    fingerprints.clear();
+    syncedAt = null;
+    cloudState = 'idle';
+    emitSnapshot();
+
+    const reset = Promise.allSettled(serialNumbers.map(disconnect)).then(() => snapshot());
+    const wrappedReset = reset.finally(() => {
+      if (stopSessionPromise === wrappedReset) stopSessionPromise = null;
+    });
+    stopSessionPromise = wrappedReset;
+    return wrappedReset;
+  }
+
   function shutdown() {
     if (shutdownPromise) return shutdownPromise;
     stopped = true;
@@ -535,7 +581,9 @@ export function createDeviceRuntime({
     removeMqttListener = null;
 
     const serialNumbers = [...records.keys()];
-    shutdownPromise = Promise.allSettled(serialNumbers.map(disconnect))
+    const pending = serialNumbers.map(disconnect);
+    if (stopSessionPromise) pending.push(stopSessionPromise);
+    shutdownPromise = Promise.allSettled(pending)
       .then(async () => {
         try {
           await mqtt.shutdown();
@@ -555,7 +603,9 @@ export function createDeviceRuntime({
     updateDevice,
     snapshot,
     getDevice,
+    getCameraConfig,
     subscribe,
+    stopSession,
     shutdown,
   };
 }

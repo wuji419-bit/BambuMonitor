@@ -175,6 +175,125 @@ test('deduplicates normalized cloud serials with the first valid occurrence winn
   assert.equal(harness.connectCalls.length, 1);
 });
 
+test('exposes fresh server-only camera config without leaking access codes through public payloads', async () => {
+  const harness = createHarness({
+    cache: { SERIAL_A: { ip: '192.168.1.20', name: 'Cached Printer', model: 'P1S' } },
+    cloudResults: [{
+      success: true,
+      devices: [cloudDevice('SERIAL_A', { accessCode: 'private-camera-code' })],
+      username: 'cloud-user',
+    }],
+    scanResults: [[]],
+  });
+  const events = [];
+  harness.runtime.subscribe((event) => events.push(event));
+
+  await harness.runtime.start({ accessToken: 'private-cloud-token', username: 'cloud-user' });
+
+  const first = harness.runtime.getCameraConfig('serial_a');
+  assert.deepEqual(first, {
+    serialNumber: 'SERIAL_A',
+    dev_id: 'SERIAL_A',
+    ip: '192.168.1.20',
+    name: 'Cached Printer',
+    model: 'P1S',
+    accessCode: 'private-camera-code',
+  });
+  first.accessCode = 'mutated';
+  assert.equal(harness.runtime.getCameraConfig('SERIAL_A').accessCode, 'private-camera-code');
+  assert.equal(harness.runtime.getCameraConfig('UNKNOWN'), null);
+
+  for (const payload of [harness.runtime.snapshot(), harness.runtime.getDevice('SERIAL_A'), events]) {
+    const serialized = JSON.stringify(payload);
+    assert.equal(serialized.includes('private-camera-code'), false);
+    assert.equal(serialized.includes('private-cloud-token'), false);
+  }
+});
+
+test('stopSession clears live state without shutting down MQTT and a later start synchronizes again', async () => {
+  let stoppedScanSignal;
+  const harness = createHarness({
+    cloudResults: [{
+      success: true,
+      devices: [cloudDevice('SERIAL_A', { accessCode: 'first-code' })],
+      username: 'first-user',
+    }],
+    scanResults: [[], ({ signal }) => {
+      stoppedScanSignal = signal;
+      return new Promise((resolve) => signal.addEventListener('abort', () => resolve([]), { once: true }));
+    }],
+  });
+  await harness.runtime.start({ accessToken: 'first-token', username: 'first-user' });
+  const scanning = harness.runtime.scanLan();
+  await Promise.resolve();
+
+  const firstStop = harness.runtime.stopSession();
+  const secondStop = harness.runtime.stopSession();
+  assert.equal(firstStop, secondStop);
+  await firstStop;
+  assert.equal(stoppedScanSignal.aborted, true);
+  assert.deepEqual(harness.disconnectCalls, ['SERIAL_A']);
+  assert.equal(harness.mqttShutdownCalls, 0);
+  assert.equal(harness.mqttListeners.size, 1);
+  assert.deepEqual(harness.runtime.snapshot(), {
+    type: 'devices.snapshot', devices: [], syncedAt: null, cloudState: 'idle',
+  });
+  assert.equal(harness.runtime.getCameraConfig('SERIAL_A'), null);
+  await scanning;
+
+  harness.enqueueCloud({
+    success: true,
+    devices: [cloudDevice('SERIAL_B', { accessCode: 'second-code' })],
+    username: 'second-user',
+  });
+  harness.enqueueScan([]);
+  await harness.runtime.start({ accessToken: 'second-token', username: 'second-user' });
+  assert.deepEqual(harness.runtime.snapshot().devices.map((device) => device.dev_id), ['SERIAL_B']);
+  assert.equal(harness.runtime.getCameraConfig('SERIAL_B').accessCode, 'second-code');
+  assert.equal(harness.connectCalls.at(-1).authToken, 'second-token');
+  assert.equal(harness.mqttShutdownCalls, 0);
+
+  await harness.runtime.stopSession();
+  await harness.runtime.shutdown();
+  await harness.runtime.shutdown();
+  assert.equal(harness.mqttShutdownCalls, 1);
+});
+
+test('stopSession invalidates a late refresh before a later login start', async () => {
+  const lateRefresh = deferred();
+  const harness = createHarness({
+    cloudResults: [{
+      success: true,
+      devices: [cloudDevice('OLD_SESSION')],
+      username: 'old-user',
+    }],
+    scanResults: [[], []],
+  });
+  await harness.runtime.start({ accessToken: 'old-token', username: 'old-user' });
+  harness.enqueueCloud(lateRefresh.promise);
+  const refreshing = harness.runtime.refresh();
+  await Promise.resolve();
+
+  await harness.runtime.stopSession();
+  harness.enqueueCloud({
+    success: true,
+    devices: [cloudDevice('NEW_SESSION')],
+    username: 'new-user',
+  });
+  await harness.runtime.start({ accessToken: 'new-token', username: 'new-user' });
+  lateRefresh.resolve({
+    success: true,
+    devices: [cloudDevice('STALE_SESSION')],
+    username: 'old-user',
+  });
+  await refreshing;
+
+  assert.deepEqual(harness.runtime.snapshot().devices.map((device) => device.dev_id), ['NEW_SESSION']);
+  assert.equal(harness.connectCalls.some((call) => call.serialNumber === 'STALE_SESSION'), false);
+  assert.equal(harness.connectCalls.at(-1).authToken, 'new-token');
+  assert.equal(harness.mqttShutdownCalls, 0);
+});
+
 test('rejected current MQTT connect clears its fingerprint and retries the replacement record', async () => {
   const firstConnect = deferred();
   const inventory = (name) => ({
