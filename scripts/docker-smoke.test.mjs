@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
@@ -8,24 +9,64 @@ import {
   parseSha256,
   readConfig,
   runCommand,
+  runSmoke,
   waitForHttpStatus,
 } from './docker-smoke.mjs';
+
+const DIGEST = 'a'.repeat(64);
+
+function createChild() {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killCalls = 0;
+  child.kill = () => {
+    child.killCalls += 1;
+    return true;
+  };
+  return child;
+}
+
+function missingContainerError() {
+  const error = new Error('No such container');
+  error.exitCode = 1;
+  return error;
+}
+
+function successfulResult(args) {
+  if (args.includes('sha256sum')) return { stdout: `${DIGEST}  /app/data/secret.key\n`, stderr: '' };
+  if (args.includes('/proc/1/comm')) return { stdout: 'tini\n', stderr: '' };
+  return { stdout: '', stderr: '' };
+}
+
+function createLogCapture(events) {
+  return () => {
+    events.push({ type: 'logs-follow' });
+    return {
+      child: { kill() {} },
+      completion: Promise.resolve({ stdout: '{"event":"server-stopped"}\n', stderr: '' }),
+    };
+  };
+}
 
 test('readConfig defaults to the NAS test image and a dedicated persistent smoke volume', () => {
   const config = readConfig({});
 
   assert.equal(config.image, 'bambu-monitor:nas-test');
   assert.equal(config.volume, 'bambu-monitor-smoke-data');
+  assert.equal(config.commandTimeoutMs, 30_000);
 });
 
 test('readConfig accepts explicit smoke image and named volume overrides', () => {
   const config = readConfig({
     DOCKER_SMOKE_IMAGE: 'registry.example/bambu-monitor:test',
     DOCKER_SMOKE_VOLUME: 'ci-bambu-data',
+    DOCKER_SMOKE_COMMAND_TIMEOUT_MS: '4567',
   });
 
   assert.equal(config.image, 'registry.example/bambu-monitor:test');
   assert.equal(config.volume, 'ci-bambu-data');
+  assert.equal(config.commandTimeoutMs, 4567);
 });
 
 test('waitForHttpStatus retries transport and status failures until the endpoint is ready', async () => {
@@ -138,4 +179,222 @@ test('runCommand rejects spawn errors with command context', async () => {
     runCommand('missing-docker', ['version'], { spawnImpl }),
     /missing-docker version.*ENOENT/i,
   );
+});
+
+test('runCommand kills a child that never closes and rejects once with a clear timeout', async () => {
+  const child = createChild();
+  const guard = new Promise((_, reject) => setTimeout(() => reject(new Error('test guard expired')), 250));
+
+  await assert.rejects(
+    Promise.race([
+      runCommand('docker', ['version'], { spawnImpl: () => child, timeoutMs: 10 }),
+      guard,
+    ]),
+    /docker version timed out after 10ms/i,
+  );
+  assert.equal(child.killCalls, 1);
+  assert.doesNotThrow(() => {
+    child.emit('error', new Error('late error'));
+    child.emit('close', 137, 'SIGKILL');
+  });
+});
+
+test('runCommand clears its hard timeout when the child closes first', async () => {
+  const child = createChild();
+  const scheduled = [];
+  const cleared = [];
+  const timers = {
+    setTimeout(callback, delay) {
+      const handle = { callback, delay };
+      scheduled.push(handle);
+      return handle;
+    },
+    clearTimeout(handle) { cleared.push(handle); },
+  };
+
+  const pending = runCommand('docker', ['version'], {
+    spawnImpl: () => child,
+    timeoutMs: 99,
+    timers,
+  });
+  child.emit('close', 0, null);
+
+  await pending;
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].delay, 99);
+  assert.deepEqual(cleared, scheduled);
+});
+
+test('runCommand schedules a 30 second hard timeout by default', async () => {
+  const child = createChild();
+  const scheduled = [];
+  const cleared = [];
+  const timers = {
+    setTimeout(callback, delay) {
+      scheduled.push({ callback, delay });
+      return scheduled.at(-1);
+    },
+    clearTimeout(handle) { cleared.push(handle); },
+  };
+
+  const pending = runCommand('docker', ['version'], { spawnImpl: () => child, timers });
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].delay, 30_000);
+  scheduled[0].callback();
+  await assert.rejects(pending, /timed out after 30000ms/i);
+  assert.deepEqual(cleared, [scheduled[0]]);
+});
+
+test('runSmoke executes logs-follow before graceful stop and never force-removes on success', async () => {
+  const events = [];
+  const commandRunner = async (command, args, options) => {
+    events.push({ type: 'command', command, args, options });
+    if (args[0] === 'container' && args[1] === 'inspect') throw missingContainerError();
+    return successfulResult(args);
+  };
+
+  await runSmoke({
+    commandRunner,
+    logCaptureFactory: createLogCapture(events),
+    waitForStatus: async (options) => events.push({ type: 'wait', options }),
+    assertStatus: async (options) => events.push({ type: 'assert', options }),
+    output: { write() {} },
+  });
+
+  const logsAt = events.findIndex((event) => event.type === 'logs-follow');
+  const stopAt = events.findIndex((event) => event.args?.[0] === 'stop');
+  assert.ok(logsAt >= 0 && logsAt < stopAt);
+  assert.equal(events.some((event) => event.args?.[0] === 'rm'), false);
+  assert.ok(events.every((event) => event.type !== 'command' || event.options.timeoutMs === 30_000));
+  const run = events.find((event) => event.args?.[0] === 'run');
+  assert.deepEqual(run.args.slice(run.args.indexOf('--volume'), run.args.indexOf('--volume') + 2), [
+    '--volume', 'bambu-monitor-smoke-data:/app/data',
+  ]);
+});
+
+test('runSmoke force-removes only its started container when graceful stop fails', async () => {
+  const events = [];
+  const stopError = new Error('docker stop timed out');
+  const commandRunner = async (command, args, options) => {
+    events.push({ type: 'command', command, args, options });
+    if (args[0] === 'container' && args[1] === 'inspect') throw missingContainerError();
+    if (args[0] === 'stop') throw stopError;
+    return successfulResult(args);
+  };
+
+  await assert.rejects(
+    runSmoke({
+      commandRunner,
+      logCaptureFactory: createLogCapture(events),
+      waitForStatus: async () => {},
+      assertStatus: async () => {},
+      output: { write() {} },
+    }),
+    (error) => error === stopError,
+  );
+
+  assert.ok(events.some((event) => event.args?.[0] === 'rm'
+    && event.args?.[1] === '--force'
+    && event.args?.[2] === 'bambu-monitor-smoke'
+    && event.options.timeoutMs === 30_000));
+  assert.equal(events.filter((event) => event.args?.[0] === 'stop').length, 1);
+  assert.equal(events.some((event) => event.args?.[0] === 'volume'), false);
+});
+
+test('runSmoke never stops or removes a container when startup fails before docker run succeeds', async () => {
+  const events = [];
+  const startupError = new Error('docker daemon unavailable');
+
+  await assert.rejects(
+    runSmoke({
+      commandRunner: async (command, args) => {
+        events.push({ type: 'command', command, args });
+        throw startupError;
+      },
+      logCaptureFactory: createLogCapture(events),
+      waitForStatus: async () => {},
+      assertStatus: async () => {},
+      output: { write() {} },
+    }),
+    (error) => error === startupError,
+  );
+
+  assert.equal(events.some((event) => ['stop', 'rm'].includes(event.args?.[0])), false);
+  assert.equal(events.some((event) => event.type === 'logs-follow'), false);
+});
+
+test('runSmoke refuses a pre-existing container before run and never cleans it up', async () => {
+  const events = [];
+
+  await assert.rejects(
+    runSmoke({
+      commandRunner: async (command, args) => {
+        events.push({ type: 'command', command, args });
+        return successfulResult(args);
+      },
+      logCaptureFactory: createLogCapture(events),
+      waitForStatus: async () => {},
+      assertStatus: async () => {},
+      output: { write() {} },
+    }),
+    /Refusing to use existing container bambu-monitor-smoke/,
+  );
+
+  assert.equal(events.some((event) => ['run', 'stop', 'rm'].includes(event.args?.[0])), false);
+  assert.equal(events.some((event) => event.type === 'logs-follow'), false);
+});
+
+test('runSmoke preserves the primary failure and attaches bounded cleanup failures', async () => {
+  const events = [];
+  const primaryError = new Error('ready check failed');
+  const stopError = new Error('stop failed');
+  const removeError = new Error('remove failed');
+  const commandRunner = async (command, args) => {
+    events.push({ type: 'command', command, args });
+    if (args[0] === 'container' && args[1] === 'inspect') throw missingContainerError();
+    if (args[0] === 'stop') throw stopError;
+    if (args[0] === 'rm') throw removeError;
+    return successfulResult(args);
+  };
+
+  await assert.rejects(
+    runSmoke({
+      commandRunner,
+      logCaptureFactory: createLogCapture(events),
+      waitForStatus: async () => {},
+      assertStatus: async () => { throw primaryError; },
+      output: { write() {} },
+    }),
+    (error) => error === primaryError
+      && error.cleanupErrors?.[0] === stopError
+      && error.cleanupErrors?.[1] === removeError,
+  );
+  const logsAt = events.findIndex((event) => event.type === 'logs-follow');
+  const stopAt = events.findIndex((event) => event.args?.[0] === 'stop');
+  assert.ok(logsAt >= 0 && logsAt < stopAt);
+  assert.equal(events.some((event) => event.args?.[0] === 'volume'), false);
+});
+
+test('runSmoke returns from a command timeout instead of hanging', async () => {
+  const child = createChild();
+  const guard = new Promise((_, reject) => setTimeout(() => reject(new Error('test guard expired')), 250));
+
+  await assert.rejects(
+    Promise.race([
+      runSmoke({
+        env: { DOCKER_SMOKE_COMMAND_TIMEOUT_MS: '10' },
+        commandRunner: (command, args, options) => runCommand(command, args, {
+          ...options,
+          spawnImpl: () => child,
+        }),
+        logCaptureFactory: () => { throw new Error('logs must not start'); },
+        waitForStatus: async () => {},
+        assertStatus: async () => {},
+        output: { write() {} },
+      }),
+      guard,
+    ]),
+    /docker version timed out after 10ms/i,
+  );
+  assert.equal(child.killCalls, 1);
 });

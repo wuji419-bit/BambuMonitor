@@ -76,21 +76,3 @@ test('.dockerignore excludes only the root Compose data directory', async () => 
     'server data-handling source must remain in the Docker build context',
   );
 });
-
-test('docker smoke follows logs after restart and before stopping its disposable container', async () => {
-  const source = await read('scripts/docker-smoke.mjs');
-  const restartAt = source.indexOf("['restart', config.container]");
-  const logsAt = source.indexOf("['logs', '--follow', config.container]");
-  const stopAt = source.indexOf("['stop', '--time', '10', config.container]", logsAt);
-
-  assert.ok(restartAt >= 0, 'missing docker restart');
-  assert.ok(logsAt > restartAt, 'docker logs --follow must start after restart');
-  assert.ok(stopAt > logsAt, 'docker logs --follow must start before docker stop');
-});
-
-test('docker smoke mounts but never deletes its dedicated named data volume', async () => {
-  const source = await read('scripts/docker-smoke.mjs');
-
-  assert.match(source, /'--volume', `\$\{config\.volume\}:\/app\/data`/);
-  assert.doesNotMatch(source, /volume['"]?,\s*['"]rm|volume\s+rm/i);
-});
