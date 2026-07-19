@@ -8,6 +8,41 @@ BambuMonitor 是一款面向 Bambu Lab / 拓竹打印机的轻量桌面监控工
 
 [下载最新版本](https://github.com/wuji419-bit/BambuMonitor/releases) · [查看源码](https://github.com/wuji419-bit/BambuMonitor) · AGPLv3 开源
 
+## NAS / Docker 版
+
+Linux NAS 可通过一个容器运行 BambuMonitor，支持 `amd64` 与 `arm64`。创建目录并把下方内容保存为 `compose.yaml`：
+
+```bash
+mkdir -p bambu-monitor && cd bambu-monitor
+mkdir -p data
+chown -R 1000:1000 data
+```
+
+```yaml
+services:
+  bambu-monitor:
+    image: ghcr.io/wuji419-bit/bambu-monitor:latest
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      PORT: 3080
+      DATA_DIR: /app/data
+      TZ: Asia/Shanghai
+      TRUST_PROXY: "0"
+    volumes:
+      - ./data:/app/data
+```
+
+```bash
+docker compose up -d
+```
+
+随后打开 `http://NAS-IP:3080`。云端状态无需打印机本地 IP；摄像头和本地状态要求 NAS 与打印机局域网可达。不支持从公网直接读取打印机画面，也不要向公网暴露打印机 MQTT 或摄像头端口。
+
+完整部署、升级、备份、反向代理和排错说明见 [NAS Docker 部署指南](./docs/NAS_DOCKER.md)。项目地址：[GitHub](https://github.com/wuji419-bit/BambuMonitor)；QQ 交流群：`526457346`。
+
+AGPLv3 要求通过网络服务提供修改版时，向该服务的用户提供正在运行版本的对应源码。
+
 ## 为什么使用 BambuMonitor
 
 - **一屏查看多台设备**：集中显示进度、剩余时间、层数、温度、速度、任务和 AMS 耗材。
