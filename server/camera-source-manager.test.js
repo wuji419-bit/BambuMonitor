@@ -252,6 +252,12 @@ test('selects sources, reports safe misconfiguration, and applies bounded backof
   assert.deepEqual([0, 1, 2, 3, 8].map(manager.retryDelay), [1000, 2000, 4000, 8000, 30_000]);
 });
 
+test('retry jitter never exceeds the hard thirty-second cap', () => {
+  const manager = createManager({ random: () => 1 });
+
+  assert.equal(manager.retryDelay(8), 30_000);
+});
+
 test('same configuration is a no-op and changed configuration replaces an active source', () => {
   const manager = createManager();
   const device = {
@@ -273,6 +279,66 @@ test('same configuration is a no-op and changed configuration replaces an active
   assert.equal(FakeChamberStream.instances.length, 2);
   assert.equal(FakeChamberStream.instances[1].startCalls, 1);
   release();
+});
+
+test('external fingerprint normalizes URLs and privately includes credential-derived auth', async () => {
+  const fetchCalls = [];
+  const manager = createManager({
+    fetchImpl(url, options) {
+      fetchCalls.push({ url, options });
+      return new Promise(() => {});
+    },
+  });
+  manager.configure({
+    serialNumber: 'HTTP_A',
+    customUrl: 'http://camera-user:secret-a@camera.local:80/live',
+  });
+  manager.acquire('HTTP_A');
+
+  assert.equal(manager.configure({
+    serialNumber: 'HTTP_A',
+    customUrl: 'http://camera-user:secret-a@camera.local/live',
+  }), false);
+  assert.equal(fetchCalls.length, 1);
+
+  assert.equal(manager.configure({
+    serialNumber: 'HTTP_A',
+    customUrl: 'http://camera-user:secret-b@camera.local/live',
+  }), true);
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(JSON.stringify(manager.inspect()).includes('secret-'), false);
+  await manager.shutdown();
+});
+
+test('external fingerprint ignores header insertion order and field-name casing', async () => {
+  const fetchCalls = [];
+  const manager = createManager({
+    fetchImpl(url, options) {
+      fetchCalls.push({ url, options });
+      return new Promise(() => {});
+    },
+  });
+  manager.configure({
+    serialNumber: 'HTTP_A',
+    customUrl: 'https://camera.local/live',
+    headers: {
+      'X-Camera-Token': 'camera-value',
+      Authorization: 'Bearer private-token',
+    },
+  });
+  manager.acquire('HTTP_A');
+
+  assert.equal(manager.configure({
+    serialNumber: 'HTTP_A',
+    customUrl: 'https://camera.local/live',
+    headers: {
+      authorization: 'Bearer private-token',
+      'x-camera-token': 'camera-value',
+    },
+  }), false);
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(JSON.stringify(manager.inspect()).includes('private-token'), false);
+  await manager.shutdown();
 });
 
 test('listener failures and mutations are isolated and latest frames are defensive copies', async () => {

@@ -49,6 +49,14 @@ function hasAuthorization(headers) {
   return Object.keys(headers).some((name) => name.toLowerCase() === 'authorization');
 }
 
+function canonicalHeaderEntries(headers) {
+  return Object.entries(headers)
+    .map(([name, value]) => [name.toLowerCase(), value])
+    .sort(([leftName, leftValue], [rightName, rightValue]) => (
+      leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue)
+    ));
+}
+
 function externalConfig(rawUrl, device) {
   try {
     const url = new URL(rawUrl);
@@ -77,7 +85,11 @@ function selectConfig(device, serialNumber) {
       valid: external !== null,
       requestUrl: external?.requestUrl || '',
       headers: external?.headers || {},
-      fingerprint: JSON.stringify(['external-http', customUrl, external?.headers || {}]),
+      fingerprint: JSON.stringify([
+        'external-http',
+        external?.requestUrl || '',
+        canonicalHeaderEntries(external?.headers || {}),
+      ]),
     };
   }
 
@@ -148,7 +160,7 @@ export function createCameraSourceManager(options = {}) {
   function retryDelay(attempt) {
     const safeAttempt = Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 0;
     const base = Math.min(30_000, 1_000 * (2 ** Math.min(safeAttempt, 20)));
-    return base + Math.floor(base * 0.25 * safeRandom(random));
+    return Math.min(30_000, base + Math.floor(base * 0.25 * safeRandom(random)));
   }
 
   function clearTimer(entry, key) {
