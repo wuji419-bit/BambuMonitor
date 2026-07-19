@@ -57,7 +57,7 @@ function createHarness(overrides = {}) {
     authenticate: [], cameraAcquire: [], cameraConfigure: [], cameraRelease: 0,
     cameraSubscribe: [], cameraUnsubscribe: 0, clear: 0, cloud: [], refresh: 0,
     cloudRaw: [], runtimeShutdown: 0, runtimeStopSession: 0, start: [], updateDevice: [],
-    updateSettings: [], notifications: [],
+    startListenerCounts: [], updateSettings: [], notifications: [],
   };
   let snapshot = {
     type: 'devices.snapshot',
@@ -128,7 +128,13 @@ function createHarness(overrides = {}) {
     },
     async start(session) {
       calls.start.push(structuredClone(session));
+      calls.startListenerCounts.push(runtimeListeners.size);
       if (snapshot.devices.length === 0) snapshot = structuredClone(restartSnapshot);
+      if (overrides.startSnapshot) {
+        snapshot = structuredClone(overrides.startSnapshot);
+        restartSnapshot = structuredClone(snapshot);
+        for (const listener of runtimeListeners) listener(structuredClone(snapshot));
+      }
       return structuredClone(snapshot);
     },
     async refresh() { calls.refresh += 1; return structuredClone(snapshot); },
@@ -190,7 +196,16 @@ function createHarness(overrides = {}) {
     get: () => structuredClone(settings),
     async update(patch) {
       calls.updateSettings.push(structuredClone(patch));
-      settings = { ...settings, ...structuredClone(patch), version: 1 };
+      const next = structuredClone(patch);
+      settings = {
+        ...settings,
+        ...next,
+        camera: next.camera ? { ...settings.camera, ...next.camera } : settings.camera,
+        notifications: next.notifications
+          ? { ...settings.notifications, ...next.notifications }
+          : settings.notifications,
+        version: 1,
+      };
       return structuredClone(settings);
     },
   };
@@ -206,7 +221,7 @@ function createHarness(overrides = {}) {
   });
 
   return {
-    app, calls, cameraListeners, deviceRuntime, runtimeListeners, sessionStore,
+    app, calls, cameraListeners, configStore, deviceRuntime, runtimeListeners, sessionStore,
     emitCamera(serial, frame = JPEG) {
       latestFrame = Buffer.from(frame);
       for (const listener of cameraListeners.get(serial) ?? []) listener(Buffer.from(frame));
@@ -360,6 +375,62 @@ test('password login enforces origin and exact bounded JSON then creates a secur
   assert.equal(JSON.stringify(loggedIn.body).includes('private-access-token'), false);
   assert.equal(harness.calls.cloudRaw[0].password, '');
   assert.deepEqual(harness.calls.start, [{ accessToken: 'private-access-token', username: 'cloud-user' }]);
+});
+
+test('cross-account login synchronously removes old websocket subscriptions before runtime start', async (t) => {
+  const harness = createHarness({
+    startSnapshot: {
+      type: 'devices.snapshot',
+      devices: [{ dev_id: 'NEW_ACCOUNT_DEVICE', name: 'New account printer' }],
+      syncedAt: 200,
+      cloudState: 'connected',
+    },
+  });
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+  const oldSocket = await openSocket(base);
+  await nextMessage(oldSocket);
+  assert.equal(harness.runtimeListeners.size, 1);
+
+  const login = await request(base, '/api/auth/login', {
+    method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account: 'new-account@example.com', password: 'private-password' }),
+  });
+  assert.equal(login.response.status, 200);
+  assert.deepEqual(harness.calls.startListenerCounts, [0]);
+  assert.equal(harness.runtimeListeners.size, 0);
+  await waitFor(() => oldSocket.readyState === WebSocket.CLOSED, 'cross-account websocket close', 20);
+  assert.equal(
+    oldSocket.testMessages.some((message) => JSON.stringify(message).includes('NEW_ACCOUNT_DEVICE')),
+    false,
+  );
+});
+
+test('same-account login keeps existing websocket subscriptions and session cap ownership', async (t) => {
+  const harness = createHarness({
+    startSnapshot: {
+      type: 'devices.snapshot',
+      devices: [{ dev_id: 'SAME_ACCOUNT_DEVICE', name: 'Same account printer' }],
+      syncedAt: 201,
+      cloudState: 'connected',
+    },
+  });
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+  const existingSocket = await openSocket(base);
+  await nextMessage(existingSocket);
+
+  const update = nextMessage(existingSocket);
+  const login = await request(base, '/api/auth/login', {
+    method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account: 'test@example.com', password: 'private-password' }),
+  });
+  assert.equal(login.response.status, 200);
+  assert.deepEqual(harness.calls.startListenerCounts, [1]);
+  assert.equal((await update).devices[0].dev_id, 'SAME_ACCOUNT_DEVICE');
+  assert.equal(existingSocket.readyState, WebSocket.OPEN);
+  assert.equal(harness.runtimeListeners.size, 1);
+  await closeSocket(existingSocket);
 });
 
 test('auth endpoints require JSON, enforce body and independent account rate limits, and never output secrets', async (t) => {
@@ -522,6 +593,146 @@ test('devices and settings validate paths and object contracts before one runtim
   });
   assert.equal(settings.response.status, 200);
   assert.deepEqual(harness.calls.updateSettings, [{ debug: true }]);
+});
+
+test('settings projection redacts credentials while PUT preserves round-trips and accepts replacements', async (t) => {
+  const rawSettings = {
+    version: 1,
+    camera: {
+      autoOpen: false,
+      customUrls: {
+        SERIAL_A: 'https://camera-user:camera-pass@camera.example.test/live?token=camera-query-secret&view=wide',
+      },
+    },
+    notifications: {
+      enabled: true,
+      targets: [
+        {
+          id: 'alpha', name: 'Alpha', type: 'webhook', enabled: true,
+          secret: 'alpha-target-secret', token: 'alpha-target-token',
+          url: 'https://alpha-user:alpha-pass@hooks.example.test/alpha?api_key=alpha-query-secret&safe=visible',
+          headers: {
+            Authorization: 'Bearer alpha-auth-secret',
+            'Proxy-Authorization': 'Basic alpha-proxy-auth-secret',
+            Cookie: 'sid=alpha-cookie-secret',
+            'X-API-Key': 'alpha-header-api-key',
+            'X-Token': 'alpha-header-token',
+            'X-Secret': 'alpha-header-secret',
+            'X-Safe': 'visible-header',
+          },
+        },
+        {
+          id: 'beta', name: 'Beta', secret: 'beta-target-secret', token: 'beta-target-token',
+          url: 'https://hooks.example.test/beta?access_token=beta-query-secret',
+          headers: { Authorization: 'Bearer beta-auth-secret' },
+        },
+        {
+          name: 'Index fallback', secret: 'index-target-secret', token: 'index-target-token',
+          headers: { 'X-API-Key': 'index-header-secret' },
+        },
+      ],
+    },
+    debug: false,
+  };
+  const secretValues = [
+    'camera-user', 'camera-pass', 'camera-query-secret',
+    'alpha-user', 'alpha-pass', 'alpha-query-secret', 'alpha-target-secret', 'alpha-target-token',
+    'alpha-auth-secret', 'alpha-proxy-auth-secret', 'alpha-cookie-secret', 'alpha-header-api-key', 'alpha-header-token',
+    'alpha-header-secret', 'beta-target-secret', 'beta-target-token', 'beta-query-secret',
+    'beta-auth-secret', 'index-target-secret', 'index-target-token', 'index-header-secret',
+  ];
+  const assertProjected = (payload) => {
+    const serialized = JSON.stringify(payload);
+    for (const secret of secretValues) assert.equal(serialized.includes(secret), false, secret);
+  };
+  const harness = createHarness({ settings: rawSettings });
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const read = await request(base, '/api/settings', { headers: { Cookie: cookie() } });
+  assert.equal(read.response.status, 200);
+  const projected = read.body.data;
+  assertProjected(projected);
+  assert.equal(projected.notifications.targets[0].secret, '[REDACTED]');
+  assert.equal(projected.notifications.targets[0].token, '[REDACTED]');
+  assert.equal(projected.notifications.targets[0].headers.Authorization, '[REDACTED]');
+  assert.equal(projected.notifications.targets[0].headers['Proxy-Authorization'], '[REDACTED]');
+  assert.equal(projected.notifications.targets[0].headers.Cookie, '[REDACTED]');
+  assert.equal(projected.notifications.targets[0].headers['X-API-Key'], '[REDACTED]');
+  assert.equal(projected.notifications.targets[0].headers['X-Safe'], 'visible-header');
+
+  const roundTrip = await request(base, '/api/settings', {
+    method: 'PUT', headers: apiHeaders(base), body: JSON.stringify(projected),
+  });
+  assert.equal(roundTrip.response.status, 200);
+  assertProjected(roundTrip.body);
+  let storedPatch = harness.calls.updateSettings.at(-1);
+  assert.equal(storedPatch.camera.customUrls.SERIAL_A, rawSettings.camera.customUrls.SERIAL_A);
+  assert.equal(storedPatch.notifications.targets[0].secret, 'alpha-target-secret');
+  assert.equal(storedPatch.notifications.targets[0].headers.Authorization, 'Bearer alpha-auth-secret');
+  assert.equal(storedPatch.notifications.targets[0].url, rawSettings.notifications.targets[0].url);
+  assert.equal(storedPatch.notifications.targets[2].secret, 'index-target-secret');
+
+  const reorderedTargets = [
+    projected.notifications.targets[1],
+    projected.notifications.targets[0],
+    projected.notifications.targets[2],
+  ];
+  const reordered = await request(base, '/api/settings', {
+    method: 'PUT', headers: apiHeaders(base),
+    body: JSON.stringify({ notifications: { targets: reorderedTargets } }),
+  });
+  assert.equal(reordered.response.status, 200);
+  storedPatch = harness.calls.updateSettings.at(-1);
+  assert.equal(storedPatch.notifications.targets[0].secret, 'beta-target-secret');
+  assert.equal(storedPatch.notifications.targets[1].secret, 'alpha-target-secret');
+  assert.equal(storedPatch.notifications.targets[2].secret, 'index-target-secret');
+
+  const omitted = await request(base, '/api/settings', {
+    method: 'PUT', headers: apiHeaders(base),
+    body: JSON.stringify({ notifications: { targets: [{ id: 'alpha', name: 'Renamed Alpha' }] } }),
+  });
+  assert.equal(omitted.response.status, 200);
+  storedPatch = harness.calls.updateSettings.at(-1).notifications.targets[0];
+  assert.equal(storedPatch.secret, 'alpha-target-secret');
+  assert.equal(storedPatch.token, 'alpha-target-token');
+  assert.equal(storedPatch.headers.Authorization, 'Bearer alpha-auth-secret');
+  assert.equal(storedPatch.url, rawSettings.notifications.targets[0].url);
+
+  const replacement = await request(base, '/api/settings', {
+    method: 'PUT', headers: apiHeaders(base),
+    body: JSON.stringify({
+      camera: {
+        customUrls: {
+          SERIAL_A: 'https://replacement-camera-user:replacement-camera-pass@camera.example.test/new?token=replacement-camera-token',
+        },
+      },
+      notifications: { targets: [{
+        id: 'alpha',
+        secret: 'replacement-target-secret',
+        token: 'replacement-target-token',
+        url: 'https://hooks.example.test/new?token=replacement-query-secret',
+        headers: { Authorization: 'Bearer replacement-auth-secret' },
+      }] },
+    }),
+  });
+  assert.equal(replacement.response.status, 200);
+  assert.equal(
+    harness.calls.updateSettings.at(-1).camera.customUrls.SERIAL_A,
+    'https://replacement-camera-user:replacement-camera-pass@camera.example.test/new?token=replacement-camera-token',
+  );
+  storedPatch = harness.calls.updateSettings.at(-1).notifications.targets[0];
+  assert.equal(storedPatch.secret, 'replacement-target-secret');
+  assert.equal(storedPatch.token, 'replacement-target-token');
+  assert.equal(storedPatch.url, 'https://hooks.example.test/new?token=replacement-query-secret');
+  assert.equal(storedPatch.headers.Authorization, 'Bearer replacement-auth-secret');
+  for (const secret of [
+    'replacement-target-secret', 'replacement-target-token',
+    'replacement-query-secret', 'replacement-auth-secret', 'replacement-camera-user',
+    'replacement-camera-pass', 'replacement-camera-token',
+  ]) {
+    assert.equal(JSON.stringify(replacement.body).includes(secret), false);
+  }
 });
 
 test('notification tests use server-side settings and unsupported mode is explicit without echoing targets', async (t) => {

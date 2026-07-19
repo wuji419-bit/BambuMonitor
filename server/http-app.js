@@ -47,6 +47,8 @@ const MIME_TYPES = Object.freeze({
   '.woff2': 'font/woff2',
 });
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const WRITE_ONLY_VALUE = '[REDACTED]';
+const TARGET_FIELDS = Object.freeze(['id', 'name', 'type', 'enabled']);
 
 function isPlainObject(value) {
   if (value === null || typeof value !== 'object') return false;
@@ -209,7 +211,10 @@ function validateDevicePatch(body) {
 }
 
 function validateSettingsPatch(body) {
-  if (!hasOnlyKeys(body, ['camera', 'notifications', 'debug'])) {
+  if (!hasOnlyKeys(body, ['version', 'camera', 'notifications', 'debug'])) {
+    throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+  }
+  if (Object.hasOwn(body, 'version') && !Number.isInteger(body.version)) {
     throw apiError(400, 'BAD_REQUEST', 'Invalid request');
   }
   if (Object.hasOwn(body, 'camera')) {
@@ -236,6 +241,198 @@ function validateSettingsPatch(body) {
 
 function safeDictionary(value) {
   return isPlainObject(value) && Object.keys(value).every((key) => !DANGEROUS_KEYS.has(key));
+}
+
+function isSensitiveName(value) {
+  const normalized = String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normalized.includes('authorization') || normalized.includes('cookie')
+    || normalized.includes('apikey') || normalized.includes('token')
+    || normalized.includes('secret') || normalized.includes('password')
+    || normalized.includes('credential') || normalized.includes('accesscode');
+}
+
+function projectOpaque(value) {
+  return typeof value === 'string' && value.length === 0 ? '' : WRITE_ONLY_VALUE;
+}
+
+function projectCredentialUrl(value) {
+  if (typeof value !== 'string' || value.length === 0) return '';
+  try {
+    const url = new URL(value);
+    url.username = '';
+    url.password = '';
+    for (const name of [...url.searchParams.keys()]) {
+      if (isSensitiveName(name)) url.searchParams.set(name, WRITE_ONLY_VALUE);
+    }
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
+function projectHeaders(value) {
+  const projected = {};
+  if (!safeDictionary(value)) return projected;
+  for (const [name, headerValue] of Object.entries(value)) {
+    if (DANGEROUS_KEYS.has(name) || typeof headerValue !== 'string') continue;
+    projected[name] = isSensitiveName(name) ? projectOpaque(headerValue) : headerValue;
+  }
+  return projected;
+}
+
+function projectTarget(value) {
+  const projected = {};
+  if (!isPlainObject(value)) return projected;
+  for (const field of TARGET_FIELDS) {
+    if (Object.hasOwn(value, field)) projected[field] = value[field];
+  }
+  if (Object.hasOwn(value, 'url')) projected.url = projectCredentialUrl(value.url);
+  for (const field of ['secret', 'token']) {
+    if (Object.hasOwn(value, field)) projected[field] = projectOpaque(value[field]);
+  }
+  if (Object.hasOwn(value, 'headers')) projected.headers = projectHeaders(value.headers);
+  return projected;
+}
+
+function projectSettings(value) {
+  const projected = {};
+  if (!isPlainObject(value)) return projected;
+  if (Number.isInteger(value.version)) projected.version = value.version;
+  if (isPlainObject(value.camera)) {
+    const camera = {};
+    if (typeof value.camera.autoOpen === 'boolean') camera.autoOpen = value.camera.autoOpen;
+    if (safeDictionary(value.camera.customUrls)) {
+      camera.customUrls = {};
+      for (const [serial, url] of Object.entries(value.camera.customUrls)) {
+        if (!DANGEROUS_KEYS.has(serial)) camera.customUrls[serial] = projectCredentialUrl(url);
+      }
+    }
+    projected.camera = camera;
+  }
+  if (isPlainObject(value.notifications)) {
+    const notifications = {};
+    if (typeof value.notifications.enabled === 'boolean') notifications.enabled = value.notifications.enabled;
+    if (Array.isArray(value.notifications.targets)) {
+      notifications.targets = value.notifications.targets.map(projectTarget);
+    }
+    projected.notifications = notifications;
+  }
+  if (typeof value.debug === 'boolean') projected.debug = value.debug;
+  return projected;
+}
+
+function cloneStoredHeaders(value) {
+  const result = {};
+  if (!safeDictionary(value)) return result;
+  for (const [name, headerValue] of Object.entries(value)) {
+    if (!DANGEROUS_KEYS.has(name) && typeof headerValue === 'string') result[name] = headerValue;
+  }
+  return result;
+}
+
+function mergeCredentialHeaders(incoming, stored) {
+  const result = {};
+  const storedHeaders = cloneStoredHeaders(stored);
+  const represented = new Set();
+  for (const [name, value] of Object.entries(incoming)) {
+    const normalized = name.toLowerCase();
+    represented.add(normalized);
+    const storedName = Object.keys(storedHeaders).find((candidate) => candidate.toLowerCase() === normalized);
+    if (isSensitiveName(name) && storedName
+      && value === projectOpaque(storedHeaders[storedName])) {
+      result[name] = storedHeaders[storedName];
+    } else {
+      result[name] = value;
+    }
+  }
+  for (const [name, value] of Object.entries(storedHeaders)) {
+    if (isSensitiveName(name) && !represented.has(name.toLowerCase())) result[name] = value;
+  }
+  return result;
+}
+
+function findStoredTarget(incoming, index, targets, used) {
+  if (typeof incoming.id === 'string' && incoming.id.length > 0) {
+    const matchedIndex = targets.findIndex((target, candidateIndex) => !used.has(candidateIndex)
+      && isPlainObject(target) && target.id === incoming.id);
+    if (matchedIndex < 0) return null;
+    used.add(matchedIndex);
+    return targets[matchedIndex];
+  }
+  if (index >= targets.length || used.has(index) || !isPlainObject(targets[index])) return null;
+  used.add(index);
+  return targets[index];
+}
+
+function mergeWriteOnlyTarget(incoming, stored) {
+  const target = {};
+  for (const field of TARGET_FIELDS) {
+    if (Object.hasOwn(incoming, field)) target[field] = incoming[field];
+  }
+  for (const field of ['secret', 'token']) {
+    if (Object.hasOwn(incoming, field)) {
+      target[field] = stored && Object.hasOwn(stored, field)
+        && incoming[field] === projectOpaque(stored[field])
+        ? stored[field]
+        : incoming[field];
+    } else if (stored && Object.hasOwn(stored, field)) {
+      target[field] = stored[field];
+    }
+  }
+  if (Object.hasOwn(incoming, 'url')) {
+    target.url = stored && Object.hasOwn(stored, 'url')
+      && incoming.url === projectCredentialUrl(stored.url)
+      ? stored.url
+      : incoming.url;
+  } else if (stored && Object.hasOwn(stored, 'url')) {
+    target.url = stored.url;
+  }
+  if (Object.hasOwn(incoming, 'headers')) {
+    target.headers = mergeCredentialHeaders(incoming.headers, stored?.headers);
+  } else if (stored && Object.hasOwn(stored, 'headers')) {
+    target.headers = cloneStoredHeaders(stored.headers);
+  }
+  return target;
+}
+
+function prepareSettingsPatch(incoming, storedSettings) {
+  const patch = {};
+  if (Object.hasOwn(incoming, 'camera')) {
+    const camera = {};
+    if (Object.hasOwn(incoming.camera, 'autoOpen')) camera.autoOpen = incoming.camera.autoOpen;
+    if (Object.hasOwn(incoming.camera, 'customUrls')) {
+      camera.customUrls = {};
+      const storedUrls = safeDictionary(storedSettings?.camera?.customUrls)
+        ? storedSettings.camera.customUrls
+        : {};
+      for (const [serial, url] of Object.entries(incoming.camera.customUrls)) {
+        if (DANGEROUS_KEYS.has(serial)) continue;
+        camera.customUrls[serial] = Object.hasOwn(storedUrls, serial)
+          && url === projectCredentialUrl(storedUrls[serial])
+          ? storedUrls[serial]
+          : url;
+      }
+    }
+    patch.camera = camera;
+  }
+  if (Object.hasOwn(incoming, 'notifications')) {
+    const notifications = {};
+    if (Object.hasOwn(incoming.notifications, 'enabled')) {
+      notifications.enabled = incoming.notifications.enabled;
+    }
+    if (Object.hasOwn(incoming.notifications, 'targets')) {
+      const storedTargets = Array.isArray(storedSettings?.notifications?.targets)
+        ? storedSettings.notifications.targets
+        : [];
+      const used = new Set();
+      notifications.targets = incoming.notifications.targets.map((target, index) => (
+        mergeWriteOnlyTarget(target, findStoredTarget(target, index, storedTargets, used))
+      ));
+    }
+    patch.notifications = notifications;
+  }
+  if (Object.hasOwn(incoming, 'debug')) patch.debug = incoming.debug;
+  return patch;
 }
 
 function normalizeRelease(value) {
@@ -378,10 +575,22 @@ export function createHttpApp(deps = {}) {
         username = '';
       }
     }
+    const priorBambuSession = typeof sessionStore.getBambuSession === 'function'
+      ? sessionStore.getBambuSession()
+      : null;
+    const priorAccount = typeof priorBambuSession?.account === 'string'
+      ? priorBambuSession.account
+      : null;
     const created = await sessionStore.create({ account: body.account, accessToken, username });
     const saved = typeof sessionStore.getBambuSession === 'function'
       ? sessionStore.getBambuSession()
       : { accessToken, username };
+    const savedAccount = typeof saved?.account === 'string'
+      ? saved.account
+      : created.account ?? body.account;
+    if (priorAccount !== null && priorAccount !== savedAccount) {
+      terminateAllSessionSockets();
+    }
     await deviceRuntime.start({ accessToken: saved?.accessToken || accessToken, username: saved?.username || username });
     accessToken = null;
     result = null;
@@ -466,7 +675,7 @@ export function createHttpApp(deps = {}) {
     }
     if (pathname === '/api/settings' && req.method === 'GET') {
       await requireSession(req);
-      return sendSuccess(res, configStore.get());
+      return sendSuccess(res, projectSettings(configStore.get()));
     }
     if (pathname === '/api/settings' && req.method === 'PUT') {
       const auth = await requireSession(req);
@@ -474,7 +683,9 @@ export function createHttpApp(deps = {}) {
       const body = await jsonBody(req, limits.bodyBytes);
       validateSettingsPatch(body);
       try {
-        return sendSuccess(res, await configStore.update(body));
+        const stored = configStore.get();
+        const updated = await configStore.update(prepareSettingsPatch(body, stored));
+        return sendSuccess(res, projectSettings(updated));
       } catch {
         throw apiError(400, 'BAD_REQUEST', 'Invalid request');
       }
@@ -792,6 +1003,13 @@ export function createHttpApp(deps = {}) {
 
   function closeAllSessionSockets(code = 1008, reason = 'Session invalid') {
     for (const sessionId of [...wsBySession.keys()]) closeSessionSockets(sessionId, code, reason);
+  }
+
+  function terminateAllSessionSockets() {
+    for (const [ws, cleanup] of [...wsCleanup]) {
+      cleanup();
+      try { ws.terminate(); } catch { /* already closed */ }
+    }
   }
 
   function safeWsSend(ws, event, afterSend) {
