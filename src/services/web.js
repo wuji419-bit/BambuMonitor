@@ -230,6 +230,13 @@ export function createWebRuntime({
     };
   }
 
+  function closeEvents() {
+    csrfToken = '';
+    authenticated = false;
+    invalidEmitted = false;
+    stopEventGeneration({ clearListeners: true });
+  }
+
   async function completeLogin(path, payload) {
     const result = await request(path, { method: 'POST', body: payload });
     if (!result.success) return result;
@@ -349,12 +356,10 @@ export function createWebRuntime({
       onDeviceSnapshot(listener) { return subscribe('devices.snapshot', listener); },
       onDeviceUpdate(listener) { return subscribe('device.updated', listener); },
       onSessionInvalid(listener) { return subscribe('session.invalid', listener); },
+      close: closeEvents,
     },
     close() {
-      csrfToken = '';
-      authenticated = false;
-      invalidEmitted = false;
-      stopEventGeneration({ clearListeners: true });
+      return runtime.events.close();
     },
   };
 

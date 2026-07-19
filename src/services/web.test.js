@@ -125,7 +125,7 @@ test('login stores CSRF only in memory and authenticated requests use exact API 
   assert.equal(queue.calls[2].options.body, '{}');
   assert.equal(JSON.stringify(login).includes('csrf-secret'), false);
   assert.equal(JSON.stringify(login).includes('private-password'), false);
-  runtime.close();
+  runtime.events.close();
 });
 
 test('session restoration is token-free, logout uses CSRF, and saveSession is a no-op', async () => {
@@ -144,7 +144,7 @@ test('session restoration is token-free, logout uses CSRF, and saveSession is a 
   assert.equal(queue.calls.length, 2);
   assert.equal(queue.calls[1].options.headers['X-CSRF-Token'], 'csrf-restored');
   assert.equal(JSON.stringify(queue.calls).includes('must-not-persist'), false);
-  runtime.close();
+  runtime.events.close();
 });
 
 test('auth code endpoints and API errors preserve safe status and code', async () => {
@@ -163,7 +163,7 @@ test('auth code endpoints and API errors preserve safe status and code', async (
   assert.deepEqual(queue.calls.map(({ url }) => url), [
     '/api/auth/code/request', '/api/auth/code/verify',
   ]);
-  runtime.close();
+  runtime.events.close();
 });
 
 test('device, settings, and notification mutations preserve exact payloads and adapt results', async () => {
@@ -192,7 +192,7 @@ test('device, settings, and notification mutations preserve exact payloads and a
   assert.equal(queue.calls[1].options.body, JSON.stringify({ ip: 'printer.local' }));
   assert.equal(queue.calls[3].options.method, 'PUT');
   assert.equal(queue.calls[4].options.body, '{}');
-  runtime.close();
+  runtime.events.close();
 });
 
 test('camera URLs are same-origin and never accept or expose printer secrets', async () => {
@@ -213,7 +213,7 @@ test('camera URLs are same-origin and never accept or expose printer secrets', a
   assert.deepEqual(await runtime.camera.stop({ serialNumber: 'SERIAL / 一' }), { success: true });
   assert.deepEqual(await runtime.camera.stopAll(), { success: true });
   assert.equal(queue.calls.length, 0);
-  runtime.close();
+  runtime.events.close();
 });
 
 test('401 invalidates once, clears session memory, and preserves no secret in the result', async () => {
@@ -236,7 +236,7 @@ test('401 invalidates once, clears session memory, and preserves no secret in th
   assert.equal(queue.calls[2].options.headers['X-CSRF-Token'], undefined);
   assert.equal(JSON.stringify(first).includes('csrf-private'), false);
   assert.equal(JSON.stringify(first).includes('secret-password'), false);
-  runtime.close();
+  runtime.events.close();
 });
 
 test('one websocket fans out cloned known events and immediate fallback snapshot', async () => {
@@ -270,7 +270,9 @@ test('one websocket fans out cloned known events and immediate fallback snapshot
 
   offFirst();
   offFirst();
-  runtime.close();
+  const activeSocket = FakeWebSocket.instances[0];
+  runtime.events.close();
+  assert.equal(activeSocket.closeCalls.length, 1);
 });
 
 test('websocket reconnect uses bounded backoff, one timer, and rejects stale generations', async () => {
@@ -306,7 +308,7 @@ test('websocket reconnect uses bounded backoff, one timer, and rejects stale gen
   assert.equal(timers.runNext(), 15000);
   FakeWebSocket.instances.at(-1).serverClose();
 
-  runtime.close();
+  runtime.events.close();
   staleSocket.message({ type: 'device.updated', device: { dev_id: 'stale' } });
   assert.equal(updates.length, 0);
   assert.equal(timers.timers.size, 0);
@@ -316,8 +318,9 @@ test('websocket reconnect uses bounded backoff, one timer, and rejects stale gen
   await Promise.resolve();
   assert.equal(FakeWebSocket.instances.length, 8);
   FakeWebSocket.instances.at(-1).message({ type: 'device.updated', device: { dev_id: 'fresh' } });
+  assert.equal(updates.length, 1, 'listeners from the closed generation were removed');
   assert.equal(updates.at(-1).device.dev_id, 'fresh');
-  runtime.close();
+  runtime.events.close();
 });
 
 test('session.invalid socket event emits once and closes the active generation', async () => {
@@ -336,7 +339,7 @@ test('session.invalid socket event emits once and closes the active generation',
   socket.message({ type: 'session.invalid' });
   assert.equal(invalidations, 1);
   assert.equal(socket.closeCalls.length, 1);
-  runtime.close();
+  runtime.events.close();
 });
 
 test('websocket drops multibyte events above the byte bound before dispatch', async () => {
@@ -358,5 +361,5 @@ test('websocket drops multibyte events above the byte bound before dispatch', as
     devices: [{ dev_id: 'A', name: '中'.repeat(100_000) }],
   });
   assert.equal(snapshots.length, 1, 'only the small HTTP fallback is delivered');
-  runtime.close();
+  runtime.events.close();
 });

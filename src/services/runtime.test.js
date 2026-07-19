@@ -67,6 +67,8 @@ test('Electron runtime delegates existing preload APIs without changing result s
     const off = electron.events.onDeviceSnapshot(() => {});
     assert.equal(typeof off, 'function');
     off();
+    assert.equal(typeof electron.events.close, 'function');
+    assert.equal(electron.events.close(), undefined);
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;

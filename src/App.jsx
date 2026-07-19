@@ -814,7 +814,7 @@ function App() {
           console.warn('Clear saved session during sign-out failed:', error);
         }
         if (deviceSyncGenerationRef.current === signOutGeneration) {
-          if (!isElectron) runtime.close();
+          if (!isElectron) runtime.events.close();
           localStorage.removeItem('bambu_account');
           if (isElectron) localStorage.removeItem('bambu_token');
           authSessionRef.current = null;
@@ -866,7 +866,7 @@ function App() {
       deviceSyncBusyGenerationRef.current = null;
       authSessionRef.current = null;
       lastPrinterStatusRef.current.clear();
-      runtime.close();
+      runtime.events.close();
       setPrinters([]);
       setIsRefreshingDevices(false);
       setLastDeviceSyncAt(0);
@@ -933,7 +933,7 @@ function App() {
         console.error('Disconnect on teardown failed:', err);
       });
     } else {
-      runtime.close();
+      runtime.events.close();
     }
   }, [isElectron, runtime]);
 

@@ -182,8 +182,9 @@ export function createElectronRuntime() {
       onDeviceSnapshot() { return noOp; },
       onDeviceUpdate() { return noOp; },
       onSessionInvalid() { return noOp; },
+      close: noOp,
     },
-    close() {},
+    close: noOp,
     window: electronWindow,
     startup: electronApp,
   };
