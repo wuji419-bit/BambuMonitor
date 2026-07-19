@@ -232,6 +232,25 @@ test('redactSecrets strips URL userinfo without exposing malformed or nested cre
   assert.doesNotMatch(JSON.stringify(redacted), /access-secret|user|pass|still-in-query/);
 });
 
+test('redactSecrets strips embedded URL credentials from plain strings and Error messages', () => {
+  const plain = 'camera failed: rtsps://viewer:plain-secret@camera.local/live; retry later';
+  const error = new Error('request failed at https://admin:error-secret@example.test/path (offline)');
+  const ordinary = 'camera failed: retry later without a URL';
+
+  const redacted = redactSecrets({ plain, error, ordinary });
+
+  assert.equal(
+    redacted.plain,
+    'camera failed: rtsps://[REDACTED]@camera.local/live; retry later',
+  );
+  assert.equal(
+    redacted.error.message,
+    'request failed at https://[REDACTED]@example.test/path (offline)',
+  );
+  assert.equal(redacted.ordinary, ordinary);
+  assert.doesNotMatch(JSON.stringify(redacted), /viewer|plain-secret|admin|error-secret/);
+});
+
 test('redactSecrets applies depth, collection, string, and property bounds', () => {
   const deep = { value: 'ok' };
   let cursor = deep;

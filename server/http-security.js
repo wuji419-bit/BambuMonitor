@@ -12,6 +12,7 @@ const TRUNCATED = '[Truncated]';
 const MAX_REDACT_DEPTH = 8;
 const MAX_REDACT_ITEMS = 100;
 const MAX_REDACT_STRING = 4_096;
+const URL_SUBSTRING_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi;
 
 function stableError(message) {
   return new Error(message);
@@ -335,9 +336,14 @@ function redactUrl(text) {
       url.username = 'redacted';
       url.password = '';
     }
+    let hadSecretQuery = false;
     for (const key of [...url.searchParams.keys()]) {
-      if (isSecretKey(key)) url.searchParams.set(key, REDACTED);
+      if (isSecretKey(key)) {
+        url.searchParams.set(key, REDACTED);
+        hadSecretQuery = true;
+      }
     }
+    if (!hadUserInfo && !hadSecretQuery) return text;
     const serialized = url.toString();
     return hadUserInfo ? serialized.replace('redacted@', `${REDACTED}@`) : serialized;
   } catch {
@@ -349,7 +355,7 @@ function redactText(value) {
   let text = value.length > MAX_REDACT_STRING
     ? `${value.slice(0, MAX_REDACT_STRING)}${TRUNCATED}`
     : value;
-  text = redactUrl(text);
+  text = text.replace(URL_SUBSTRING_PATTERN, (url) => redactUrl(url));
   return text.replace(
     /\b(password|passcode|access[ _-]?code|verification[ _-]?code|token|api[ _-]?key|authorization|cookie|secret)\s*[:=]\s*([^,;&\r\n]+)/gi,
     `$1=${REDACTED}`,
