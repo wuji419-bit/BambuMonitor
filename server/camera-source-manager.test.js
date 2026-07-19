@@ -101,6 +101,20 @@ function response(chunks, { contentType = 'image/jpeg', url = 'http://camera.loc
   };
 }
 
+function redirectResponse(location, { status = 302, url = 'http://camera.local/live' } = {}) {
+  return {
+    ok: false,
+    status,
+    url,
+    headers: {
+      get(name) {
+        return name.toLowerCase() === 'location' ? location : null;
+      },
+    },
+    body: null,
+  };
+}
+
 async function flushPromises() {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
@@ -210,6 +224,35 @@ test('subscriptions hold references and the idle stop is canceled by reacquire',
   release();
   timers.runOne(30_000);
   assert.equal(stream.stopCalls, 1);
+});
+
+test('duplicate callback subscriptions keep independent listener leases', () => {
+  const timers = createManualTimers();
+  const manager = createManager({ timers });
+  manager.configure({
+    serialNumber: 'SERIAL_A', model: 'P1S', ip: '192.168.1.20', accessCode: 'secret',
+  });
+  const frames = [];
+  const listener = (frame) => frames.push(frame);
+  const unsubscribeFirst = manager.subscribe('SERIAL_A', listener);
+  const unsubscribeSecond = manager.subscribe('SERIAL_A', listener);
+  const stream = FakeChamberStream.instances[0];
+  const jpeg = Buffer.from([0xff, 0xd8, 0x01, 0xff, 0xd9]);
+
+  stream.emit('frame', jpeg);
+  assert.equal(frames.length, 2);
+  assert.equal(manager.inspect()[0].refs, 2);
+  assert.equal(manager.inspect()[0].listeners, 2);
+
+  unsubscribeFirst();
+  stream.emit('frame', jpeg);
+  assert.equal(frames.length, 3);
+  assert.equal(manager.inspect()[0].refs, 1);
+  assert.equal(manager.inspect()[0].listeners, 1);
+
+  unsubscribeSecond();
+  assert.equal(manager.inspect()[0].refs, 0);
+  assert.equal(manager.inspect()[0].listeners, 0);
 });
 
 test('selects sources, reports safe misconfiguration, and applies bounded backoff', () => {
@@ -366,6 +409,26 @@ test('listener failures and mutations are isolated and latest frames are defensi
   assert.equal(JSON.stringify(logs).includes('leaked-secret'), false);
 });
 
+test('a throwing then getter is isolated from later frame listeners', () => {
+  const logs = [];
+  const manager = createManager({ logger: { warn: (...args) => logs.push(args) } });
+  manager.configure({
+    serialNumber: 'SERIAL_A', model: 'P1S', ip: '192.168.1.20', accessCode: 'secret',
+  });
+  const frames = [];
+  manager.subscribe('SERIAL_A', () => ({
+    get then() {
+      throw new Error('then-getter-secret');
+    },
+  }));
+  manager.subscribe('SERIAL_A', (frame) => frames.push(frame));
+  const jpeg = Buffer.from([0xff, 0xd8, 0x01, 0xff, 0xd9]);
+
+  assert.doesNotThrow(() => FakeChamberStream.instances[0].emit('frame', jpeg));
+  assert.deepEqual(frames, [jpeg]);
+  assert.equal(JSON.stringify(logs).includes('then-getter-secret'), false);
+});
+
 test('RTSPS uses exact FFmpeg arguments, parses split JPEGs, and restarts with reset backoff', () => {
   const timers = createManualTimers();
   const spawn = createSpawnHarness();
@@ -429,6 +492,56 @@ test('external HTTP strips URL credentials, sends Basic auth, and caches a JPEG 
   const publicState = JSON.stringify(manager.inspect());
   assert.equal(publicState.includes('camera-password'), false);
   assert.equal(publicState.includes('camera.local'), false);
+});
+
+test('external HTTP rejects cross-origin redirects before forwarding secret headers', async () => {
+  const timers = createManualTimers();
+  const fetchCalls = [];
+  const manager = createManager({
+    fetchImpl(url, options) {
+      fetchCalls.push({ url: String(url), options });
+      return Promise.resolve(redirectResponse('https://other-camera.local/live'));
+    },
+    timers,
+  });
+  manager.configure({
+    serialNumber: 'HTTP_A',
+    customUrl: 'http://camera.local/live',
+    headers: { Authorization: 'Bearer redirect-secret' },
+  });
+  manager.acquire('HTTP_A');
+
+  await flushPromises();
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].options.redirect, 'manual');
+  assert.equal(fetchCalls[0].options.headers.Authorization, 'Bearer redirect-secret');
+  assert.equal(fetchCalls.some((call) => call.url.includes('other-camera.local')), false);
+  assert.equal(JSON.stringify(manager.inspect()).includes('redirect-secret'), false);
+  await manager.shutdown();
+});
+
+test('external HTTP follows at most three same-origin redirects', async () => {
+  const timers = createManualTimers();
+  const fetchCalls = [];
+  const manager = createManager({
+    fetchImpl(url, options) {
+      const current = String(url);
+      fetchCalls.push({ url: current, options });
+      const next = current.endsWith('/one') ? '/two' : '/one';
+      return Promise.resolve(redirectResponse(next, { url: current }));
+    },
+    timers,
+  });
+  manager.configure({ serialNumber: 'HTTP_A', customUrl: 'http://camera.local/one' });
+  manager.acquire('HTTP_A');
+
+  await flushPromises();
+
+  assert.equal(fetchCalls.length, 4);
+  assert.equal(fetchCalls.every((call) => call.options.redirect === 'manual'), true);
+  assert.equal(timers.count(1000), 1);
+  await manager.shutdown();
 });
 
 test('external multipart MJPEG is parsed across chunks and a non-http redirect is rejected', async () => {
@@ -500,6 +613,82 @@ test('late completion from a replaced HTTP source cannot cancel the current time
 
   assert.equal(timers.count(8000), 1);
   await manager.shutdown();
+});
+
+test('reconfigure escalates a resistant FFmpeg child and shutdown waits for every generation', async () => {
+  const timers = createManualTimers();
+  const spawn = createSpawnHarness();
+  const manager = createManager({ spawnImpl: spawn.spawnImpl, timers });
+  manager.configure({
+    serialNumber: 'SERIAL_X', cameraMode: 'rtsps', ip: '192.168.1.40', accessCode: 'first',
+  });
+  manager.acquire('SERIAL_X');
+  const first = spawn.calls[0].child;
+
+  manager.configure({
+    serialNumber: 'SERIAL_X', cameraMode: 'rtsps', ip: '192.168.1.41', accessCode: 'second',
+  });
+  const second = spawn.calls[1].child;
+  assert.deepEqual(first.killCalls, ['SIGTERM']);
+  assert.equal(timers.count(5000), 1);
+
+  const shuttingDown = manager.shutdown();
+  assert.deepEqual(first.killCalls, ['SIGTERM']);
+  assert.deepEqual(second.killCalls, ['SIGTERM']);
+  assert.equal(timers.count(5000), 2);
+  timers.runOne(5000);
+  timers.runOne(5000);
+  await shuttingDown;
+
+  assert.deepEqual(first.killCalls, ['SIGTERM', 'SIGKILL']);
+  assert.deepEqual(second.killCalls, ['SIGTERM', 'SIGKILL']);
+  assert.equal(timers.count(), 0);
+});
+
+test('idle stop escalates a resistant FFmpeg child exactly once', async () => {
+  const timers = createManualTimers();
+  const spawn = createSpawnHarness();
+  const manager = createManager({ spawnImpl: spawn.spawnImpl, timers });
+  manager.configure({
+    serialNumber: 'SERIAL_X', cameraMode: 'rtsps', ip: '192.168.1.40', accessCode: 'secret',
+  });
+  const release = manager.acquire('SERIAL_X');
+  const child = spawn.calls[0].child;
+
+  release();
+  timers.runOne(30_000);
+  assert.deepEqual(child.killCalls, ['SIGTERM']);
+  assert.equal(timers.count(5000), 1);
+  timers.runOne(5000);
+  assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
+  assert.equal(timers.count(), 0);
+  await manager.shutdown();
+  assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
+});
+
+test('failure retry tracks and escalates the resistant prior FFmpeg child', async () => {
+  const timers = createManualTimers();
+  const spawn = createSpawnHarness();
+  const manager = createManager({ spawnImpl: spawn.spawnImpl, timers });
+  manager.configure({
+    serialNumber: 'SERIAL_X', cameraMode: 'rtsps', ip: '192.168.1.40', accessCode: 'secret',
+  });
+  manager.acquire('SERIAL_X');
+  const first = spawn.calls[0].child;
+
+  first.emit('error', new Error('failed'));
+  assert.deepEqual(first.killCalls, ['SIGTERM']);
+  assert.equal(timers.count(5000), 1);
+  assert.equal(timers.count(1000), 1);
+  timers.runOne(1000);
+  assert.equal(spawn.calls.length, 2);
+  timers.runOne(5000);
+  assert.deepEqual(first.killCalls, ['SIGTERM', 'SIGKILL']);
+
+  const shuttingDown = manager.shutdown();
+  timers.runOne(5000);
+  await shuttingDown;
+  assert.deepEqual(first.killCalls, ['SIGTERM', 'SIGKILL']);
 });
 
 test('shutdown sends SIGTERM, forces SIGKILL after five seconds, and is idempotent', async () => {

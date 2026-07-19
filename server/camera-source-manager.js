@@ -13,6 +13,7 @@ const {
 const DEFAULT_IDLE_STOP_MS = 30_000;
 const DEFAULT_HTTP_TIMEOUT_MS = 8_000;
 const DEFAULT_SHUTDOWN_KILL_MS = 5_000;
+const MAX_HTTP_REDIRECTS = 3;
 const DEFAULT_MAX_FRAME_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_BUFFER_BYTES = DEFAULT_MAX_FRAME_BYTES + 64 * 1024;
 const NOOP = () => {};
@@ -142,6 +143,7 @@ export function createCameraSourceManager(options = {}) {
     timers = { setTimeout, clearTimeout },
   } = options;
   const entries = new Map();
+  const terminatingFfmpeg = new Map();
   let stopped = false;
   let shutdownPromise = null;
 
@@ -179,15 +181,11 @@ export function createCameraSourceManager(options = {}) {
 
   function deliver(entry, frame) {
     for (const listener of [...entry.listeners]) {
-      let result;
       try {
-        result = listener(Buffer.from(frame));
+        const result = listener(Buffer.from(frame));
+        Promise.resolve(result).catch(() => log('warn', 'listener-failed', entry));
       } catch {
         log('warn', 'listener-failed', entry);
-        continue;
-      }
-      if (result && typeof result.then === 'function') {
-        Promise.resolve(result).catch(() => log('warn', 'listener-failed', entry));
       }
     }
   }
@@ -226,7 +224,54 @@ export function createCameraSourceManager(options = {}) {
     }
   }
 
-  function stopCurrent(entry, { killSignal = 'SIGTERM' } = {}) {
+  function terminateFfmpeg(entry, source) {
+    const existing = terminatingFfmpeg.get(source.child);
+    if (existing) return existing.promise;
+
+    let resolveTermination;
+    const termination = {
+      forceTimer: null,
+      killSent: false,
+      promise: new Promise((resolve) => { resolveTermination = resolve; }),
+      settled: false,
+    };
+    const finish = () => {
+      if (termination.settled) return;
+      termination.settled = true;
+      if (termination.forceTimer) timers.clearTimeout(termination.forceTimer);
+      termination.forceTimer = null;
+      remove(source.child, 'exit', finish);
+      remove(source.child, 'error', finish);
+      terminatingFfmpeg.delete(source.child);
+      resolveTermination();
+    };
+    terminatingFfmpeg.set(source.child, termination);
+    source.child.on('exit', finish);
+    source.child.on('error', finish);
+    try {
+      source.child.kill('SIGTERM');
+    } catch {
+      finish();
+      return termination.promise;
+    }
+    if (termination.settled) return termination.promise;
+    termination.forceTimer = timers.setTimeout(() => {
+      termination.forceTimer = null;
+      if (!termination.killSent) {
+        termination.killSent = true;
+        try {
+          source.child.kill('SIGKILL');
+        } catch {
+          log('warn', 'source-stop-failed', entry);
+        }
+      }
+      finish();
+    }, shutdownKillAfterMs);
+    termination.forceTimer?.unref?.();
+    return termination.promise;
+  }
+
+  function stopCurrent(entry) {
     const source = entry.source;
     if (!source) return null;
     entry.source = null;
@@ -238,11 +283,7 @@ export function createCameraSourceManager(options = {}) {
         log('warn', 'source-stop-failed', entry);
       }
     } else if (source.type === 'ffmpeg') {
-      try {
-        source.child.kill(killSignal);
-      } catch {
-        log('warn', 'source-stop-failed', entry);
-      }
+      void terminateFfmpeg(entry, source);
     } else if (source.type === 'http') {
       try {
         source.controller.abort();
@@ -276,11 +317,7 @@ export function createCameraSourceManager(options = {}) {
         log('warn', 'source-stop-failed', entry);
       }
     } else if (!exited && source.type === 'ffmpeg') {
-      try {
-        source.child.kill('SIGTERM');
-      } catch {
-        log('warn', 'source-stop-failed', entry);
-      }
+      void terminateFfmpeg(entry, source);
     } else if (source.type === 'http') {
       try {
         source.controller.abort();
@@ -381,6 +418,37 @@ export function createCameraSourceManager(options = {}) {
     }
   }
 
+  function isRedirectStatus(status) {
+    return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+  }
+
+  async function fetchHttpResponse(entry, source) {
+    let requestUrl = entry.config.requestUrl;
+    const origin = new URL(requestUrl).origin;
+    for (let redirects = 0; ; redirects += 1) {
+      armHttpTimeout(entry, source);
+      const response = await fetchImpl(requestUrl, {
+        signal: source.controller.signal,
+        redirect: 'manual',
+        headers: { ...entry.config.headers },
+      });
+      if (stopped || entry.source !== source) return null;
+      if (!isRedirectStatus(response?.status)) return response;
+      if (redirects >= MAX_HTTP_REDIRECTS) throw new Error('Camera redirect limit exceeded');
+
+      const location = response.headers?.get?.('location');
+      if (typeof location !== 'string' || location.length === 0) {
+        throw new Error('Camera redirect missing location');
+      }
+      const nextUrl = new URL(location, requestUrl);
+      if ((nextUrl.protocol !== 'http:' && nextUrl.protocol !== 'https:')
+        || nextUrl.username || nextUrl.password || nextUrl.origin !== origin) {
+        throw new Error('Camera redirect rejected');
+      }
+      requestUrl = nextUrl.toString();
+    }
+  }
+
   async function readHttpBody(entry, source, response, parser) {
     const body = response.body;
     if (body && typeof body[Symbol.asyncIterator] === 'function') {
@@ -411,12 +479,7 @@ export function createCameraSourceManager(options = {}) {
 
   async function runHttp(entry, source) {
     try {
-      armHttpTimeout(entry, source);
-      const response = await fetchImpl(entry.config.requestUrl, {
-        signal: source.controller.signal,
-        redirect: 'follow',
-        headers: { ...entry.config.headers },
-      });
+      const response = await fetchHttpResponse(entry, source);
       if (stopped || entry.source !== source) return;
       const protocol = responseProtocol(response);
       if (!response?.ok || (protocol && protocol !== 'http:' && protocol !== 'https:')) {
@@ -555,13 +618,14 @@ export function createCameraSourceManager(options = {}) {
     const entry = entries.get(normalizeSerial(serialNumber));
     if (!entry) return () => {};
     // A subscription is also a lease, so API streaming cannot idle-stop underneath its listener.
-    entry.listeners.add(listener);
+    const subscription = (frame) => listener(frame);
+    entry.listeners.add(subscription);
     const release = acquire(serialNumber);
     let subscribed = true;
     return () => {
       if (!subscribed) return;
       subscribed = false;
-      entry.listeners.delete(listener);
+      entry.listeners.delete(subscription);
       release();
     };
   }
@@ -581,42 +645,10 @@ export function createCameraSourceManager(options = {}) {
     }));
   }
 
-  function terminateFfmpegForShutdown(entry, source) {
-    return new Promise((resolve) => {
-      let settled = false;
-      let forceTimer = null;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        if (forceTimer) timers.clearTimeout(forceTimer);
-        remove(source.child, 'exit', finish);
-        resolve();
-      };
-      source.child.on('exit', finish);
-      try {
-        source.child.kill('SIGTERM');
-      } catch {
-        finish();
-        return;
-      }
-      if (settled) return;
-      forceTimer = timers.setTimeout(() => {
-        forceTimer = null;
-        try {
-          source.child.kill('SIGKILL');
-        } catch {
-          log('warn', 'source-stop-failed', entry);
-        }
-        finish();
-      }, shutdownKillAfterMs);
-      forceTimer?.unref?.();
-    });
-  }
-
   function shutdown() {
     if (shutdownPromise) return shutdownPromise;
     stopped = true;
-    const pending = [];
+    const pending = [...terminatingFfmpeg.values()].map((termination) => termination.promise);
     for (const entry of entries.values()) {
       clearIdle(entry);
       clearRetry(entry);
@@ -631,7 +663,7 @@ export function createCameraSourceManager(options = {}) {
       }
       entry.source = null;
       detachSource(entry, source);
-      if (source.type === 'ffmpeg') pending.push(terminateFfmpegForShutdown(entry, source));
+      if (source.type === 'ffmpeg') pending.push(terminateFfmpeg(entry, source));
       else if (source.type === 'chamber') {
         try {
           source.stream.stop();
@@ -647,7 +679,7 @@ export function createCameraSourceManager(options = {}) {
       }
       entry.status = 'stopped';
     }
-    shutdownPromise = Promise.allSettled(pending).then(() => inspect());
+    shutdownPromise = Promise.allSettled([...new Set(pending)]).then(() => inspect());
     return shutdownPromise;
   }
 
