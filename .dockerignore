@@ -1,0 +1,11 @@
+.git
+.worktrees
+node_modules
+dist
+release
+output
+logs
+coverage
+*.log
+docs/media/video
+promo

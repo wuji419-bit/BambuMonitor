@@ -1,0 +1,13 @@
+services:
+  bambu-monitor:
+    image: ghcr.io/wuji419-bit/bambu-monitor:latest
+    container_name: bambu-monitor
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      PORT: 3080
+      DATA_DIR: /app/data
+      TZ: Asia/Shanghai
+      TRUST_PROXY: "0"
+    volumes:
+      - ./data:/app/data
