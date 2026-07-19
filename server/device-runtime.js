@@ -92,6 +92,7 @@ function getDiscoveryFunction(discovery) {
 export function createDeviceRuntime({
   cloud,
   mqtt,
+  mqttEvents = mqtt,
   discovery,
   configStore,
   now = () => Date.now(),
@@ -156,11 +157,22 @@ export function createDeviceRuntime({
   function emit(event) {
     if (stopped) return;
     for (const listener of subscribers) {
-      try {
-        listener(event);
-      } catch {
+      deliver(listener, event);
+    }
+  }
+
+  function deliver(listener, event) {
+    let result;
+    try {
+      result = listener(clone(event));
+    } catch {
+      log('warn', 'device-runtime.subscriber-failed');
+      return;
+    }
+    if (result && typeof result.then === 'function') {
+      Promise.resolve(result).catch(() => {
         log('warn', 'device-runtime.subscriber-failed');
-      }
+      });
     }
   }
 
@@ -220,20 +232,23 @@ export function createDeviceRuntime({
       pending = Promise.reject(new Error('MQTT connect failed'));
     }
     Promise.resolve(pending).catch(() => {
+      const serialNumber = record.serialNumber;
       if (
         stopped
-        || records.get(record.serialNumber) !== record
-        || fingerprints.get(record.serialNumber) !== connection.fingerprint
+        || fingerprints.get(serialNumber) !== connection.fingerprint
       ) return;
-      record.device = {
-        ...record.device,
+      const currentRecord = records.get(serialNumber);
+      if (!currentRecord) return;
+      fingerprints.delete(serialNumber);
+      currentRecord.device = {
+        ...currentRecord.device,
         connectionState: 'error',
         errorMsg: 'MQTT connection failed',
       };
       log('warn', 'device-runtime.mqtt-connect-failed', {
-        serialNumber: record.serialNumber,
+        serialNumber,
       });
-      emitDevice(record);
+      emitDevice(currentRecord);
     });
     return true;
   }
@@ -280,20 +295,20 @@ export function createDeviceRuntime({
   }
 
   // Server composition injects one event bus subscription for the shared MQTT manager.
-  if (typeof mqtt.subscribe === 'function') {
-    const unsubscribe = mqtt.subscribe(handleMqttEvent);
+  if (typeof mqttEvents?.subscribe === 'function') {
+    const unsubscribe = mqttEvents.subscribe(handleMqttEvent);
     removeMqttListener = typeof unsubscribe === 'function' ? unsubscribe : null;
-  } else if (typeof mqtt.on === 'function') {
+  } else if (typeof mqttEvents?.on === 'function') {
     const eventNames = ['message', 'connected', 'reconnecting', 'disconnected'];
     const listeners = eventNames.map((eventName) => {
       const listener = (payload) => handleMqttEvent(eventName, payload);
-      mqtt.on(eventName, listener);
+      mqttEvents.on(eventName, listener);
       return [eventName, listener];
     });
     removeMqttListener = () => {
-      const remove = typeof mqtt.off === 'function'
-        ? mqtt.off.bind(mqtt)
-        : mqtt.removeListener?.bind(mqtt);
+      const remove = typeof mqttEvents.off === 'function'
+        ? mqttEvents.off.bind(mqttEvents)
+        : mqttEvents.removeListener?.bind(mqttEvents);
       if (!remove) return;
       for (const [eventName, listener] of listeners) remove(eventName, listener);
     };
@@ -305,11 +320,7 @@ export function createDeviceRuntime({
     if (typeof listener !== 'function') throw new TypeError('Device listener must be a function');
     if (stopped) return () => {};
     subscribers.add(listener);
-    try {
-      listener(snapshot());
-    } catch {
-      log('warn', 'device-runtime.subscriber-failed');
-    }
+    deliver(listener, snapshot());
     let subscribed = true;
     return () => {
       if (!subscribed) return;
@@ -375,7 +386,7 @@ export function createDeviceRuntime({
     const nextOrder = [];
     for (const rawDevice of result.devices) {
       const cloudDevice = readCloudDevice(rawDevice);
-      if (!cloudDevice.serialNumber) continue;
+      if (!cloudDevice.serialNumber || nextRecords.has(cloudDevice.serialNumber)) continue;
       const existing = records.get(cloudDevice.serialNumber);
       const cached = cache.get(cloudDevice.serialNumber) || {};
       const record = {

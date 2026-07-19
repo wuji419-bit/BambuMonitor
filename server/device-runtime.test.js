@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { createDeviceRuntime } from './device-runtime.js';
 
 const NOW = 1_700_000_000_000;
@@ -28,6 +29,9 @@ function cloudDevice(id, overrides = {}) {
 function createHarness({
   cache = {},
   cloudResults = [],
+  connectImpl,
+  logger,
+  mqttEvents,
   scanResults = [],
   updateDeviceImpl,
 } = {}) {
@@ -53,6 +57,7 @@ function createHarness({
   const mqtt = {
     connect(payload) {
       connectCalls.push(structuredClone(payload));
+      if (connectImpl) return connectImpl(payload);
       return Promise.resolve({ success: true });
     },
     disconnect(serialNumber) {
@@ -110,9 +115,11 @@ function createHarness({
     runtime: createDeviceRuntime({
       cloud,
       mqtt,
+      ...(mqttEvents === undefined ? {} : { mqttEvents }),
       discovery,
       configStore,
       now: () => NOW,
+      logger,
     }),
     scanCalls,
     updateCalls,
@@ -146,6 +153,105 @@ test('publishes every cloud device in cloud order before LAN discovery completes
 
   scan.resolve([]);
   await started;
+});
+
+test('deduplicates normalized cloud serials with the first valid occurrence winning', async () => {
+  const harness = createHarness({
+    cloudResults: [{
+      success: true,
+      devices: [
+        cloudDevice('serial_a', { name: 'First', accessCode: 'first-code' }),
+        cloudDevice('SERIAL_A', { name: 'Second', accessCode: 'second-code' }),
+      ],
+      username: 'cloud-user',
+    }],
+    scanResults: [[]],
+  });
+
+  await harness.runtime.start({ accessToken: 'token', username: 'cloud-user' });
+
+  assert.equal(harness.runtime.snapshot().devices.length, 1);
+  assert.equal(harness.runtime.getDevice('SERIAL_A').name, 'First');
+  assert.equal(harness.connectCalls.length, 1);
+});
+
+test('rejected current MQTT connect clears its fingerprint and retries the replacement record', async () => {
+  const firstConnect = deferred();
+  const inventory = (name) => ({
+    success: true,
+    devices: [cloudDevice('SERIAL_A', { name })],
+    username: 'cloud-user',
+  });
+  const harness = createHarness({
+    cloudResults: [inventory('Original'), inventory('Current'), inventory('Current')],
+    connectImpl() {
+      return harness.connectCalls.length === 1
+        ? firstConnect.promise
+        : Promise.resolve({ success: true });
+    },
+    scanResults: [[]],
+  });
+  await harness.runtime.start({ accessToken: 'token', username: 'cloud-user' });
+  await harness.runtime.refresh();
+  assert.equal(harness.connectCalls.length, 1);
+  assert.equal(harness.runtime.getDevice('SERIAL_A').name, 'Current');
+
+  firstConnect.reject(new Error('broker unavailable'));
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(harness.runtime.getDevice('SERIAL_A').name, 'Current');
+  assert.equal(harness.runtime.getDevice('SERIAL_A').connectionState, 'error');
+  await harness.runtime.refresh();
+  assert.equal(harness.connectCalls.length, 2);
+});
+
+test('accepts a separate EventEmitter for manager callback events', async () => {
+  const mqttEvents = new EventEmitter();
+  const connectCalls = [];
+  const mqtt = {
+    connect(payload) {
+      connectCalls.push(structuredClone(payload));
+      return Promise.resolve({ success: true });
+    },
+    disconnect() {
+      return Promise.resolve({ success: true });
+    },
+    shutdown() {
+      return Promise.resolve({ success: true });
+    },
+  };
+  const runtime = createDeviceRuntime({
+    cloud: {
+      async listDevices() {
+        return {
+          success: true,
+          devices: [cloudDevice('SERIAL_A')],
+          username: 'cloud-user',
+        };
+      },
+    },
+    mqtt,
+    mqttEvents,
+    discovery: { async scan() { return []; } },
+    configStore: {
+      getDeviceCache() { return { version: 1, devices: {} }; },
+      async updateDevice() { return {}; },
+    },
+    now: () => NOW,
+  });
+
+  await runtime.start({ accessToken: 'token', username: 'cloud-user' });
+  mqttEvents.emit('message', {
+    serialNumber: 'SERIAL_A',
+    payload: { print: { mc_percent: 37, gcode_state: 'RUNNING' } },
+  });
+
+  assert.equal(connectCalls.length, 1);
+  assert.equal(runtime.getDevice('SERIAL_A').progress, 37);
+  assert.equal(mqttEvents.listenerCount('message'), 1);
+  await runtime.shutdown();
+  assert.equal(mqttEvents.listenerCount('message'), 0);
 });
 
 test('reuses one MQTT connection across refresh and retains a cached IP after scan failure', async () => {
@@ -457,6 +563,60 @@ test('fans one MQTT telemetry message to two subscribers without creating anothe
   harness.mqtt.emit('reconnecting', { serialNumber: 'SERIAL_A' });
   assert.equal(firstEvents.length, firstCount);
   assert.equal(secondEvents.at(-1).device.connectionState, 'reconnecting');
+});
+
+test('isolates subscriber payloads and catches rejected thenables without awaiting them', async () => {
+  const logs = [];
+  const harness = createHarness({
+    cloudResults: [{
+      success: true,
+      devices: [cloudDevice('SERIAL_A')],
+      username: 'cloud-user',
+    }],
+    logger: {
+      warn(entry) {
+        logs.push(entry);
+      },
+    },
+    scanResults: [[]],
+  });
+  const secondEvents = [];
+  const rejectedThenable = {
+    then(_resolve, reject) {
+      reject(new Error('subscriber failed'));
+    },
+  };
+  harness.runtime.subscribe((event) => {
+    if (event.devices?.[0]) event.devices[0].name = 'mutated snapshot';
+    if (event.device) event.device.name = 'mutated update';
+    return rejectedThenable;
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(logs.length, 1);
+  harness.runtime.subscribe((event) => secondEvents.push(event));
+
+  await harness.runtime.start({ accessToken: 'token', username: 'cloud-user' });
+  const latestSnapshot = secondEvents.filter((event) => event.type === 'devices.snapshot').at(-1);
+  assert.equal(latestSnapshot.devices[0].name, 'Printer SERIAL_A');
+
+  harness.mqtt.emit('message', {
+    serialNumber: 'SERIAL_A',
+    payload: { print: { mc_percent: 24, gcode_state: 'RUNNING' } },
+  });
+  const update = secondEvents.filter((event) => event.type === 'device.updated').at(-1);
+  assert.equal(update.device.name, 'Printer SERIAL_A');
+  assert.equal(update.device.progress, 24);
+  assert.equal(harness.runtime.getDevice('SERIAL_A').name, 'Printer SERIAL_A');
+
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(
+    logs.some((entry) => entry.operation === 'device-runtime.subscriber-failed'),
+    true,
+  );
 });
 
 test('coalesces overlapping scans and ignores an aborted late result after shutdown', async () => {
