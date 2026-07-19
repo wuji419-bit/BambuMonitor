@@ -25,7 +25,12 @@ function cloudDevice(id, overrides = {}) {
   };
 }
 
-function createHarness({ cache = {}, cloudResults = [], scanResults = [] } = {}) {
+function createHarness({
+  cache = {},
+  cloudResults = [],
+  scanResults = [],
+  updateDeviceImpl,
+} = {}) {
   const cloudQueue = [...cloudResults];
   const scanQueue = [...scanResults];
   const cloudCalls = [];
@@ -81,6 +86,7 @@ function createHarness({ cache = {}, cloudResults = [], scanResults = [] } = {})
     },
     async updateDevice(serialNumber, patch) {
       updateCalls.push({ serialNumber, patch: structuredClone(patch) });
+      if (updateDeviceImpl) return updateDeviceImpl(serialNumber, patch);
       cache[serialNumber] = { ...(cache[serialNumber] ?? {}), ...patch, updatedAt: NOW };
       return structuredClone(cache[serialNumber]);
     },
@@ -302,6 +308,120 @@ test('reconnects only when mode, credentials, IP, or access code changes', async
   const writesBeforeUnknown = harness.updateCalls.length;
   assert.equal(await harness.runtime.updateDevice('NOT_BOUND', { ip: '192.168.1.30' }), null);
   assert.equal(harness.updateCalls.length, writesBeforeUnknown);
+});
+
+test('access token and username fingerprint changes each reconnect exactly once', async () => {
+  const inventory = (username = '') => ({
+    success: true,
+    devices: [cloudDevice('SERIAL_A')],
+    username,
+  });
+  const harness = createHarness({
+    cloudResults: [inventory(), inventory(), inventory(), inventory(), inventory()],
+  });
+
+  await harness.runtime.start({ accessToken: 'token-a', username: 'user-a' });
+  assert.equal(harness.connectCalls.length, 1);
+  assert.deepEqual(harness.connectCalls.at(-1), {
+    serialNumber: 'SERIAL_A',
+    mode: 'cloud',
+    authToken: 'token-a',
+    username: 'user-a',
+  });
+
+  await harness.runtime.start({ accessToken: 'token-a', username: 'user-a' });
+  assert.equal(harness.connectCalls.length, 1);
+
+  await harness.runtime.start({ accessToken: 'token-b', username: 'user-a' });
+  assert.equal(harness.connectCalls.length, 2);
+  assert.equal(harness.connectCalls.at(-1).authToken, 'token-b');
+  assert.equal(harness.connectCalls.at(-1).username, 'user-a');
+
+  await harness.runtime.start({ accessToken: 'token-b', username: 'user-b' });
+  assert.equal(harness.connectCalls.length, 3);
+  assert.equal(harness.connectCalls.at(-1).authToken, 'token-b');
+  assert.equal(harness.connectCalls.at(-1).username, 'user-b');
+
+  await harness.runtime.start({ accessToken: 'token-b', username: 'user-b' });
+  assert.equal(harness.connectCalls.length, 3);
+});
+
+test('a LAN write completing after cloud removal cannot reconnect or emit a stale device', async () => {
+  const persistenceStarted = deferred();
+  const persistence = deferred();
+  const harness = createHarness({
+    cloudResults: [{
+      success: true,
+      devices: [cloudDevice('SERIAL_A')],
+      username: 'cloud-user',
+    }, {
+      success: true,
+      devices: [],
+      username: 'cloud-user',
+    }],
+    scanResults: [[], [{ serial: 'SERIAL_A', ip: '192.168.1.55' }]],
+    updateDeviceImpl() {
+      persistenceStarted.resolve();
+      return persistence.promise;
+    },
+  });
+  await harness.runtime.start({ accessToken: 'token', username: 'cloud-user' });
+  const events = [];
+  harness.runtime.subscribe((event) => events.push(event));
+
+  const scanning = harness.runtime.scanLan();
+  await persistenceStarted.promise;
+  await harness.runtime.refresh();
+  const connectsAfterRemoval = harness.connectCalls.length;
+  persistence.resolve({ ip: '192.168.1.55', updatedAt: NOW });
+  await scanning;
+
+  assert.equal(harness.runtime.getDevice('SERIAL_A'), null);
+  assert.equal(harness.connectCalls.length, connectsAfterRemoval);
+  assert.equal(events.some((event) => event.type === 'device.updated'), false);
+});
+
+test('a LAN write completing after replacement enriches only the current cloud record', async () => {
+  const persistenceStarted = deferred();
+  const persistence = deferred();
+  const harness = createHarness({
+    cloudResults: [{
+      success: true,
+      devices: [cloudDevice('SERIAL_A', { name: 'Original', accessCode: 'old-code' })],
+      username: 'old-user',
+    }, {
+      success: true,
+      devices: [cloudDevice('SERIAL_A', { name: 'Replacement', accessCode: 'new-code' })],
+      username: 'new-user',
+    }],
+    scanResults: [[], [{ serial: 'SERIAL_A', ip: '192.168.1.56' }]],
+    updateDeviceImpl() {
+      persistenceStarted.resolve();
+      return persistence.promise;
+    },
+  });
+  await harness.runtime.start({ accessToken: 'token', username: 'old-user' });
+  const events = [];
+  harness.runtime.subscribe((event) => events.push(event));
+
+  const scanning = harness.runtime.scanLan();
+  await persistenceStarted.promise;
+  await harness.runtime.refresh();
+  assert.equal(harness.connectCalls.length, 2);
+  persistence.resolve({ ip: '192.168.1.56', updatedAt: NOW });
+  await scanning;
+
+  assert.equal(harness.connectCalls.length, 3);
+  assert.deepEqual(harness.connectCalls.at(-1), {
+    serialNumber: 'SERIAL_A',
+    mode: 'local',
+    ip: '192.168.1.56',
+    accessCode: 'new-code',
+  });
+  assert.equal(harness.runtime.getDevice('SERIAL_A').name, 'Replacement');
+  assert.equal(harness.runtime.getDevice('SERIAL_A').ip, '192.168.1.56');
+  const update = events.filter((event) => event.type === 'device.updated').at(-1);
+  assert.equal(update.device.name, 'Replacement');
 });
 
 test('fans one MQTT telemetry message to two subscribers without creating another connection', async () => {

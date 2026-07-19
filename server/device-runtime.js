@@ -427,14 +427,16 @@ export function createDeviceRuntime({
         persisted = patch;
       }
       if (stopped || signal.aborted || generation !== expectedGeneration) return;
+      const currentRecord = records.get(serialNumber);
       const nextCached = { ...(cache.get(serialNumber) || {}), ...persisted, ...patch };
       cache.set(serialNumber, nextCached);
+      if (!currentRecord) continue;
       for (const field of CACHE_FIELDS) {
-        if (text(nextCached[field])) record.device[field] = text(nextCached[field]);
+        if (text(nextCached[field])) currentRecord.device[field] = text(nextCached[field]);
       }
-      if (text(nextCached.model)) record.device.dev_model_name = text(nextCached.model);
-      ensureConnection(record);
-      emitDevice(record);
+      if (text(nextCached.model)) currentRecord.device.dev_model_name = text(nextCached.model);
+      ensureConnection(currentRecord);
+      emitDevice(currentRecord);
     }
   }
 
