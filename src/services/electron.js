@@ -145,3 +145,46 @@ export const electronEvents = {
     return getElectronApi()?.events.onMqttDisconnected(callback) || noOp;
   },
 };
+
+function unsupported(error = '此功能仅在 NAS 网页版可用') {
+  return Promise.resolve({ success: false, error, code: 'UNSUPPORTED' });
+}
+
+export function createElectronRuntime() {
+  return {
+    kind: 'electron',
+    capabilities: {
+      nativeWindow: true,
+      startup: true,
+      mousePassthrough: true,
+      localScan: true,
+      serverSettings: false,
+    },
+    auth: electronAuth,
+    devices: {
+      refresh(payload) {
+        return electronAuth.getDeviceList(payload);
+      },
+      update() {
+        return unsupported();
+      },
+      scanPrinters() {
+        return electronDevices.scanPrinters();
+      },
+    },
+    camera: electronCamera,
+    settings: {
+      get() { return unsupported(); },
+      save() { return unsupported(); },
+    },
+    notifications: electronNotifications,
+    events: {
+      onDeviceSnapshot() { return noOp; },
+      onDeviceUpdate() { return noOp; },
+      onSessionInvalid() { return noOp; },
+    },
+    close() {},
+    window: electronWindow,
+    startup: electronApp,
+  };
+}

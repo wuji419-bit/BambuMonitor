@@ -1,11 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Eye, EyeOff, LockKeyhole, Minus, Radio, ShieldCheck, X } from 'lucide-react';
 import PrinterWidget from './components/PrinterWidget';
-import MobileDashboard from './components/MobileDashboard';
 import appIconUrl from './assets/app-icon.svg';
 import { bambuClient, scanPrinters } from './services/bambu';
-import { electronAuth, electronEvents, electronWindow, isElectronEnvironment } from './services/electron';
+import { electronEvents, electronWindow } from './services/electron';
 import { dispatchPrinterNotification, getPrinterNotificationEvent } from './services/notifications';
+import {
+  mergeRuntimeDevice,
+  replaceRuntimeSnapshot,
+  runtime as selectedRuntime,
+} from './services/runtime';
 import { getRemovedPrinterIds, reconcilePrinterInventory } from './utils/deviceInventory';
 import { buildDeviceSyncSnapshot, mergePrinterState } from './utils/printerSync';
 import { acceptsConnectionGeneration, beginConnectionGeneration } from './utils/sessionGeneration';
@@ -160,7 +164,14 @@ function TitleBar({ isElectron }) {
   );
 }
 
-function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron, suppressAutoLogin = false, sessionWarning = '' }) {
+function ConnectionScreen({
+  onConnect,
+  isConnectionGenerationCurrent,
+  runtime,
+  suppressAutoLogin = false,
+  sessionWarning = '',
+}) {
+  const isElectron = runtime.kind === 'electron';
   const [isPasswordMode, setIsPasswordMode] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [account, setAccount] = useState('');
@@ -198,11 +209,6 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
   }, [agreed]);
 
   const handleSendCode = async () => {
-    if (!isElectron) {
-      setErrorMsg('验证码登录仅支持桌面版应用');
-      return;
-    }
-
     if (!account) {
       setErrorMsg('请输入手机号或邮箱');
       return;
@@ -213,7 +219,7 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
     setCountdown(60);
 
     try {
-      const result = await electronAuth.requestVerifyCode({ account });
+      const result = await runtime.auth.requestVerifyCode({ account });
 
       if (result.success) {
         setSuccessMsg(result.message || '验证码已发送，请查看短信或邮箱');
@@ -255,10 +261,9 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
   };
 
   const clearSavedLogin = async () => {
-    localStorage.removeItem('bambu_token');
-    if (!isElectron) return;
+    if (isElectron) localStorage.removeItem('bambu_token');
     try {
-      await electronAuth.clearSavedSession();
+      await runtime.auth.clearSavedSession();
     } catch (err) {
       console.warn('Clear saved session failed:', err);
     }
@@ -268,7 +273,9 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
     setLoading(true);
 
     try {
-      const result = await electronAuth.getDeviceList({ accessToken: token });
+      const result = await runtime.auth.getDeviceList(
+        isElectron ? { accessToken: token } : undefined,
+      );
 
       if (!result.success) {
         const errorText = result.error || '获取设备列表失败';
@@ -284,22 +291,26 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
       }
 
       const cloudDevices = result.devices || [];
-      if (cloudDevices.length === 0) {
+      if (isElectron && cloudDevices.length === 0) {
         setErrorMsg('没有找到已绑定的打印机，请确认设备已绑定到当前账号');
         setLoading(false);
         return;
       }
 
-      const { initialPrinters } = buildDeviceSync(cloudDevices);
+      const initialPrinters = isElectron
+        ? buildDeviceSync(cloudDevices).initialPrinters
+        : replaceRuntimeSnapshot([], cloudDevices);
 
-      setSuccessMsg(`已读取 ${cloudDevices.length} 台云端设备，正在通过云端 MQTT 同步实时状态...`);
-      connectCloudDevices(initialPrinters, token, result.username);
+      setSuccessMsg(isElectron
+        ? `已读取 ${cloudDevices.length} 台云端设备，正在通过云端 MQTT 同步实时状态...`
+        : `已读取 ${cloudDevices.length} 台设备，正在同步实时状态...`);
+      if (isElectron) connectCloudDevices(initialPrinters, token, result.username);
       setLoading(false);
       const connectionGeneration = onConnect(initialPrinters, {
-        accessToken: token,
+        ...(isElectron ? { accessToken: token } : { serverSession: true }),
         username: result.username || '',
       });
-      refreshLanDevicesInBackground(cloudDevices, connectionGeneration);
+      if (isElectron) refreshLanDevicesInBackground(cloudDevices, connectionGeneration);
     } catch (err) {
       console.error('Fetch device list error:', err);
       const errorText = err.message || '获取设备失败';
@@ -316,11 +327,6 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
 
   const handleLogin = async (event) => {
     event.preventDefault();
-
-    if (!isElectron) {
-      setErrorMsg('当前为浏览器预览模式，请启动桌面版应用后登录');
-      return;
-    }
 
     if (!agreed) {
       setErrorMsg('请先勾选用户协议与隐私政策');
@@ -345,14 +351,16 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
 
     try {
       const result = isPasswordMode
-        ? await electronAuth.cloudLogin({ account, password })
-        : await electronAuth.cloudLoginCode({ account, code: verifyCode });
+        ? await runtime.auth.cloudLogin({ account, password })
+        : await runtime.auth.cloudLoginCode({ account, code: verifyCode });
 
       if (result.success) {
         setSuccessMsg('登录成功，正在同步设备...');
         localStorage.setItem('bambu_account', account);
-        await electronAuth.saveSession({ account, accessToken: result.accessToken });
-        await fetchDeviceList(result.accessToken);
+        if (isElectron) {
+          await runtime.auth.saveSession({ account, accessToken: result.accessToken });
+        }
+        await fetchDeviceList(isElectron ? result.accessToken : undefined);
         return;
       }
 
@@ -361,7 +369,7 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
         setPassword('');
 
         try {
-          await electronAuth.requestVerifyCode({ account });
+          await runtime.auth.requestVerifyCode({ account });
           setCountdown(60);
           setSuccessMsg('检测到新设备登录，请输入验证码完成安全验证。');
           setErrorMsg('');
@@ -392,16 +400,16 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
     if (suppressAutoLogin) return;
 
     const restoreLogin = async () => {
-      if (!isElectron) return;
-
-      localStorage.removeItem('bambu_token');
+      if (isElectron) localStorage.removeItem('bambu_token');
       let savedToken = '';
       let savedAccount = localStorage.getItem('bambu_account') || '';
+      let hasSavedSession = false;
 
       try {
-        const result = await electronAuth.getSavedSession();
+        const result = await runtime.auth.getSavedSession();
         const session = result?.session;
-        if (session?.accessToken) {
+        if (session?.accessToken || session?.serverSession) {
+          hasSavedSession = true;
           savedToken = session.accessToken;
           savedAccount = session.account || savedAccount;
           if (savedAccount) localStorage.setItem('bambu_account', savedAccount);
@@ -411,14 +419,14 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
       }
 
       if (savedAccount) setAccount(savedAccount);
-      if (savedToken) {
+      if (savedToken || hasSavedSession) {
         setSuccessMsg('检测到已登录会话，正在自动连接...');
         fetchDeviceList(savedToken, { autoLogin: true });
       }
     };
 
     restoreLogin();
-  }, [isElectron, suppressAutoLogin]);
+  }, [isElectron, runtime, suppressAutoLogin]);
   /* eslint-enable react-hooks/exhaustive-deps */
 
   const canSubmit = account && (isPasswordMode ? password : verifyCode) && agreed;
@@ -472,9 +480,6 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
             <p>账号只用于读取绑定设备；实时遥测仍优先走本机可访问的局域网连接。</p>
           </div>
 
-          {!isElectron ? (
-            <div className="feedback-msg error">当前窗口仅用于界面预览，请启动桌面版应用后再登录。</div>
-          ) : null}
           {sessionWarning ? <div className="feedback-msg error" role="alert">{sessionWarning}</div> : null}
 
           <form onSubmit={handleLogin}>
@@ -585,9 +590,10 @@ function ConnectionScreen({ onConnect, isConnectionGenerationCurrent, isElectron
 }
 
 function App() {
-  const [isElectron] = useState(() => isElectronEnvironment());
+  const [runtime] = useState(() => selectedRuntime);
+  const [isElectron] = useState(() => runtime.kind === 'electron');
   const [isPreviewMode] = useState(() => (
-    !isElectronEnvironment()
+    runtime.kind !== 'electron'
     && typeof window !== 'undefined'
     && new URLSearchParams(window.location.search).get('preview') === 'dashboard'
   ));
@@ -640,7 +646,7 @@ function App() {
 
   const handleConnect = (initialPrinters = [], session = null, expectedGeneration = null) => {
     if (!acceptsConnectionGeneration(deviceSyncGenerationRef.current, expectedGeneration)) return null;
-    if (session?.accessToken) {
+    if (session?.accessToken || session?.serverSession) {
       deviceSyncGenerationRef.current = beginConnectionGeneration(deviceSyncGenerationRef.current);
       deviceSyncBusyRef.current = false;
       deviceSyncBusyGenerationRef.current = null;
@@ -649,6 +655,12 @@ function App() {
       setSessionWarning('');
       setLastDeviceSyncAt(Date.now());
       setDeviceSyncError('');
+    }
+
+    if (!isElectron) {
+      setPrinters(replaceRuntimeSnapshot([], initialPrinters));
+      setIsConnected(true);
+      return deviceSyncGenerationRef.current;
     }
 
     const connectedPrinters = bambuClient.getAllPrinters();
@@ -686,7 +698,31 @@ function App() {
       setDeviceSyncError('');
       return;
     }
-    if (!isElectron || deviceSyncBusyRef.current) return;
+    if (deviceSyncBusyRef.current) return;
+
+    if (!isElectron) {
+      const generation = deviceSyncGenerationRef.current;
+      deviceSyncBusyRef.current = true;
+      setIsRefreshingDevices(true);
+      setDeviceSyncError('');
+      try {
+        const result = await runtime.devices.refresh();
+        if (deviceSyncGenerationRef.current !== generation) return;
+        if (!result?.success) throw new Error(result?.error || '同步设备失败');
+        setPrinters((current) => replaceRuntimeSnapshot(current, result.devices));
+        setLastDeviceSyncAt(result.syncedAt || Date.now());
+      } catch (error) {
+        if (deviceSyncGenerationRef.current === generation) {
+          setDeviceSyncError(error?.message || '同步设备失败');
+        }
+      } finally {
+        if (deviceSyncGenerationRef.current === generation) {
+          deviceSyncBusyRef.current = false;
+          setIsRefreshingDevices(false);
+        }
+      }
+      return;
+    }
 
     const generation = deviceSyncGenerationRef.current + 1;
     deviceSyncGenerationRef.current = generation;
@@ -699,7 +735,7 @@ function App() {
     try {
       let session = authSessionRef.current;
       if (!session?.accessToken) {
-        const saved = await electronAuth.getSavedSession();
+        const saved = await runtime.auth.getSavedSession();
         if (!isCurrentGeneration()) return;
         session = saved?.session || null;
         if (session?.accessToken) authSessionRef.current = session;
@@ -708,7 +744,7 @@ function App() {
         throw new Error('登录状态不可用，请重新登录');
       }
 
-      const result = await electronAuth.getDeviceList({ accessToken: session.accessToken });
+      const result = await runtime.auth.getDeviceList({ accessToken: session.accessToken });
       if (!isCurrentGeneration()) return;
       if (!result?.success) {
         throw new Error(result?.error || '同步设备失败');
@@ -764,24 +800,23 @@ function App() {
     let disconnectError = null;
     let sessionClearError = null;
     try {
-      await bambuClient.disconnect();
+      if (isElectron) await bambuClient.disconnect();
     } catch (error) {
       disconnectError = error;
       console.warn('Disconnect during sign-out failed:', error);
     } finally {
       if (deviceSyncGenerationRef.current === signOutGeneration) {
-        if (isElectron) {
-          try {
-            const clearResult = await electronAuth.clearSavedSession();
-            if (!clearResult?.success) sessionClearError = new Error(clearResult?.error || '无法删除加密登录状态');
-          } catch (error) {
-            sessionClearError = error;
-            console.warn('Clear saved session during sign-out failed:', error);
-          }
+        try {
+          const clearResult = await runtime.auth.clearSavedSession();
+          if (!clearResult?.success) sessionClearError = new Error(clearResult?.error || '无法清除登录状态');
+        } catch (error) {
+          sessionClearError = error;
+          console.warn('Clear saved session during sign-out failed:', error);
         }
         if (deviceSyncGenerationRef.current === signOutGeneration) {
+          if (!isElectron) runtime.close();
           localStorage.removeItem('bambu_account');
-          localStorage.removeItem('bambu_token');
+          if (isElectron) localStorage.removeItem('bambu_token');
           authSessionRef.current = null;
           lastPrinterStatusRef.current.clear();
           deviceSyncBusyRef.current = false;
@@ -791,7 +826,9 @@ function App() {
           setLastDeviceSyncAt(0);
           setDeviceSyncError('');
           setSessionWarning(sessionClearError
-            ? '已退出账号，但加密登录文件删除失败；本次运行不会自动登录，请稍后重试。'
+            ? (isElectron
+              ? '已退出账号，但加密登录文件删除失败；本次运行不会自动登录，请稍后重试。'
+              : '退出登录失败，请稍后重试。')
             : (disconnectError ? '设备断开失败，但你已退出账号。' : ''));
           setIsConnected(false);
         }
@@ -806,6 +843,45 @@ function App() {
     }, DEVICE_SYNC_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [isConnected, isElectron, isPreviewMode]);
+
+  useEffect(() => {
+    if (!isConnected || isElectron || isPreviewMode) return undefined;
+    const generation = deviceSyncGenerationRef.current;
+    const isCurrent = () => deviceSyncGenerationRef.current === generation;
+
+    const offSnapshot = runtime.events.onDeviceSnapshot((event) => {
+      if (!isCurrent()) return;
+      setPrinters((current) => replaceRuntimeSnapshot(current, event.devices));
+      setLastDeviceSyncAt(event.syncedAt || Date.now());
+      setDeviceSyncError('');
+    });
+    const offUpdate = runtime.events.onDeviceUpdate((event) => {
+      if (!isCurrent()) return;
+      setPrinters((current) => mergeRuntimeDevice(current, event.device));
+    });
+    const offInvalid = runtime.events.onSessionInvalid(() => {
+      if (!isCurrent()) return;
+      deviceSyncGenerationRef.current = beginConnectionGeneration(deviceSyncGenerationRef.current);
+      deviceSyncBusyRef.current = false;
+      deviceSyncBusyGenerationRef.current = null;
+      authSessionRef.current = null;
+      lastPrinterStatusRef.current.clear();
+      runtime.close();
+      setPrinters([]);
+      setIsRefreshingDevices(false);
+      setLastDeviceSyncAt(0);
+      setDeviceSyncError('');
+      setSuppressAutoLogin(true);
+      setSessionWarning('登录状态已过期，请重新登录');
+      setIsConnected(false);
+    });
+
+    return () => {
+      offSnapshot();
+      offUpdate();
+      offInvalid();
+    };
+  }, [isConnected, isElectron, isPreviewMode, runtime]);
 
   useEffect(() => {
     const statusMap = lastPrinterStatusRef.current;
@@ -856,8 +932,10 @@ function App() {
       bambuClient.disconnect().catch((err) => {
         console.error('Disconnect on teardown failed:', err);
       });
+    } else {
+      runtime.close();
     }
-  }, [isElectron]);
+  }, [isElectron, runtime]);
 
   const handleUpdateIp = async (serial, ip) => {
     const normalizedIp = normalizePrinterAddress(ip);
@@ -871,9 +949,18 @@ function App() {
       throw new Error('未找到对应的打印机');
     }
 
+    if (!isElectron) {
+      const result = await runtime.devices.update(serial, { ip: normalizedIp });
+      if (!result?.success || !result.device) {
+        throw new Error(result?.error || '更新打印机地址失败');
+      }
+      setPrinters((current) => mergeRuntimeDevice(current, result.device));
+      return;
+    }
+
     let savedToken = authSessionRef.current?.accessToken || '';
     if (!savedToken && isElectron) {
-      const saved = await electronAuth.getSavedSession();
+      const saved = await runtime.auth.getSavedSession();
       if (saved?.session?.accessToken) {
         authSessionRef.current = saved.session;
         savedToken = saved.session.accessToken;
@@ -956,7 +1043,15 @@ function App() {
   };
 
   if (!isConnected) {
-    return <ConnectionScreen onConnect={handleConnect} isConnectionGenerationCurrent={(generation) => deviceSyncGenerationRef.current === generation} isElectron={isElectron} suppressAutoLogin={suppressAutoLogin} sessionWarning={sessionWarning} />;
+    return (
+      <ConnectionScreen
+        onConnect={handleConnect}
+        isConnectionGenerationCurrent={(generation) => deviceSyncGenerationRef.current === generation}
+        runtime={runtime}
+        suppressAutoLogin={suppressAutoLogin}
+        sessionWarning={sessionWarning}
+      />
+    );
   }
 
   return (
@@ -970,7 +1065,6 @@ function App() {
         deviceSyncError={deviceSyncError}
         onSignOut={handleSignOut}
       />
-      {!isElectron && !isPreviewMode ? <MobileDashboard printers={printers} /> : null}
     </>
   );
 }
