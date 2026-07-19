@@ -2,8 +2,11 @@ const { EventEmitter } = require('events');
 const tls = require('tls');
 
 const CHAMBER_IMAGE_PORT = 6000;
+const JPEG_START = Buffer.from([0xff, 0xd8]);
 const JPEG_END = Buffer.from([0xff, 0xd9]);
 const CHAMBER_RECONNECT_MS = 3000;
+const DEFAULT_MAX_FRAME_BYTES = 5 * 1024 * 1024;
+const DEFAULT_MAX_BUFFER_BYTES = DEFAULT_MAX_FRAME_BYTES + 64 * 1024;
 
 function buildBambuRtspUrl({ ip, accessCode }) {
   const safeIp = String(ip || '').trim();
@@ -30,40 +33,143 @@ function isChamberImageCamera(printer = {}) {
   return /A1|P1P|P1S|P1SC|A2L|A2/.test(model);
 }
 
-function createChamberFrameParser({ onFrame, onWarn } = {}) {
-  let frame = null;
-  let payloadSize = 0;
+function parserLimits(maxFrameBytes, maxBufferBytes) {
+  if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes < 4
+    || !Number.isSafeInteger(maxBufferBytes) || maxBufferBytes < maxFrameBytes) {
+    throw new TypeError('Invalid camera parser limits');
+  }
+}
+
+function asBuffer(chunk) {
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (chunk instanceof Uint8Array) {
+    return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  throw new TypeError('Camera parser chunk must be bytes');
+}
+
+function createJpegStreamParser({
+  onFrame,
+  onWarn,
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
+  maxBufferBytes = DEFAULT_MAX_BUFFER_BYTES,
+} = {}) {
+  parserLimits(maxFrameBytes, maxBufferBytes);
   let buffer = Buffer.alloc(0);
 
-  return (chunk) => {
-    buffer = Buffer.concat([buffer, chunk]);
+  function warn(message) {
+    if (onWarn) onWarn(message);
+  }
 
+  function parseAvailable() {
     for (;;) {
-      if (frame === null) {
-        if (buffer.length < 16) break;
-        payloadSize = buffer.readUIntLE(0, 3);
-        buffer = buffer.subarray(16);
-        frame = Buffer.alloc(0);
+      const start = buffer.indexOf(JPEG_START);
+      if (start < 0) {
+        if (buffer.length > 0) {
+          const trailingMarker = buffer[buffer.length - 1] === 0xff;
+          buffer = trailingMarker ? Buffer.from([0xff]) : Buffer.alloc(0);
+        }
+        return;
+      }
+      if (start > 0) {
+        warn('Dropped bytes before JPEG frame');
+        buffer = buffer.subarray(start);
       }
 
-      const need = payloadSize - frame.length;
-      if (need <= 0) {
-        frame = null;
+      const end = buffer.indexOf(JPEG_END, 2);
+      if (end >= 0) {
+        const frameLength = end + JPEG_END.length;
+        if (frameLength <= maxFrameBytes) {
+          if (onFrame) onFrame(Buffer.from(buffer.subarray(0, frameLength)));
+        } else {
+          warn('JPEG frame exceeds size limit');
+        }
+        buffer = buffer.subarray(frameLength);
         continue;
       }
 
-      const take = Math.min(need, buffer.length);
-      if (take > 0) {
-        frame = Buffer.concat([frame, buffer.subarray(0, take)]);
-        buffer = buffer.subarray(take);
+      if (buffer.length >= maxFrameBytes) {
+        warn('JPEG frame exceeds size limit');
+        const nextStart = buffer.indexOf(JPEG_START, 2);
+        if (nextStart >= 0) buffer = buffer.subarray(nextStart);
+        else buffer = buffer[buffer.length - 1] === 0xff ? Buffer.from([0xff]) : Buffer.alloc(0);
+        continue;
+      }
+      return;
+    }
+  }
+
+  return (rawChunk) => {
+    const chunk = asBuffer(rawChunk);
+    let offset = 0;
+    while (offset < chunk.length) {
+      const capacity = maxBufferBytes - buffer.length;
+      if (capacity <= 0) {
+        warn('Camera byte buffer exceeds size limit');
+        buffer = buffer[buffer.length - 1] === 0xff ? Buffer.from([0xff]) : Buffer.alloc(0);
+        continue;
+      }
+      const take = Math.min(capacity, chunk.length - offset);
+      const part = chunk.subarray(offset, offset + take);
+      buffer = buffer.length === 0 ? Buffer.from(part) : Buffer.concat([buffer, part]);
+      offset += take;
+      parseAvailable();
+    }
+  };
+}
+
+function createChamberFrameParser({
+  onFrame,
+  onWarn,
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
+  maxBufferBytes = DEFAULT_MAX_BUFFER_BYTES,
+} = {}) {
+  parserLimits(maxFrameBytes, maxBufferBytes);
+  const header = Buffer.alloc(16);
+  let headerBytes = 0;
+  let frame = null;
+  let frameBytes = 0;
+  let skipBytes = 0;
+
+  return (rawChunk) => {
+    const chunk = asBuffer(rawChunk);
+    let offset = 0;
+    while (offset < chunk.length) {
+      if (skipBytes > 0) {
+        const take = Math.min(skipBytes, chunk.length - offset);
+        skipBytes -= take;
+        offset += take;
+        continue;
       }
 
-      if (frame.length < payloadSize) break;
+      if (frame === null) {
+        const take = Math.min(16 - headerBytes, chunk.length - offset);
+        chunk.copy(header, headerBytes, offset, offset + take);
+        headerBytes += take;
+        offset += take;
+        if (headerBytes < 16) continue;
+
+        const payloadSize = header.readUIntLE(0, 3);
+        headerBytes = 0;
+        if (payloadSize < 4 || payloadSize > maxFrameBytes) {
+          if (onWarn) onWarn('Chamber image frame exceeds size limit');
+          skipBytes = payloadSize;
+          continue;
+        }
+        frame = Buffer.allocUnsafe(payloadSize);
+        frameBytes = 0;
+      }
+
+      const take = Math.min(frame.length - frameBytes, chunk.length - offset);
+      chunk.copy(frame, frameBytes, offset, offset + take);
+      frameBytes += take;
+      offset += take;
+      if (frameBytes < frame.length) continue;
 
       const completed = frame;
       frame = null;
-
-      if (completed[0] === 0xff && completed[1] === 0xd8 && completed.subarray(-2).equals(JPEG_END)) {
+      frameBytes = 0;
+      if (completed.subarray(0, 2).equals(JPEG_START) && completed.subarray(-2).equals(JPEG_END)) {
         if (onFrame) onFrame(completed);
       } else if (onWarn) {
         onWarn('JPEG magic bytes missing');
@@ -169,5 +275,6 @@ module.exports = {
   buildBambuRtspUrl,
   buildChamberAuthPacket,
   createChamberFrameParser,
+  createJpegStreamParser,
   isChamberImageCamera,
 };
