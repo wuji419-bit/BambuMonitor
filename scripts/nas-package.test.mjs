@@ -59,6 +59,24 @@ test('.dockerignore removes generated and media-heavy context while retaining ru
   }
 });
 
+test('.dockerignore excludes only the root Compose data directory', async () => {
+  const ignored = (await read('.dockerignore')).split(/\r?\n/).filter(Boolean);
+  const dataPatterns = ignored.filter((entry) => /(^|\/)data(?:\/|$)/.test(entry));
+
+  assert.ok(
+    dataPatterns.includes('/data') || dataPatterns.includes('data/'),
+    'the root /data or data/ directory must be excluded from Docker build context',
+  );
+  assert.ok(
+    dataPatterns.every((entry) => entry === '/data' || entry === 'data/'),
+    'data ignore patterns must remain scoped to the Compose root data directory',
+  );
+  assert.ok(
+    ignored.every((entry) => !/^server(?:\/|$)/.test(entry)),
+    'server data-handling source must remain in the Docker build context',
+  );
+});
+
 test('docker smoke follows logs after restart and before stopping its disposable container', async () => {
   const source = await read('scripts/docker-smoke.mjs');
   const restartAt = source.indexOf("['restart', config.container]");
