@@ -119,6 +119,16 @@ async function flushPromises() {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
+async function assertPending(promise) {
+  let settled = false;
+  promise.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+  await Promise.resolve();
+  assert.equal(settled, false);
+}
+
 test('bounded JPEG stream parser handles split markers and recovers after oversized data', () => {
   const frames = [];
   const warnings = [];
@@ -638,6 +648,9 @@ test('reconfigure escalates a resistant FFmpeg child and shutdown waits for ever
   assert.equal(timers.count(5000), 2);
   timers.runOne(5000);
   timers.runOne(5000);
+  assert.equal(timers.count(5000), 2);
+  timers.runOne(5000);
+  timers.runOne(5000);
   await shuttingDown;
 
   assert.deepEqual(first.killCalls, ['SIGTERM', 'SIGKILL']);
@@ -661,6 +674,8 @@ test('idle stop escalates a resistant FFmpeg child exactly once', async () => {
   assert.equal(timers.count(5000), 1);
   timers.runOne(5000);
   assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
+  assert.equal(timers.count(5000), 1);
+  timers.runOne(5000);
   assert.equal(timers.count(), 0);
   await manager.shutdown();
   assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
@@ -684,14 +699,16 @@ test('failure retry tracks and escalates the resistant prior FFmpeg child', asyn
   assert.equal(spawn.calls.length, 2);
   timers.runOne(5000);
   assert.deepEqual(first.killCalls, ['SIGTERM', 'SIGKILL']);
+  timers.runOne(5000);
 
   const shuttingDown = manager.shutdown();
+  timers.runOne(5000);
   timers.runOne(5000);
   await shuttingDown;
   assert.deepEqual(first.killCalls, ['SIGTERM', 'SIGKILL']);
 });
 
-test('shutdown sends SIGTERM, forces SIGKILL after five seconds, and is idempotent', async () => {
+test('shutdown sends SIGTERM, forces SIGKILL, and settles at the final deadline', async () => {
   const timers = createManualTimers();
   const spawn = createSpawnHarness();
   const manager = createManager({ spawnImpl: spawn.spawnImpl, timers });
@@ -707,6 +724,10 @@ test('shutdown sends SIGTERM, forces SIGKILL after five seconds, and is idempote
   assert.deepEqual(child.killCalls, ['SIGTERM']);
   assert.equal(timers.count(5000), 1);
   timers.runOne(5000);
+  assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
+  assert.equal(timers.count(5000), 1);
+  await assertPending(firstShutdown);
+  timers.runOne(5000);
   await firstShutdown;
 
   assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
@@ -714,6 +735,84 @@ test('shutdown sends SIGTERM, forces SIGKILL after five seconds, and is idempote
   child.emit('exit', 1);
   assert.equal(timers.count(), 0);
   assert.equal(manager.getLatestFrame('SERIAL_X'), null);
+});
+
+test('FFmpeg signal error keeps escalation armed until exit', async () => {
+  const timers = createManualTimers();
+  const spawn = createSpawnHarness();
+  const manager = createManager({ spawnImpl: spawn.spawnImpl, timers });
+  manager.configure({
+    serialNumber: 'SERIAL_X', cameraMode: 'rtsps', ip: '192.168.1.40', accessCode: 'secret',
+  });
+  manager.acquire('SERIAL_X');
+  const child = spawn.calls[0].child;
+  child.kill = function kill(signal) {
+    this.killCalls.push(signal);
+    this.emit('error', new Error('signal failed with secret'));
+    return false;
+  };
+
+  const shuttingDown = manager.shutdown();
+  assert.deepEqual(child.killCalls, ['SIGTERM']);
+  assert.equal(timers.count(5000), 1);
+  await assertPending(shuttingDown);
+  timers.runOne(5000);
+  assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
+  assert.equal(timers.count(5000), 1);
+  await assertPending(shuttingDown);
+  child.emit('exit', 1);
+  await shuttingDown;
+
+  assert.equal(timers.count(), 0);
+});
+
+test('shutdown waits for delayed exit after SIGKILL', async () => {
+  const timers = createManualTimers();
+  const spawn = createSpawnHarness();
+  const manager = createManager({ spawnImpl: spawn.spawnImpl, timers });
+  manager.configure({
+    serialNumber: 'SERIAL_X', cameraMode: 'rtsps', ip: '192.168.1.40', accessCode: 'secret',
+  });
+  manager.acquire('SERIAL_X');
+  const child = spawn.calls[0].child;
+
+  const shuttingDown = manager.shutdown();
+  timers.runOne(5000);
+  assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
+  assert.equal(timers.count(5000), 1);
+  await assertPending(shuttingDown);
+  child.emit('exit', 0);
+  await shuttingDown;
+
+  assert.equal(timers.count(), 0);
+});
+
+test('shutdown settles at final deadline when FFmpeg never exits and signals throw', async () => {
+  const timers = createManualTimers();
+  const spawn = createSpawnHarness();
+  const manager = createManager({ spawnImpl: spawn.spawnImpl, timers });
+  manager.configure({
+    serialNumber: 'SERIAL_X', cameraMode: 'rtsps', ip: '192.168.1.40', accessCode: 'secret',
+  });
+  manager.acquire('SERIAL_X');
+  const child = spawn.calls[0].child;
+  child.kill = function kill(signal) {
+    this.killCalls.push(signal);
+    throw new Error('signal throw with secret');
+  };
+
+  const shuttingDown = manager.shutdown();
+  assert.deepEqual(child.killCalls, ['SIGTERM']);
+  assert.equal(timers.count(5000), 1);
+  await assertPending(shuttingDown);
+  timers.runOne(5000);
+  assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
+  assert.equal(timers.count(5000), 1);
+  await assertPending(shuttingDown);
+  timers.runOne(5000);
+  await shuttingDown;
+
+  assert.equal(timers.count(), 0);
 });
 
 test('shutdown does not schedule a force kill after a synchronous graceful FFmpeg exit', async () => {

@@ -230,33 +230,50 @@ export function createCameraSourceManager(options = {}) {
 
     let resolveTermination;
     const termination = {
-      forceTimer: null,
+      escalationTimer: null,
+      finalTimer: null,
       killSent: false,
       promise: new Promise((resolve) => { resolveTermination = resolve; }),
       settled: false,
     };
+    const clearTerminationTimer = (key) => {
+      if (!termination[key]) return;
+      timers.clearTimeout(termination[key]);
+      termination[key] = null;
+    };
+    const onError = () => {
+      log('warn', 'source-signal-failed', entry);
+    };
     const finish = () => {
       if (termination.settled) return;
       termination.settled = true;
-      if (termination.forceTimer) timers.clearTimeout(termination.forceTimer);
-      termination.forceTimer = null;
+      clearTerminationTimer('escalationTimer');
+      clearTerminationTimer('finalTimer');
       remove(source.child, 'exit', finish);
-      remove(source.child, 'error', finish);
+      remove(source.child, 'error', onError);
       terminatingFfmpeg.delete(source.child);
       resolveTermination();
     };
+    const armFinalDeadline = () => {
+      if (termination.settled || termination.finalTimer) return;
+      termination.finalTimer = timers.setTimeout(() => {
+        termination.finalTimer = null;
+        finish();
+      }, shutdownKillAfterMs);
+      termination.finalTimer?.unref?.();
+    };
     terminatingFfmpeg.set(source.child, termination);
     source.child.on('exit', finish);
-    source.child.on('error', finish);
+    source.child.on('error', onError);
     try {
       source.child.kill('SIGTERM');
     } catch {
-      finish();
-      return termination.promise;
+      log('warn', 'source-stop-failed', entry);
     }
     if (termination.settled) return termination.promise;
-    termination.forceTimer = timers.setTimeout(() => {
-      termination.forceTimer = null;
+    termination.escalationTimer = timers.setTimeout(() => {
+      termination.escalationTimer = null;
+      if (termination.settled) return;
       if (!termination.killSent) {
         termination.killSent = true;
         try {
@@ -265,9 +282,9 @@ export function createCameraSourceManager(options = {}) {
           log('warn', 'source-stop-failed', entry);
         }
       }
-      finish();
+      armFinalDeadline();
     }, shutdownKillAfterMs);
-    termination.forceTimer?.unref?.();
+    termination.escalationTimer?.unref?.();
     return termination.promise;
   }
 
