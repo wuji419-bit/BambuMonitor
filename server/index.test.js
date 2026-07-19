@@ -187,7 +187,9 @@ test('storage failure still serves health while ready, login, and protected APIs
   });
   const jsonHeaders = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${controller.server.address().port}` };
   assert.equal((await request(controller.server, { path: '/healthz' })).status, 200);
-  assert.equal((await request(controller.server, { path: '/readyz' })).status, 503);
+  const readiness = await request(controller.server, { path: '/readyz' });
+  assert.equal(readiness.status, 503);
+  assert.deepEqual(JSON.parse(readiness.body), { status: 'not_ready', code: 'STORAGE_UNAVAILABLE' });
   assert.equal((await request(controller.server, {
     path: '/api/auth/login', method: 'POST', headers: jsonHeaders,
     body: JSON.stringify({ account: 'test@example.com', password: 'not-a-real-password' }),

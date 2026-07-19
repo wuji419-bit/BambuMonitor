@@ -19,6 +19,9 @@ import { projectPublicDeviceEvent } from './public-device.js';
 const JSON_TYPE = 'application/json; charset=utf-8';
 const SESSION_COOKIE = 'bambu_session';
 const STREAM_BOUNDARY = 'bambuframe';
+const READINESS_PUBLIC_CODES = new Map([
+  ['storage-unavailable', 'STORAGE_UNAVAILABLE'],
+]);
 const DEFAULT_LIMITS = Object.freeze({
   bodyBytes: 65_536,
   frameWaitMs: 4_000,
@@ -949,9 +952,11 @@ export function createHttpApp(deps = {}) {
       if (rawPath === '/healthz' && req.method === 'GET') return sendJson(res, 200, { status: 'ok' });
       if (rawPath === '/readyz' && req.method === 'GET') {
         const ready = typeof readiness === 'function' ? await readiness() : readiness;
-        return sendJson(res, ready === true || ready?.ready === true ? 200 : 503, {
-          status: ready === true || ready?.ready === true ? 'ready' : 'not_ready',
-        });
+        const isReady = ready === true || ready?.ready === true;
+        const payload = { status: isReady ? 'ready' : 'not_ready' };
+        const code = isReady ? undefined : READINESS_PUBLIC_CODES.get(ready?.category);
+        if (code) payload.code = code;
+        return sendJson(res, isReady ? 200 : 503, payload);
       }
       if (hasQuery && (rawPath.startsWith('/api/') || rawPath === '/healthz' || rawPath === '/readyz')) {
         throw apiError(400, 'BAD_REQUEST', 'Invalid request');

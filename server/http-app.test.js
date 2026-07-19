@@ -347,6 +347,29 @@ test('keeps health public and reports readiness with exact health payload', asyn
   assert.equal((await request(base, '/api/devices')).response.status, 401);
 });
 
+test('readyz reports a stable storage code without leaking readiness details', async (t) => {
+  let readiness = {
+    ready: false,
+    degraded: true,
+    category: 'storage-unavailable',
+    error: 'EACCES: C:\\private\\bambu-monitor\\secret.key',
+  };
+  const harness = createHarness({ readiness: () => readiness });
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const unavailable = await request(base, '/readyz');
+  assert.equal(unavailable.response.status, 503);
+  assert.deepEqual(unavailable.body, { status: 'not_ready', code: 'STORAGE_UNAVAILABLE' });
+  assert.equal(JSON.stringify(unavailable.body).includes('private'), false);
+  assert.equal(JSON.stringify(unavailable.body).includes('EACCES'), false);
+
+  readiness = { ready: true, category: 'storage-unavailable' };
+  const ready = await request(base, '/readyz');
+  assert.equal(ready.response.status, 200);
+  assert.deepEqual(ready.body, { status: 'ready' });
+});
+
 test('password login enforces origin and exact bounded JSON then creates a secure-safe session', async (t) => {
   const harness = createHarness();
   const base = await startHarness(harness);

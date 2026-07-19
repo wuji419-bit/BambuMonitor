@@ -113,7 +113,10 @@ test('NAS guide documents configuration, health behavior, and persistent encrypt
   assert.match(guide, /TRUST_PROXY[\s\S]*受信[^\n]*反向代理[\s\S]*X-Forwarded-Proto[\s\S]*[=：]\s*`?1`?/);
   assert.match(guide, /\/healthz/);
   assert.match(guide, /\/readyz/);
-  assert.match(guide, /data[^\n]*不可写[\s\S]*readyz[^\n]*503[\s\S]*(?:storage permission|存储权限)[^\n]*(?:code|错误码)/i);
+  assert.match(guide, /data[^\n]*不可写[\s\S]*\/readyz[^\n]*503[\s\S]*["'`]?code["'`]?[\s\S]*STORAGE_UNAVAILABLE/);
+  assert.match(guide, /STORAGE_UNAVAILABLE[^\n]*(?:不包含|不会[^\n]*包含)[^\n]*(?:路径|原始错误)/);
+  assert.match(guide, /storage-unavailable[^\n]*不会[^\n]*(?:路径|原始错误)/);
+  assert.doesNotMatch(guide, /EACCES|EPERM/);
   assert.match(guide, /secret\.key[^\n]*(?:丢失|损坏)[\s\S]*session\.enc[^\n]*无法解密[\s\S]*重新登录/);
   assert.match(guide, /备份整个[^\n]*data/);
 });

@@ -122,7 +122,8 @@ docker compose up -d
 
 - `http://NAS-IP:3080/healthz`：进程存活检查，正常返回 `200`。
 - `http://NAS-IP:3080/readyz`：服务就绪检查，存储初始化完成后返回 `200`。
-- 当 `data` 不可写时，`readyz` 返回 `503`；请查看 `docker compose logs`，常见存储权限错误码（storage permission code）为 `EACCES` 或 `EPERM`。
+- 当 `data` 不可写时，`/readyz` 返回 `503`，JSON 响应包含 `"code":"STORAGE_UNAVAILABLE"`。`STORAGE_UNAVAILABLE` 是固定的安全错误码，不包含路径或原始错误。
+- 继续排错时可查看 `docker compose logs`；存储初始化失败只记录安全 category `storage-unavailable`，不会记录数据路径或原始错误。
 
 可在 NAS 上检查：
 
@@ -172,7 +173,7 @@ chown -R 1000:1000 data
 docker compose up -d
 ```
 
-日志中的 `EACCES` 或 `EPERM` 表示存储权限错误。若 NAS 使用共享目录权限界面，请在那里授予等效权限。
+若日志出现安全 category `storage-unavailable`，请检查目录所有者、挂载方式和写权限。若 NAS 使用共享目录权限界面，请在那里授予等效权限。
 
 ### 有云端状态但没有摄像头
 
