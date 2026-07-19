@@ -3,7 +3,7 @@ import { Camera, Maximize2, RefreshCw } from 'lucide-react';
 import { cameraCompatibilityNote, getCustomCameraUrl, getPrinterCameraKey } from '../../services/camera';
 import { buildCameraFrameUrl, createVisibilityAwareCameraPoller } from '../../utils/cameraFrame';
 import { buildCameraZoomState } from '../../utils/cameraZoom';
-import { buildCameraCardPresentation, cameraRetryLabel } from '../../utils/cameraPresentation';
+import { buildCameraAddressLabel, buildCameraCardPresentation, cameraRetryLabel } from '../../utils/cameraPresentation';
 import { isPublicCaptureSearch, publicCameraAddress } from '../../utils/publicCapture';
 
 async function decodeCameraFrame(blob) {
@@ -51,7 +51,10 @@ export function ChamberSnapshotCanvas({ snapshotUrl, imageKey, alt, isReady, set
         if (!response.ok) throw new Error(`camera frame request failed: ${response.status}`);
         const blob = await response.blob();
         const image = await decodeCameraFrame(blob);
-        if (mounted && canvasRef.current) { drawCameraFrame(canvasRef.current, image); markReady(); }
+        if (!signal.aborted && mounted && canvasRef.current) {
+          drawCameraFrame(canvasRef.current, image);
+          markReady();
+        }
         if (typeof image.close === 'function') image.close();
       },
       onError(error) {
@@ -86,7 +89,7 @@ export function CameraMedia({ zoomState, imageKey, title, imageState, customUrl,
   return <img className="camera-media__image" src={zoomState.imageUrl} alt={`${title} 摄像头`} style={{ objectFit: fit, opacity: ready ? 1 : 0.35 }} onLoad={() => onImageStateChange((prev) => ({ ...prev, [imageKey]: { status: 'ready' } }))} onError={() => onImageStateChange((prev) => ({ ...prev, [imageKey]: { status: 'error', message: customUrl ? '自定义摄像头地址无法显示' : '摄像头暂时无法打开' } }))} />;
 }
 
-export default function CameraWorkspace({ printers = [], streams = {}, imageStates = {}, cameraConfig = {}, allowCustomUrls = true, onRetry, onZoom, onImageStateChange }) {
+export default function CameraWorkspace({ printers = [], streams = {}, imageStates = {}, cameraConfig = {}, allowCustomUrls = true, showRawAddress = true, onRetry, onZoom, onImageStateChange }) {
   const isPublicCapture = typeof window !== 'undefined' && isPublicCaptureSearch(window.location.search);
   return <div className="camera-grid" data-testid="camera-grid" role="region" aria-label="摄像头列表" tabIndex={-1}>
     {!printers.length ? <div className="camera-empty" role="status">正在等待打印机列表...</div> : null}
@@ -94,8 +97,11 @@ export default function CameraWorkspace({ printers = [], streams = {}, imageStat
       const key = getPrinterCameraKey(printer); const stream = streams[key]; const state = imageStates[key];
       const customUrl = allowCustomUrls ? getCustomCameraUrl(cameraConfig, printer) : ''; const zoomState = buildCameraZoomState({ key, printer, stream, imageState: state, purpose: 'wall' });
       const ready = state?.status === 'ready';
-      const presentation = buildCameraCardPresentation({ imageState: state, stream, customUrl, hasIp: Boolean(printer.ip) });
+      const presentation = buildCameraCardPresentation({ imageState: state, stream, customUrl, hasIp: Boolean(printer.ip || printer.hasLocalAddress) });
       const note = cameraCompatibilityNote(printer);
+      const addressLabel = isPublicCapture
+        ? publicCameraAddress(printer.ip, true)
+        : buildCameraAddressLabel(printer, { showRawAddress });
       const activate = () => { if (zoomState.canZoom) onZoom(key); };
       return <section key={`camera-${key}`} className={`camera-card${zoomState.canZoom ? ' is-ready' : ''}`} data-camera-card={key} role={zoomState.canZoom ? 'button' : undefined} tabIndex={zoomState.canZoom ? 0 : undefined} onClick={activate} onKeyDown={(event) => { if (zoomState.canZoom && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); activate(); } }}>
         <div className="camera-media">
@@ -104,7 +110,7 @@ export default function CameraWorkspace({ printers = [], streams = {}, imageStat
           {ready ? <span className="camera-media__zoom" aria-hidden="true"><Maximize2 size={14} /></span> : null}
           {!zoomState.canZoom ? <div className="camera-placeholder"><Camera size={24} /><span>{presentation.message}</span>{note ? <small>{note}</small> : null}{presentation.showRetry ? <button type="button" aria-label={cameraRetryLabel(printer)} onClick={(event) => { event.stopPropagation(); onRetry?.(printer); }}><RefreshCw size={12} />重试</button> : null}</div> : null}
         </div>
-        <footer className="camera-card__footer"><div><strong>{printer.name || '未命名打印机'}</strong><span>{publicCameraAddress(printer.ip, isPublicCapture)}</span></div><b data-state={state?.status || 'idle'}>{presentation.label}</b></footer>
+        <footer className="camera-card__footer"><div><strong>{printer.name || '未命名打印机'}</strong><span>{addressLabel}</span></div><b data-state={state?.status || 'idle'}>{presentation.label}</b></footer>
       </section>;
     })}
   </div>;

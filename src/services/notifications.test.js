@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildServerNotificationConfig,
   createDefaultNotificationConfig,
+  getTestNotificationError,
   getPrinterNotificationEvent,
   mergeNotificationConfig,
   sendTestNotification,
@@ -81,4 +82,21 @@ test('uses the selected runtime for Web notification tests', async () => {
     sent: true,
   });
   assert.deepEqual(calls, [[]]);
+});
+
+test('Web notification tests require explicit success and sent while Electron keeps result semantics', () => {
+  assert.equal(
+    getTestNotificationError({ success: false, error: 'gateway unavailable' }, { web: true }),
+    'gateway unavailable',
+  );
+  assert.equal(
+    getTestNotificationError({ success: true, sent: false }, { web: true }),
+    '通知未发送',
+  );
+  assert.equal(getTestNotificationError({ success: true, sent: true }, { web: true }), '');
+  assert.equal(getTestNotificationError({ results: [{ success: true }] }, { web: false }), '');
+  assert.equal(
+    getTestNotificationError({ results: [{ success: false, error: 'desktop failed' }] }, { web: false }),
+    'desktop failed',
+  );
 });

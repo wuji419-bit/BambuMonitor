@@ -9,6 +9,11 @@ export function cameraRetryLabel(printer = {}) {
   return `重试 ${printer.name || '未命名打印机'} 摄像头`;
 }
 
+export function buildCameraAddressLabel(printer = {}, { showRawAddress = false } = {}) {
+  if (showRawAddress && printer.ip) return `IP ${printer.ip}`;
+  return printer.hasLocalAddress || printer.ip ? '已配置本地地址' : '暂无本地地址';
+}
+
 export function nextCameraFit(current) {
   return current === 'contain' ? 'cover' : 'contain';
 }

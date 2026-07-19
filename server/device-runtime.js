@@ -1,6 +1,7 @@
 import { isValidPrinterAddress } from '../src/utils/printerAddress.js';
 import { normalizeSerial } from '../src/utils/printerSync.js';
 import { applyPrinterTelemetry } from '../src/utils/printerTelemetry.js';
+import { projectPublicDevice } from './public-device.js';
 import {
   applyMqttConnectedState,
   applyMqttDisconnectedState,
@@ -19,7 +20,7 @@ function text(value) {
 }
 
 function publicDevice(record) {
-  return clone(record.device);
+  return projectPublicDevice(record.device);
 }
 
 function isInvalidSessionError(error) {
@@ -149,7 +150,7 @@ export function createDeviceRuntime({
       type: 'devices.snapshot',
       devices: order.map((serialNumber) => records.get(serialNumber))
         .filter(Boolean)
-        .map((record) => record.device),
+        .map(publicDevice),
       syncedAt,
       cloudState,
     });

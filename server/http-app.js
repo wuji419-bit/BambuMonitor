@@ -14,6 +14,7 @@ import {
   readJsonBody,
   requestIsSecure,
 } from './http-security.js';
+import { projectPublicDeviceEvent } from './public-device.js';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 const SESSION_COOKIE = 'bambu_session';
@@ -649,13 +650,13 @@ export function createHttpApp(deps = {}) {
     }
     if (pathname === '/api/devices' && req.method === 'GET') {
       await requireSession(req);
-      return sendSuccess(res, deviceRuntime.snapshot());
+      return sendSuccess(res, projectPublicDeviceEvent(deviceRuntime.snapshot()));
     }
     if (pathname === '/api/devices/refresh' && req.method === 'POST') {
       const auth = await requireSession(req);
       assertMutation(req, auth);
       await requireEmptyJson(req);
-      return sendSuccess(res, await deviceRuntime.refresh());
+      return sendSuccess(res, projectPublicDeviceEvent(await deviceRuntime.refresh()));
     }
     const deviceMatch = /^\/api\/devices\/([^/]+)$/.exec(pathname);
     if (deviceMatch && req.method === 'PATCH') {
@@ -671,7 +672,7 @@ export function createHttpApp(deps = {}) {
         throw apiError(400, 'BAD_REQUEST', 'Invalid request');
       }
       if (!updated) throw apiError(404, 'DEVICE_NOT_FOUND', 'Device not found');
-      return sendSuccess(res, updated);
+      return sendSuccess(res, projectPublicDeviceEvent({ type: 'device.updated', device: updated }).device);
     }
     if (pathname === '/api/settings' && req.method === 'GET') {
       await requireSession(req);
@@ -1051,7 +1052,7 @@ export function createHttpApp(deps = {}) {
     wsCleanup.set(ws, cleanup);
     ws.once('close', cleanup);
     ws.once('error', cleanup);
-    safeWsSend(ws, deviceRuntime.snapshot());
+    safeWsSend(ws, projectPublicDeviceEvent(deviceRuntime.snapshot()));
     let subscribing = true;
     try {
       unsubscribe = normalizeRelease(deviceRuntime.subscribe((event) => {
@@ -1065,7 +1066,7 @@ export function createHttpApp(deps = {}) {
           }
           return;
         }
-        safeWsSend(ws, event);
+        safeWsSend(ws, projectPublicDeviceEvent(event));
       }));
     } catch {
       ws.close(1011, 'Subscription unavailable');

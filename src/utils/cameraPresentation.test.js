@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCameraCardPresentation, cameraFitReducer, cameraRetryLabel, nextCameraFit, shouldClearCameraZoom } from './cameraPresentation.js';
+import { buildCameraAddressLabel, buildCameraCardPresentation, cameraFitReducer, cameraRetryLabel, nextCameraFit, shouldClearCameraZoom } from './cameraPresentation.js';
 
 test('presents ready custom and automatic cameras truthfully', () => {
   assert.deepEqual(buildCameraCardPresentation({ imageState: { status: 'ready' }, customUrl: 'http://camera' }), { label: '自定义', message: '', showRetry: false });
@@ -47,4 +47,12 @@ test('clears selected zoom when its image becomes non-zoomable', () => {
 
 test('retains a valid selected zoom', () => {
   assert.equal(shouldClearCameraZoom({ selectedKey: 'camera-a', printer: {}, zoomState: { canZoom: true } }), false);
+});
+
+test('Web camera labels use local-address presence without rendering the raw IP', () => {
+  const printer = { ip: '192.168.1.143', hasLocalAddress: true };
+  const webLabel = buildCameraAddressLabel(printer, { showRawAddress: false });
+  assert.equal(webLabel, '已配置本地地址');
+  assert.equal(webLabel.includes(printer.ip), false);
+  assert.equal(buildCameraAddressLabel(printer, { showRawAddress: true }), 'IP 192.168.1.143');
 });

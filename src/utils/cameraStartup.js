@@ -14,6 +14,62 @@ export function isCameraSourceRetryable(source = {}) {
   ));
 }
 
+export function createCameraWorkspaceLifecycle() {
+  let active = false;
+  let generation = 0;
+
+  return {
+    activate() {
+      active = true;
+      generation += 1;
+      return generation;
+    },
+    invalidate() {
+      active = false;
+      generation += 1;
+    },
+    capture() {
+      return active ? generation : null;
+    },
+    isCurrent(token) {
+      return active && token !== null && token === generation;
+    },
+    runIfCurrent(token, callback) {
+      if (!active || token === null || token !== generation) return undefined;
+      return callback?.();
+    },
+  };
+}
+
+export function activateCameraWorkspace({ lifecycle, cameraWallOpenRef } = {}) {
+  if (cameraWallOpenRef) cameraWallOpenRef.current = true;
+  return lifecycle?.activate() ?? null;
+}
+
+export async function cleanupCameraWorkspace({
+  lifecycle,
+  cameraWallOpenRef,
+  cameraRetryTimersRef,
+  cameraRetryAttemptsRef,
+  restartCameraRef,
+  clearTimeoutImpl = globalThis.clearTimeout?.bind(globalThis),
+  stopAll,
+} = {}) {
+  lifecycle?.invalidate();
+  if (cameraWallOpenRef) cameraWallOpenRef.current = false;
+  for (const timer of Object.values(cameraRetryTimersRef?.current || {})) {
+    clearTimeoutImpl?.(timer);
+  }
+  if (cameraRetryTimersRef) cameraRetryTimersRef.current = {};
+  if (cameraRetryAttemptsRef) cameraRetryAttemptsRef.current = {};
+  if (restartCameraRef) restartCameraRef.current = null;
+  try {
+    await stopAll?.();
+  } catch {
+    // Cleanup must remain safe when a runtime is already shutting down.
+  }
+}
+
 export function buildInitialCameraState(source = {}) {
   const key = source.key;
   if (!key) return null;

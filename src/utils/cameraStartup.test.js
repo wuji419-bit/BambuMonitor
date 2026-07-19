@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 
 import {
   buildInitialCameraState,
+  activateCameraWorkspace,
   cameraStartWithTimeout,
   cameraStartErrorState,
   cameraStartResultState,
+  cleanupCameraWorkspace,
+  createCameraWorkspaceLifecycle,
   getCameraRetryDelay,
   isCameraSourceRetryable,
 } from './cameraStartup.js';
@@ -74,4 +77,56 @@ test('keeps server-managed custom camera sources retryable', () => {
     accessCode: '12345678',
     autoCameraSupported: true,
   }), false);
+});
+
+test('unmount cleanup invalidates pending camera starts and releases timers and runtime', async () => {
+  const lifecycle = createCameraWorkspaceLifecycle();
+  lifecycle.activate();
+  const token = lifecycle.capture();
+  let resolveStart;
+  const pendingStart = new Promise((resolve) => { resolveStart = resolve; });
+  let stateWrites = 0;
+  let restarts = 0;
+  const completion = pendingStart.then(() => lifecycle.runIfCurrent(token, () => {
+    stateWrites += 1;
+    restarts += 1;
+  }));
+  const cleared = [];
+  let stopAllCalls = 0;
+  const cameraWallOpenRef = { current: true };
+  const cameraRetryTimersRef = { current: { A: 11, B: 12 } };
+  const cameraRetryAttemptsRef = { current: { A: 2 } };
+  const restartCameraRef = { current: () => { restarts += 1; } };
+
+  await cleanupCameraWorkspace({
+    lifecycle,
+    cameraWallOpenRef,
+    cameraRetryTimersRef,
+    cameraRetryAttemptsRef,
+    restartCameraRef,
+    clearTimeoutImpl: (timer) => cleared.push(timer),
+    stopAll: async () => { stopAllCalls += 1; },
+  });
+  resolveStart({ success: true });
+  await completion;
+
+  assert.deepEqual(cleared.sort(), [11, 12]);
+  assert.deepEqual(cameraRetryTimersRef.current, {});
+  assert.deepEqual(cameraRetryAttemptsRef.current, {});
+  assert.equal(cameraWallOpenRef.current, false);
+  assert.equal(restartCameraRef.current, null);
+  assert.equal(stopAllCalls, 1);
+  assert.equal(stateWrites, 0);
+  assert.equal(restarts, 0);
+});
+
+test('runtime replacement reactivates camera state after the old runtime cleanup', async () => {
+  const lifecycle = createCameraWorkspaceLifecycle();
+  const cameraWallOpenRef = { current: true };
+  await cleanupCameraWorkspace({ lifecycle, cameraWallOpenRef, stopAll: async () => {} });
+  assert.equal(cameraWallOpenRef.current, false);
+
+  const token = activateCameraWorkspace({ lifecycle, cameraWallOpenRef });
+  assert.equal(cameraWallOpenRef.current, true);
+  assert.equal(lifecycle.isCurrent(token), true);
 });

@@ -340,3 +340,13 @@ export async function sendTestNotification(target, runtime) {
     }, { previousStatus: 'printing' }),
   });
 }
+
+export function getTestNotificationError(result, { web = false } = {}) {
+  if (web && (result?.success !== true || result?.sent !== true)) {
+    const error = typeof result?.error === 'string' ? result.error.trim().slice(0, 256) : '';
+    return error || '通知未发送';
+  }
+  const failed = result?.results?.find((item) => item?.success === false);
+  if (!failed) return '';
+  return String(failed.error || failed.status || '未知错误').slice(0, 256);
+}

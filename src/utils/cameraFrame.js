@@ -30,7 +30,6 @@ export function createVisibilityAwareCameraPoller({
     if (timer !== null) clearTimeoutImpl?.(timer);
     timer = null;
     activeController?.abort();
-    activeController = null;
   };
   const schedule = (delay = 0) => {
     if (!canPoll() || timer !== null || activeController || typeof setTimeoutImpl !== 'function') return;

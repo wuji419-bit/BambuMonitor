@@ -1,6 +1,6 @@
 import React from 'react';
 import { getPrinterConnectionState, getPrinterJobStatus } from '../../utils/printerPresentation';
-import { hasCloudStatus } from '../../utils/printerIpPrompt';
+import { hasCloudStatus, hasPrinterLocalAddress } from '../../utils/printerIpPrompt';
 
 function deviceLabel(printer) {
   const source = printer?.model || printer?.modelCode || printer?.productName || printer?.printerType || printer?.name || 'BM';
@@ -22,7 +22,7 @@ function cloudConnectionCopy(connection) {
   }
 }
 
-export default function DeviceCard({ printer, renderAction, presentation }) {
+export default function DeviceCard({ printer, renderAction, presentation, showRawAddress = true }) {
   const { amsInfo, infoLine, progressPalette, safeProgress, statusText, temperatureText } = presentation;
   const rawProgress = printer.progress;
   const progressKnown = rawProgress !== null && rawProgress !== '' && Number.isFinite(Number(rawProgress));
@@ -32,9 +32,12 @@ export default function DeviceCard({ printer, renderAction, presentation }) {
   const connection = getPrinterConnectionState(printer);
   const meta = infoLine(printer);
   const ams = amsInfo(printer);
-  const cloudOnly = !printer.ip && hasCloudStatus(printer);
+  const hasLocalAddress = hasPrinterLocalAddress(printer);
+  const cloudOnly = !hasLocalAddress && hasCloudStatus(printer);
   const model = deviceModel(printer);
-  const connectionCopy = printer.ip ? `IP ${printer.ip}` : (cloudOnly ? cloudConnectionCopy(connection) : '等待本地连接');
+  const connectionCopy = showRawAddress && printer.ip
+    ? `IP ${printer.ip}`
+    : (hasLocalAddress ? '已配置本地地址' : (cloudOnly ? cloudConnectionCopy(connection) : '等待本地连接'));
   const hasRemainingTime = Boolean(printer.timeLeft && printer.timeLeft !== '--');
   const metaHasRemainingTime = /剩余|预计/.test(String(meta.right || ''));
   const showRemainingTime = hasRemainingTime && !metaHasRemainingTime;

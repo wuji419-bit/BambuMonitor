@@ -3,7 +3,7 @@ import { Minimize2, Scan } from 'lucide-react';
 import { CameraMedia } from './CameraWorkspace';
 import { cameraFitReducer } from '../../utils/cameraPresentation';
 
-export default function CameraZoom({ zoomState, imageKey, imageState, customUrl, onClose, onImageStateChange }) {
+export default function CameraZoom({ zoomState, imageKey, imageState, customUrl, showRawAddress = true, onClose, onImageStateChange }) {
   const dialogRef = useRef(null);
   const closeButtonRef = useRef(null);
   const [fitState, dispatchFit] = useReducer(cameraFitReducer, { imageKey, fit: 'contain' });
@@ -41,7 +41,7 @@ export default function CameraZoom({ zoomState, imageKey, imageState, customUrl,
   if (!zoomState?.canZoom) return null;
   return <section ref={dialogRef} className="camera-zoom" data-camera-purpose="zoom" role="dialog" aria-modal="true" aria-label={`${zoomState.title} 放大预览`} tabIndex={-1}>
     <header className="camera-zoom__titlebar">
-      <div className="camera-zoom__identity"><strong>{zoomState.title}</strong><span>{zoomState.ip ? `IP ${zoomState.ip}` : '实时摄像头预览'}</span></div>
+      <div className="camera-zoom__identity"><strong>{zoomState.title}</strong><span>{showRawAddress && zoomState.ip ? `IP ${zoomState.ip}` : '实时摄像头预览'}</span></div>
       <div className="camera-zoom__actions">
         <button type="button" onClick={() => dispatchFit({ type: 'toggle' })} title={fit === 'contain' ? '铺满画面' : '完整显示'} aria-label={fit === 'contain' ? '铺满画面' : '完整显示'}><Scan size={17} /></button>
         <button ref={closeButtonRef} type="button" onClick={onClose} title="关闭放大预览" aria-label="关闭放大预览"><Minimize2 size={17} /></button>

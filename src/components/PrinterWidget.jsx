@@ -23,7 +23,7 @@ import {
 import { buildCameraZoomState } from '../utils/cameraZoom';
 import { shouldClearCameraZoom } from '../utils/cameraPresentation';
 import { mapWithConcurrency } from '../utils/asyncPool';
-import { hasCloudStatus, shouldPromptForPrinterIp } from '../utils/printerIpPrompt';
+import { hasCloudStatus, hasPrinterLocalAddress, shouldPromptForPrinterIp } from '../utils/printerIpPrompt';
 import {
   getWindowModeConfig,
   normalizeSavedWindowSize,
@@ -42,9 +42,12 @@ import {
 } from '../utils/cameraFrame';
 import {
   buildInitialCameraState,
+  activateCameraWorkspace,
   cameraStartErrorState,
   cameraStartResultState,
   cameraStartWithTimeout,
+  cleanupCameraWorkspace,
+  createCameraWorkspaceLifecycle,
   DEFAULT_CAMERA_START_TIMEOUT_MS,
   getCameraRetryDelay,
   isCameraSourceRetryable,
@@ -54,6 +57,7 @@ import {
   buildServerNotificationConfig,
   createDefaultNotificationConfig,
   getNotificationConfig,
+  getTestNotificationError,
   mergeNotificationConfig,
   saveNotificationConfig,
   sendTestNotification,
@@ -198,14 +202,16 @@ function amsInfo(printer) {
   return { text: parts.join(' · '), trays };
 }
 
-function infoLine(printer) {
+function infoLine(printer, { showRawAddress = true } = {}) {
   if (hasCloudStatus(printer)) {
     const cloudLabel = statusText(printer).replace('云端：', '');
     return {
       left: cloudLabel && cloudLabel !== '云端概览'
         ? `云端状态：${cloudLabel}`
         : '云端状态已启用',
-      right: printer.ip ? `IP ${printer.ip}` : 'IP 仅用于摄像头/本地直连',
+      right: showRawAddress && printer.ip
+        ? `IP ${printer.ip}`
+        : (hasPrinterLocalAddress(printer) ? '已配置本地地址' : 'IP 仅用于摄像头/本地直连'),
     };
   }
 
@@ -504,6 +510,8 @@ export default function PrinterWidget({
   const cameraRetryTimersRef = useRef({});
   const cameraZoomOriginKeyRef = useRef('');
   const restartCameraRef = useRef(null);
+  const cameraLifecycleRef = useRef(null);
+  if (!cameraLifecycleRef.current) cameraLifecycleRef.current = createCameraWorkspaceLifecycle();
   const nativeModeRef = useRef(viewMode);
   const submittingIpRef = useRef(submittingIp);
   const settingsDialogRef = useRef(null);
@@ -532,6 +540,7 @@ export default function PrinterWidget({
   const deviceSyncCopy = deviceSyncError
     ? `同步失败：${deviceSyncError}`
     : (isRefreshingDevices ? '正在同步设备...' : formatDeviceSyncTime(lastDeviceSyncAt));
+  const displayInfoLine = (printer) => infoLine(printer, { showRawAddress: isElectron });
   const cameraSourceKey = JSON.stringify(printers.map((printer) => {
     const key = getPrinterCameraKey(printer);
     return {
@@ -541,6 +550,7 @@ export default function PrinterWidget({
       model: printer.model || printer.modelCode || '',
       modelCode: printer.modelCode || '',
       ip: printer.ip || '',
+      hasLocalAddress: Boolean(printer.hasLocalAddress),
       accessCode: printer.accessCode || '',
       customUrl: getCustomCameraUrl(cameraConfig, printer),
       cameraMode: getCameraTransport(printer),
@@ -552,8 +562,13 @@ export default function PrinterWidget({
   nativeModeRef.current = nativeMode;
   submittingIpRef.current = submittingIp;
 
-  const updateCameraState = (key, nextState) => {
-    if (!key || !nextState || !cameraWallOpenRef.current) return;
+  const updateCameraState = (key, nextState, operationToken = null) => {
+    if (
+      !key
+      || !nextState
+      || !cameraWallOpenRef.current
+      || operationToken !== null && !cameraLifecycleRef.current.isCurrent(operationToken)
+    ) return;
     setCameraStreams((prev) => ({ ...prev, [key]: nextState.stream }));
     setCameraImageStates((prev) => ({ ...prev, [key]: nextState.imageState }));
   };
@@ -568,7 +583,8 @@ export default function PrinterWidget({
     const source = typeof sourceOrKey === 'string'
       ? sources.find((item) => item.key === sourceOrKey)
       : sourceOrKey;
-    if (!source?.key || !cameraWallOpenRef.current) return;
+    const operationToken = cameraLifecycleRef.current.capture();
+    if (!source?.key || operationToken === null || !cameraWallOpenRef.current) return;
 
     const initialState = buildInitialCameraState(source);
     if (!initialState) return;
@@ -579,30 +595,40 @@ export default function PrinterWidget({
         updateCameraState(source.key, {
           stream: { success: true, url: `${source.customUrl}${separator}bambuRetry=${Date.now()}`, mode: 'custom' },
           imageState: { status: 'loading' },
-        });
+        }, operationToken);
       } else {
-        updateCameraState(source.key, initialState);
+        updateCameraState(source.key, initialState, operationToken);
       }
       return;
     }
 
-    updateCameraState(source.key, initialState);
+    updateCameraState(source.key, initialState, operationToken);
     try {
       if (stopFirst) {
         await runtime.camera.stop({ serialNumber: source.key });
+        if (!cameraLifecycleRef.current.isCurrent(operationToken)) return;
       }
       const result = await cameraStartWithTimeout(
         runtime.camera.start(buildCameraStartPayload(runtime, source)),
         DEFAULT_CAMERA_START_TIMEOUT_MS,
         source.name || source.key,
       );
-      updateCameraState(source.key, cameraStartResultState(result));
+      if (!cameraLifecycleRef.current.isCurrent(operationToken)) {
+        runtime.camera.stop({ serialNumber: source.key }).catch(() => {});
+        return;
+      }
+      updateCameraState(source.key, cameraStartResultState(result), operationToken);
     } catch (error) {
-      updateCameraState(source.key, cameraStartErrorState(error));
+      if (cameraLifecycleRef.current.isCurrent(operationToken)) {
+        updateCameraState(source.key, cameraStartErrorState(error), operationToken);
+      }
     }
   };
 
   restartCameraRef.current = restartCameraSource;
+  useEffect(() => {
+    restartCameraRef.current = restartCameraSource;
+  });
 
   const clearCameraRetryTimer = useCallback((key) => {
     const timer = cameraRetryTimersRef.current[key];
@@ -877,6 +903,28 @@ export default function PrinterWidget({
   }, [activeDialog]);
 
   useEffect(() => {
+    const lifecycle = cameraLifecycleRef.current;
+    if (!cameraOpen) {
+      lifecycle.invalidate();
+      return undefined;
+    }
+    activateCameraWorkspace({ lifecycle, cameraWallOpenRef });
+    return () => lifecycle.invalidate();
+  }, [cameraOpen, cameraSourceKey, runtime]);
+
+  useEffect(() => () => {
+    void cleanupCameraWorkspace({
+      lifecycle: cameraLifecycleRef.current,
+      cameraWallOpenRef,
+      cameraRetryTimersRef,
+      cameraRetryAttemptsRef,
+      restartCameraRef,
+      clearTimeoutImpl: window.clearTimeout.bind(window),
+      stopAll: () => runtime.camera.stopAll(),
+    });
+  }, [runtime]);
+
+  useEffect(() => {
     if (!cameraOpen) {
       return undefined;
     }
@@ -925,7 +973,7 @@ export default function PrinterWidget({
     return () => {
       cancelled = true;
     };
-  }, [cameraOpen, cameraSourceKey]);
+  }, [cameraOpen, cameraSourceKey, runtime]);
 
   useEffect(() => {
     if (cameraOpen) return undefined;
@@ -1050,9 +1098,9 @@ export default function PrinterWidget({
     setNotificationFeedback('');
     try {
       const result = await sendTestNotification(target, runtime);
-      const failed = result?.results?.find((item) => !item.success);
-      if (failed) {
-        setNotificationFeedback(`${target.name} 测试失败：${failed.error || failed.status || '未知错误'}`);
+      const failure = getTestNotificationError(result, { web: runtime?.kind === 'web' });
+      if (failure) {
+        setNotificationFeedback(`${target.name} 测试失败：${failure}`);
       } else {
         setNotificationFeedback(`${target.name} 测试通知已发送`);
       }
@@ -1221,9 +1269,9 @@ export default function PrinterWidget({
     <div className="camera-workspace">
       {cameraFeedback ? <div className="camera-feedback" role="status">{cameraFeedback}</div> : null}
       {isCameraZoomActive ? (
-        <CameraZoom key={cameraZoomKey} zoomState={zoomState} imageKey={cameraZoomKey} imageState={cameraImageStates[cameraZoomKey]} customUrl={zoomCustomUrl} onClose={closeCameraZoom} onImageStateChange={setCameraImageStates} />
+        <CameraZoom key={cameraZoomKey} zoomState={zoomState} imageKey={cameraZoomKey} imageState={cameraImageStates[cameraZoomKey]} customUrl={zoomCustomUrl} showRawAddress={isElectron} onClose={closeCameraZoom} onImageStateChange={setCameraImageStates} />
       ) : (
-        <CameraWorkspace printers={displayPrinters} streams={cameraStreams} imageStates={cameraImageStates} cameraConfig={cameraConfig} allowCustomUrls={isElectron} onRetry={retryCamera} onZoom={openCameraZoom} onImageStateChange={setCameraImageStates} />
+        <CameraWorkspace printers={displayPrinters} streams={cameraStreams} imageStates={cameraImageStates} cameraConfig={cameraConfig} allowCustomUrls={isElectron} showRawAddress={isElectron} onRetry={retryCamera} onZoom={openCameraZoom} onImageStateChange={setCameraImageStates} />
       )}
     </div>
   );
@@ -1274,16 +1322,17 @@ export default function PrinterWidget({
         }}
       >
       {cameraOpen ? renderCameraView() : isMini ? (
-        <MiniMonitor finishedPrinters={finishedPrinters} activePrinter={rotatingMiniPrinter} presentation={{ infoLine, progressPalette, safeProgress, statusText }} isAlwaysOnTop={isAlwaysOnTop} onToggleTop={toggleAlwaysOnTop} onReturnFull={() => changeViewMode('full')} />
+        <MiniMonitor finishedPrinters={finishedPrinters} activePrinter={rotatingMiniPrinter} presentation={{ infoLine: displayInfoLine, progressPalette, safeProgress, statusText }} isAlwaysOnTop={isAlwaysOnTop} onToggleTop={toggleAlwaysOnTop} onReturnFull={() => changeViewMode('full')} />
       ) : isCompact ? (
-        <CompactMonitor printers={displayPrinters} summary={summary} presentation={{ amsInfo, infoLine, progressPalette, safeProgress, statusText, temperatureText }} renderAction={renderAction} />
+        <CompactMonitor printers={displayPrinters} summary={summary} presentation={{ amsInfo, infoLine: displayInfoLine, progressPalette, safeProgress, statusText, temperatureText }} renderAction={renderAction} showRawAddress={isElectron} />
       ) : (
         <DeviceWorkspace
           printers={displayPrinters}
           summary={summary}
           cloudOverviewCount={cloudOverviewCount}
           renderAction={renderAction}
-          presentation={{ amsInfo, infoLine, progressPalette, safeProgress, statusStyle, statusText, temperatureText }}
+          presentation={{ amsInfo, infoLine: displayInfoLine, progressPalette, safeProgress, statusStyle, statusText, temperatureText }}
+          showRawAddress={isElectron}
         />
       )}
 

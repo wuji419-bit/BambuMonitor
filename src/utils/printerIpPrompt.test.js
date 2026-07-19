@@ -28,3 +28,19 @@ test('recognizes cloud status from source, mode, or legacy cloud state', () => {
   assert.equal(hasCloudStatus({ status: 'cloud_overview' }), true);
   assert.equal(hasCloudStatus({ status: 'printing', statusSource: 'local' }), false);
 });
+
+test('uses the public hasLocalAddress flag when Web devices omit raw IP', () => {
+  assert.equal(shouldPromptForPrinterIp({
+    status: 'no_ip',
+    statusSource: 'local',
+    hasLocalAddress: true,
+  }), false);
+});
+
+test('preserves the Electron no-IP status prompt even when a stale address remains', () => {
+  assert.equal(shouldPromptForPrinterIp({
+    status: 'no_ip',
+    statusSource: 'local',
+    ip: '192.168.1.20',
+  }), true);
+});

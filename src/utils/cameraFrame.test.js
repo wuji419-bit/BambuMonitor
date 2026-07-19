@@ -96,3 +96,54 @@ test('pauses NAS polling beyond startup timeout and resumes without exhausting i
   poller.stop();
   assert.equal(timers.size, 0);
 });
+
+test('resume before an aborted request settles keeps one poll in flight and prevents stale paint', async () => {
+  let nextTimer = 1;
+  const timers = new Map();
+  let resolveFirst;
+  const firstSettled = new Promise((resolve) => { resolveFirst = resolve; });
+  let requests = 0;
+  let concurrent = 0;
+  let maxConcurrent = 0;
+  const paints = [];
+  const poller = createVisibilityAwareCameraPoller({
+    documentVisible: true,
+    cardVisible: true,
+    setTimeoutImpl(callback) {
+      const id = nextTimer++;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeoutImpl(id) { timers.delete(id); },
+    async poll(signal) {
+      const request = ++requests;
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      if (request === 1) await firstSettled;
+      if (!signal.aborted) paints.push(request);
+      concurrent -= 1;
+    },
+  });
+  const runNext = async () => {
+    const entry = timers.entries().next().value;
+    assert.ok(entry, 'expected a scheduled camera poll');
+    const [id, callback] = entry;
+    timers.delete(id);
+    await callback();
+  };
+
+  poller.start();
+  const firstPoll = runNext();
+  await Promise.resolve();
+  poller.setVisibility({ cardVisible: false });
+  poller.setVisibility({ cardVisible: true });
+
+  if (timers.size > 0) await runNext();
+  resolveFirst();
+  await firstPoll;
+  await runNext();
+  poller.stop();
+
+  assert.equal(maxConcurrent, 1);
+  assert.deepEqual(paints, [2]);
+});

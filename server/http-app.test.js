@@ -595,6 +595,66 @@ test('devices and settings validate paths and object contracts before one runtim
   assert.deepEqual(harness.calls.updateSettings, [{ debug: true }]);
 });
 
+test('HTTP and websocket device projections hide local connection details but preserve cloud state', async (t) => {
+  const harness = createHarness();
+  harness.setSnapshot({
+    type: 'devices.snapshot',
+    devices: [{
+      dev_id: 'SERIAL_A',
+      name: 'Private Printer',
+      model: 'P1S',
+      ip: '192.168.1.44',
+      accessCode: 'private-access-code',
+      rtspsUrl: 'rtsps://bblp:private-access-code@192.168.1.44/streaming/live/1',
+      statusSource: 'cloud',
+      cloudOnline: true,
+      connectionMode: 'local',
+      connectionState: 'online',
+    }],
+    syncedAt: 123,
+    cloudState: 'connected',
+  });
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const httpSnapshot = await request(base, '/api/devices', { headers: { Cookie: cookie() } });
+  const ws = await openSocket(base);
+  const wsSnapshot = await nextMessage(ws);
+  const pendingUpdate = nextMessage(ws);
+  harness.emitRuntime({
+    type: 'device.updated',
+    device: {
+      dev_id: 'SERIAL_A',
+      ip: '10.0.0.8',
+      accessCode: 'updated-private-code',
+      statusSource: 'cloud',
+      connectionState: 'reconnecting',
+    },
+  });
+  const wsUpdate = await pendingUpdate;
+  const patched = await request(base, '/api/devices/SERIAL_A', {
+    method: 'PATCH',
+    headers: apiHeaders(base),
+    body: JSON.stringify({ ip: '192.168.1.55' }),
+  });
+
+  for (const payload of [httpSnapshot.body, wsSnapshot, wsUpdate, patched.body]) {
+    const serialized = JSON.stringify(payload);
+    assert.equal(serialized.includes('192.168.1.'), false);
+    assert.equal(serialized.includes('10.0.0.8'), false);
+    assert.equal(serialized.includes('private-access-code'), false);
+    assert.equal(serialized.includes('updated-private-code'), false);
+    assert.equal(serialized.includes('rtsps://'), false);
+  }
+  assert.equal(httpSnapshot.body.data.devices[0].hasLocalAddress, true);
+  assert.equal(httpSnapshot.body.data.devices[0].statusSource, 'cloud');
+  assert.equal(httpSnapshot.body.data.devices[0].cloudOnline, true);
+  assert.equal(wsUpdate.device.hasLocalAddress, true);
+  assert.deepEqual(harness.calls.updateDevice.at(-1), ['SERIAL_A', { ip: '192.168.1.55' }]);
+  assert.equal(patched.body.data.hasLocalAddress, true);
+  await closeSocket(ws);
+});
+
 test('settings projection redacts credentials while PUT preserves round-trips and accepts replacements', async (t) => {
   const rawSettings = {
     version: 1,

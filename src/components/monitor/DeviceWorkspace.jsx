@@ -1,7 +1,7 @@
 import React from 'react';
 import DeviceCard from './DeviceCard';
 
-export default function DeviceWorkspace({ printers, summary, cloudOverviewCount, renderAction, presentation }) {
+export default function DeviceWorkspace({ printers, summary, cloudOverviewCount, renderAction, presentation, showRawAddress = true }) {
   const total = printers.length;
   const accessibleSummary = `总设备 ${total}，在线 ${summary.online}，打印中 ${summary.printing}，需关注 ${summary.attention}`;
 
@@ -24,7 +24,7 @@ export default function DeviceWorkspace({ printers, summary, cloudOverviewCount,
         {printers.length === 0 ? (
           <div className="device-empty" role="status">正在同步云端设备并等待本地遥测...</div>
         ) : printers.map((printer) => (
-          <DeviceCard key={printer.dev_id} printer={printer} renderAction={renderAction} presentation={presentation} />
+          <DeviceCard key={printer.dev_id} printer={printer} renderAction={renderAction} presentation={presentation} showRawAddress={showRawAddress} />
         ))}
       </div>
     </section>

@@ -262,7 +262,10 @@ test('exposes fresh server-only camera config without leaking access codes throu
     const serialized = JSON.stringify(payload);
     assert.equal(serialized.includes('private-camera-code'), false);
     assert.equal(serialized.includes('private-cloud-token'), false);
+    assert.equal(serialized.includes('192.168.1.20'), false);
   }
+  assert.equal(harness.runtime.getDevice('SERIAL_A').hasLocalAddress, true);
+  assert.equal(harness.runtime.getDevice('SERIAL_A').connectionMode, 'local');
 });
 
 test('stopSession clears live state without shutting down MQTT and a later start synchronizes again', async () => {
@@ -441,12 +444,14 @@ test('reuses one MQTT connection across refresh and retains a cached IP after sc
   });
 
   await harness.runtime.start({ accessToken: 'token', username: 'fallback-user' });
-  assert.equal(harness.runtime.getDevice('SERIAL_A').ip, '192.168.1.20');
+  assert.equal(harness.runtime.getDevice('SERIAL_A').hasLocalAddress, true);
+  assert.equal(harness.runtime.getCameraConfig('SERIAL_A').ip, '192.168.1.20');
   assert.equal(harness.connectCalls.length, 1);
   assert.equal(harness.connectCalls[0].mode, 'local');
 
   await harness.runtime.refresh();
-  assert.equal(harness.runtime.getDevice('SERIAL_A').ip, '192.168.1.20');
+  assert.equal(harness.runtime.getDevice('SERIAL_A').hasLocalAddress, true);
+  assert.equal(harness.runtime.getCameraConfig('SERIAL_A').ip, '192.168.1.20');
   assert.equal(harness.connectCalls.length, 1);
 });
 
@@ -522,12 +527,13 @@ test('merges cache and verified LAN fields by serial, persists them, and ignores
   assert.deepEqual(harness.runtime.snapshot().devices.map((device) => device.dev_id), ['SERIAL_A']);
   assert.deepEqual(
     {
-      ip: harness.runtime.getDevice('SERIAL_A').ip,
+      ip: harness.runtime.getCameraConfig('SERIAL_A').ip,
       name: harness.runtime.getDevice('SERIAL_A').name,
       model: harness.runtime.getDevice('SERIAL_A').model,
     },
     { ip: '192.168.1.11', name: 'Discovered A', model: 'X1 Carbon' },
   );
+  assert.equal(harness.runtime.getDevice('SERIAL_A').hasLocalAddress, true);
   assert.deepEqual(harness.updateCalls, [{
     serialNumber: 'SERIAL_A',
     patch: { ip: '192.168.1.11', name: 'Discovered A', model: 'X1 Carbon' },
@@ -699,9 +705,12 @@ test('a LAN write completing after replacement enriches only the current cloud r
     accessCode: 'new-code',
   });
   assert.equal(harness.runtime.getDevice('SERIAL_A').name, 'Replacement');
-  assert.equal(harness.runtime.getDevice('SERIAL_A').ip, '192.168.1.56');
+  assert.equal(harness.runtime.getDevice('SERIAL_A').hasLocalAddress, true);
+  assert.equal(harness.runtime.getCameraConfig('SERIAL_A').ip, '192.168.1.56');
   const update = events.filter((event) => event.type === 'device.updated').at(-1);
   assert.equal(update.device.name, 'Replacement');
+  assert.equal(update.device.hasLocalAddress, true);
+  assert.equal('ip' in update.device, false);
 });
 
 test('fans one MQTT telemetry message to two subscribers without creating another connection', async () => {
