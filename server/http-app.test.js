@@ -1126,6 +1126,7 @@ test('websocket upgrade rejects origin/session/socket overflow and session inval
   const firstClosed = once(first, 'close');
   const secondClosed = once(second, 'close');
   harness.emitRuntime({ type: 'session.invalid' });
+  assert.equal(harness.runtimeListeners.size, 0);
   assert.deepEqual(await Promise.all(invalidMessages), [
     { type: 'session.invalid' }, { type: 'session.invalid' },
   ]);

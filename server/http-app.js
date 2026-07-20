@@ -1071,6 +1071,7 @@ export function createHttpApp(deps = {}) {
       unsubscribe = normalizeRelease(deviceRuntime.subscribe((event) => {
         if (subscribing && event?.type === 'devices.snapshot') return;
         if (event?.type === 'session.invalid') {
+          cleanup();
           const sent = safeWsSend(ws, event, () => {
             try { ws.close(1008, 'Session invalid'); } catch { ws.terminate(); }
           });
