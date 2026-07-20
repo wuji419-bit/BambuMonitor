@@ -50,6 +50,13 @@ const MIME_TYPES = Object.freeze({
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
 });
+const STATIC_SECURITY_HEADERS = Object.freeze({
+  'Content-Security-Policy': "default-src 'self'; base-uri 'none'; connect-src 'self' ws: wss:; font-src 'self' data:; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: blob:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'",
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+});
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const WRITE_ONLY_VALUE = '[REDACTED]';
 const TARGET_FIELDS = Object.freeze(['id', 'name', 'type', 'enabled']);
@@ -894,6 +901,7 @@ export function createHttpApp(deps = {}) {
       return sendFailure(res, 404, 'NOT_FOUND', 'Not found');
     }
     const headers = {
+      ...STATIC_SECURITY_HEADERS,
       'Content-Type': MIME_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
       'Content-Length': info.size,
       'Cache-Control': index ? 'no-cache' : asset ? 'public, max-age=31536000, immutable' : 'no-cache',

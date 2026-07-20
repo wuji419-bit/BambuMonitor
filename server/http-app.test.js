@@ -1163,6 +1163,12 @@ test('static app serves cache-safe assets, HEAD and SPA while rejecting traversa
   const index = await request(base, '/');
   assert.equal(index.response.status, 200, index.bytes.toString());
   assert.equal(index.response.headers.get('cache-control'), 'no-cache');
+  assert.equal(index.response.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(index.response.headers.get('x-frame-options'), 'DENY');
+  assert.equal(index.response.headers.get('referrer-policy'), 'no-referrer');
+  assert.equal(index.response.headers.get('permissions-policy'), 'camera=(), microphone=(), geolocation=()');
+  assert.match(index.response.headers.get('content-security-policy') || '', /default-src 'self'/);
+  assert.match(index.response.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
   assert.match(index.bytes.toString(), /NAS app/);
   const asset = await request(base, '/assets/app-abc123.js');
   assert.match(asset.response.headers.get('cache-control'), /immutable/);
