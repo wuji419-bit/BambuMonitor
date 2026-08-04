@@ -129,7 +129,12 @@ const http = require('http');
 const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT || 8787);
+const HOST = process.env.HOST || '0.0.0.0';
 const HMAC_SECRET = process.env.${envName} || '${sampleSecret}';
+
+if (!HMAC_SECRET || HMAC_SECRET === 'change-this-secret-or-leave-empty') {
+  console.warn('[Bambu Monitor] 未设置 HMAC Secret，任何能访问该端口的程序都可以伪造通知；仅建议在受信任的局域网内临时使用。');
+}
 
 function verifySignature(rawBody, signatureHeader) {
   if (!HMAC_SECRET || HMAC_SECRET === 'change-this-secret-or-leave-empty') return true;
@@ -185,8 +190,8 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(\`Bambu Monitor webhook listening on http://0.0.0.0:\${PORT}/bambu-monitor/webhook\`);
+server.listen(PORT, HOST, () => {
+  console.log(\`Bambu Monitor webhook listening on http://\${HOST}:\${PORT}/bambu-monitor/webhook\`);
 });
 `;
 }

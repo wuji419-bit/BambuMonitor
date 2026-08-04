@@ -24,7 +24,7 @@ mkdir -p data
 chown -R 1000:1000 data
 ```
 
-容器以用户编号 `1000` 运行。若 NAS 不允许执行 `chown`，请在共享目录权限界面进行等效设置，确保编号 `1000` 对 `data` 目录有读取、写入和进入权限。
+容器以用户编号 `1000` 运行（即基础镜像 `node:22-bookworm-slim` 内置的 `node` 用户）。若 NAS 不允许执行 `chown`，请在共享目录权限界面进行等效设置，确保编号 `1000` 对 `data` 目录有读取、写入和进入权限。
 
 ### 2. 保存编排文件
 
@@ -158,7 +158,7 @@ curl -i http://127.0.0.1:3080/readyz
 
 ### 页面无法打开
 
-1. 执行 `docker compose ps`，确认容器处于运行状态。
+1. 执行 `docker compose ps`，确认容器处于运行状态。镜像内置健康检查，`STATUS` 列会显示 `healthy` / `unhealthy`，`unhealthy` 说明容器内的 `/healthz` 已经失败。
 2. 执行 `docker compose logs -f` 查看启动错误。
 3. 在 NAS 本机请求 `/healthz`，再检查 NAS 防火墙是否允许 `3080`。
 4. 确认没有其他程序占用 `PORT`。
@@ -196,6 +196,17 @@ docker compose down
 ```bash
 docker image rm ghcr.io/wuji419-bit/bambu-monitor:latest
 ```
+
+## 开发者验证
+
+在项目源码目录中可运行 NAS 专项检查：
+
+```bash
+npm run test:nas
+npm run docker:smoke
+```
+
+`test:nas` 覆盖服务器端与云端核心逻辑；`docker:smoke` 在本机构建镜像并做启动冒烟测试（需要本机 Docker）。
 
 ## 社区与源码
 

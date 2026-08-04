@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 
 import {
   buildCameraStartPayload,
@@ -10,6 +11,8 @@ import {
   isAutoCameraSupported,
   mergeCameraConfig,
 } from './camera.js';
+
+const require = createRequire(import.meta.url);
 
 test('allows automatic RTSPS camera for H2D printers', () => {
   assert.equal(isAutoCameraSupported({ name: 'H2D', model: 'H2D' }), true);
@@ -29,6 +32,29 @@ test('routes A1, P1, and A2L cameras through chamber-image transport', () => {
     assert.equal(isAutoCameraSupported(printer), true);
     assert.equal(getCameraTransport(printer), 'chamber-image');
     assert.match(cameraCompatibilityNote(printer), /6000/);
+  }
+});
+
+test('renderer camera transport matches the backend chamber-image classifier', () => {
+  const { isChamberImageCamera } = require('../../electron/camera-stream.cjs');
+  const fixtures = [
+    { name: 'H2D', model: 'H2D' },
+    { name: 'X1C', model: 'X1 Carbon' },
+    { name: 'A1mini', model: 'A1 mini' },
+    { name: 'P1SC', model: 'P1S' },
+    { name: 'A2L01', model: '' },
+    { model: 'P2S' },
+    {},
+    { model: 'X1E', cameraMode: 'chamber-image' },
+    { model: 'A1', cameraMode: 'rtsps' },
+  ];
+
+  for (const printer of fixtures) {
+    assert.equal(
+      getCameraTransport(printer) === 'chamber-image',
+      isChamberImageCamera(printer),
+      `transport mismatch for ${JSON.stringify(printer)}`,
+    );
   }
 });
 

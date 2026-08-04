@@ -11,9 +11,11 @@
 
 ## 视频输出
 
-- `video/bambu-monitor-bilibili-zh.mp4`：中文配音与中文字幕。
-- `video/bambu-monitor-bilibili-en.mp4`：英文配音与英文字幕。
+- `video/bambu-monitor-cinematic-zh.mp4`：中文配音与中文字幕。
+- `video/bambu-monitor-cinematic-en.mp4`：英文配音与英文字幕。
 - `video/bambu-monitor-zh.srt`、`video/bambu-monitor-en.srt`：独立字幕。
 - `video/bambu-monitor-cover.png`：B 站封面。
+- B 站发布版（`bambu-monitor-bilibili-*.mp4`）不再入库，可用 `video/render-promo.ps1` 本地重新生成。
+- 目录中还包含配音音频（`*.mp3`）、多尺寸封面（`bambu-monitor-cover-*.png`）与分镜脚本（`storyboard-*.md`）。
 
 配音使用免费 `edge-tts` 在线语音生成，属于 AI 合成语音。

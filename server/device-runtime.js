@@ -228,6 +228,7 @@ export function createDeviceRuntime({
       : {
         serialNumber: record.serialNumber,
         mode,
+        region: 'China',
         authToken: accessToken,
         username,
       };

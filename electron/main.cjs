@@ -60,6 +60,7 @@ const cameraProcesses = new Set();
 const chamberStreams = new Map();
 let cameraServer = null;
 let cameraServerPort = 0;
+let cameraServerPromise = null;
 const MQTT_RECONNECT_GRACE_MS = 45000;
 const MQTT_RENDERER_CHANNELS = Object.freeze({
   connected: 'mqtt-connected',
@@ -221,15 +222,45 @@ function stopCameraProcesses() {
   cameraProcesses.clear();
 }
 
-function stopChamberStreams() {
-  for (const entry of chamberStreams.values()) {
-    try {
-      entry.stream.stop();
-    } catch {
-      // Ignore cleanup races.
-    }
+function stopChamberStream(id) {
+  const entry = chamberStreams.get(id);
+  if (!entry) return;
+  if (entry.graceTimer) {
+    clearTimeout(entry.graceTimer);
+    entry.graceTimer = null;
   }
-  chamberStreams.clear();
+  try {
+    entry.stream.stop();
+  } catch {
+    // Ignore cleanup races.
+  }
+  chamberStreams.delete(id);
+}
+
+function stopChamberStreams() {
+  for (const id of Array.from(chamberStreams.keys())) {
+    stopChamberStream(id);
+  }
+}
+
+function retainChamberStream(entry) {
+  entry.clients += 1;
+  if (entry.graceTimer) {
+    clearTimeout(entry.graceTimer);
+    entry.graceTimer = null;
+  }
+}
+
+function releaseChamberStream(source, entry) {
+  entry.clients -= 1;
+  if (entry.clients <= 0 && !entry.graceTimer) {
+    entry.graceTimer = setTimeout(() => {
+      entry.graceTimer = null;
+      if (entry.clients <= 0 && chamberStreams.get(source.id) === entry) {
+        stopChamberStream(source.id);
+      }
+    }, 20000);
+  }
 }
 
 function getChamberStream(source) {
@@ -237,12 +268,7 @@ function getChamberStream(source) {
   let entry = chamberStreams.get(source.id);
 
   if (entry && entry.key !== key) {
-    try {
-      entry.stream.stop();
-    } catch {
-      // Ignore cleanup races.
-    }
-    chamberStreams.delete(source.id);
+    stopChamberStream(source.id);
     entry = null;
   }
 
@@ -282,11 +308,7 @@ function handleChamberImageRequest(source, req, res) {
 
   const boundary = 'bambuframe';
   const entry = getChamberStream(source);
-  entry.clients += 1;
-  if (entry.graceTimer) {
-    clearTimeout(entry.graceTimer);
-    entry.graceTimer = null;
-  }
+  retainChamberStream(entry);
 
   res.writeHead(200, {
     'content-type': `multipart/x-mixed-replace; boundary=${boundary}`,
@@ -297,7 +319,8 @@ function handleChamberImageRequest(source, req, res) {
   });
 
   const onFrame = (jpeg) => {
-    if (!res.destroyed && !res.writableEnded) writeMjpegFrame(res, boundary, jpeg);
+    // Drop frames for slow clients instead of buffering them without bound.
+    if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) writeMjpegFrame(res, boundary, jpeg);
   };
 
   if (entry.stream.lastFrame) onFrame(entry.stream.lastFrame);
@@ -308,20 +331,7 @@ function handleChamberImageRequest(source, req, res) {
     if (cleanedUp) return;
     cleanedUp = true;
     entry.stream.removeListener('frame', onFrame);
-    entry.clients -= 1;
-    if (entry.clients <= 0 && !entry.graceTimer) {
-      entry.graceTimer = setTimeout(() => {
-        entry.graceTimer = null;
-        if (entry.clients <= 0) {
-          try {
-            entry.stream.stop();
-          } catch {
-            // Ignore cleanup races.
-          }
-          chamberStreams.delete(source.id);
-        }
-      }, 20000);
-    }
+    releaseChamberStream(source, entry);
   };
 
   req.on('close', cleanup);
@@ -336,6 +346,17 @@ function handleChamberFrameRequest(source, _req, res) {
   }
 
   const entry = getChamberStream(source);
+  // Snapshot polling keeps the shared stream retained; the grace timer after the
+  // last release is what finally frees the printer's single chamber-image slot.
+  retainChamberStream(entry);
+  let released = false;
+  const releaseOnce = () => {
+    if (released) return;
+    released = true;
+    releaseChamberStream(source, entry);
+  };
+  res.on('close', releaseOnce);
+
   const sendFrame = (jpeg) => {
     if (res.destroyed || res.writableEnded) return;
     res.writeHead(200, {
@@ -521,21 +542,38 @@ function handleCameraRequest(req, res) {
 
 async function ensureCameraServer() {
   if (cameraServer && cameraServerPort) return cameraServerPort;
+  if (cameraServerPromise) return cameraServerPromise;
 
-  cameraServer = http.createServer(handleCameraRequest);
-  cameraServer.on('clientError', (_err, socket) => {
+  const server = http.createServer(handleCameraRequest);
+  server.on('clientError', (_err, socket) => {
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
   });
+  cameraServer = server;
 
-  return new Promise((resolve, reject) => {
-    cameraServer.once('error', reject);
-    cameraServer.listen(0, '127.0.0.1', () => {
-      const address = cameraServer.address();
+  cameraServerPromise = new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
       cameraServerPort = Number(address?.port || 0);
-      cameraServer.off('error', reject);
+      server.off('error', reject);
+      server.on('error', (err) => {
+        console.warn(`[Camera] local camera server error: ${err?.message || err}`);
+      });
       resolve(cameraServerPort);
     });
   });
+
+  try {
+    return await cameraServerPromise;
+  } catch (err) {
+    if (cameraServer === server) {
+      cameraServer = null;
+      cameraServerPort = 0;
+    }
+    throw err;
+  } finally {
+    cameraServerPromise = null;
+  }
 }
 
 function closeCameraServer() {
@@ -980,13 +1018,17 @@ ipcMain.handle('camera-start', async (_event, payload = {}) => {
 
 ipcMain.handle('camera-stop', async (_event, { serialNumber, id } = {}) => {
   const key = String(serialNumber || id || '').trim();
-  if (key) cameraSources.delete(key);
+  if (key) {
+    cameraSources.delete(key);
+    stopChamberStream(key);
+  }
   return { success: true };
 });
 
 ipcMain.handle('camera-stop-all', async () => {
   cameraSources.clear();
   stopCameraProcesses();
+  stopChamberStreams();
   return { success: true };
 });
 
@@ -1039,7 +1081,12 @@ ipcMain.handle('get-device-list', async (_event, { accessToken }) => {
   try {
     return await bambuCloud.listDevices(accessToken);
   } catch (err) {
-    return { success: false, error: err.message };
+    return {
+      success: false,
+      error: err.message,
+      status: err.status,
+      tokenInvalid: Boolean(err.tokenInvalid),
+    };
   }
 });
 

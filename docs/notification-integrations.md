@@ -24,7 +24,7 @@ BambuMonitor can emit printer lifecycle events to webhook-based automation tools
     "id": "PRINTER_SERIAL",
     "cloudId": "CLOUD_ID",
     "name": "A1 mini",
-    "ip": "192.168.1.100",
+    "ip": "192.0.2.100",
     "status": "finished",
     "progress": 100,
     "timeLeft": "--",
@@ -42,7 +42,9 @@ BambuMonitor can emit printer lifecycle events to webhook-based automation tools
 
 ## Local configuration
 
-Until the settings UI is added, notification targets are read from `localStorage` under `bambu_notification_integrations`.
+Configure notification targets in the app: Settings → 通知与集成 (enable toggle, cooldown seconds, per-target URL and HMAC secret, plus test/copy-connector buttons). The values persist to `localStorage` under `bambu_notification_integrations`.
+
+Notifications ship disabled by default (`enabled: false`, empty `url`/`secret`). The snippet below is an override example you can paste into DevTools if you need to script the configuration instead of using the settings UI:
 
 ```js
 localStorage.setItem('bambu_notification_integrations', JSON.stringify({
@@ -62,17 +64,21 @@ localStorage.setItem('bambu_notification_integrations', JSON.stringify({
       name: 'Hermes',
       type: 'hermes',
       enabled: true,
-      url: 'http://127.0.0.1:8644/webhooks/bambu-monitor',
+      url: 'http://127.0.0.1:8645/webhooks/bambu-monitor',
       secret: 'replace-with-hermes-route-secret'
     }
   ]
 }));
 ```
 
-The main process signs every request with HMAC-SHA256 when `secret` is set. It sends the signature in these headers for compatibility:
+## Request headers
+
+Every request carries `content-type: application/json` and `x-bambu-monitor-provider: <target type>`. When `secret` is set, the main process signs the body with HMAC-SHA256 and sends the signature in these headers for compatibility:
 
 - `x-bambu-monitor-signature`
 - `x-hub-signature-256`
 - `x-openclaw-signature` or `x-hermes-signature`
 
 All signature values use the format `sha256=<hex digest>`.
+
+Optionally, a target may also define `token` (sent as `Authorization: Bearer <token>`) and a `headers` object with extra custom headers.

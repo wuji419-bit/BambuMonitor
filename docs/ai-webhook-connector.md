@@ -7,7 +7,12 @@ const http = require('http');
 const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT || 8787);
+const HOST = process.env.HOST || '0.0.0.0';
 const HMAC_SECRET = process.env.BAMBU_MONITOR_SECRET || '';
+
+if (!HMAC_SECRET) {
+  console.warn('[Bambu Monitor] BAMBU_MONITOR_SECRET 未设置，任何人都能调用这个接口；仅建议在受信任的局域网内临时使用。');
+}
 
 function verifySignature(rawBody, signatureHeader) {
   if (!HMAC_SECRET) return true;
@@ -53,8 +58,8 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
   });
-}).listen(PORT, '0.0.0.0', () => {
-  console.log(`Bambu Monitor webhook listening on http://0.0.0.0:${PORT}/bambu-monitor/webhook`);
+}).listen(PORT, HOST, () => {
+  console.log(`Bambu Monitor webhook listening on http://${HOST}:${PORT}/bambu-monitor/webhook`);
 });
 ```
 
@@ -63,3 +68,5 @@ http.createServer((req, res) => {
 `http://那台电脑的IP:8787/bambu-monitor/webhook`
 
 如果开启了 HMAC Secret，两边填写同一个 Secret。
+
+安全建议：务必设置 `BAMBU_MONITOR_SECRET`，否则任何能访问该端口的程序都可以伪造通知；如果只在本机联调，可设置 `HOST=127.0.0.1` 避免监听所有网卡。不要把这个端口暴露到公网。

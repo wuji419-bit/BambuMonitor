@@ -14,6 +14,16 @@ test('presents pending, manual, error, and no-IP states', () => {
   assert.equal(buildCameraCardPresentation({}).message, '需要本地 IP 才能自动打开');
 });
 
+test('presents preview cameras without offering a retry', () => {
+  assert.deepEqual(buildCameraCardPresentation({
+    imageState: { status: 'preview', message: '演示模式不连接真实摄像头' },
+  }), {
+    label: '演示',
+    message: '演示模式不连接真实摄像头',
+    showRetry: false,
+  });
+});
+
 test('builds printer-specific retry labels', () => {
   assert.equal(cameraRetryLabel({ name: 'A1 mini' }), '重试 A1 mini 摄像头');
   assert.equal(cameraRetryLabel({}), '重试 未命名打印机 摄像头');

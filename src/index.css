@@ -1,15 +1,35 @@
 :root {
   color-scheme: dark;
-  --login-bg: #0b1017;
+  /* Shared design tokens at :root so login/title-bar (outside .monitor-shell)
+     resolve them; .monitor-shell re-declares the same values for locality. */
+  --surface-0: #0b1017;
+  --surface-1: #111923;
+  --surface-2: #17212c;
+  --surface-hover: #1c2835;
+  --line: rgba(150, 174, 202, 0.18);
+  --line-strong: rgba(150, 174, 202, 0.3);
+  --text: #edf5ff;
+  --muted: #8192a8;
+  --mint: #75e7b5;
+  --blue: #74bfe9;
+  --amber: #ffd17d;
+  --danger: #ef7772;
+  --danger-rgb: 239, 119, 114;
+  --text-hi: #ffffff;
+  /* Login keeps its own deliberately warmer palette; only byte-identical
+     values alias to shared tokens. Channel triplets plumb the login tints. */
+  --login-bg: var(--surface-0);
   --login-panel: #111821;
-  --login-panel-raised: #17212c;
+  --login-panel-raised: var(--surface-2);
   --login-line: rgba(184, 203, 224, 0.16);
   --login-text: #f2f6fa;
   --login-muted: #91a2b5;
   --login-accent: #63ddb0;
+  --login-accent-rgb: 99, 221, 176;
   --login-blue: #6eb6f5;
+  --login-blue-rgb: 110, 182, 245;
   --login-warning: #e7bd68;
-  --login-danger: #ef7772;
+  --login-danger: var(--danger);
 }
 
 * {
@@ -87,7 +107,7 @@ input {
 
 .title-btn:hover {
   background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  color: var(--text-hi);
 }
 
 .title-btn.close:hover {
@@ -271,9 +291,9 @@ input {
   align-items: center;
   gap: 7px;
   padding: 0 10px;
-  border: 1px solid rgba(110, 182, 245, 0.24);
+  border: 1px solid rgba(var(--login-blue-rgb), 0.24);
   border-radius: 6px;
-  background: rgba(110, 182, 245, 0.1);
+  background: rgba(var(--login-blue-rgb), 0.1);
   color: #c8e4fb;
   font-size: 12px;
   font-weight: 700;
@@ -353,8 +373,8 @@ input {
 }
 
 .input-group input:focus {
-  border-color: rgba(99, 221, 176, 0.68);
-  box-shadow: 0 0 0 3px rgba(99, 221, 176, 0.1);
+  border-color: rgba(var(--login-accent-rgb), 0.68);
+  box-shadow: 0 0 0 3px rgba(var(--login-accent-rgb), 0.1);
 }
 
 .input-with-action {
@@ -426,7 +446,7 @@ input {
 }
 
 .submit-btn.active {
-  border-color: rgba(99, 221, 176, 0.42);
+  border-color: rgba(var(--login-accent-rgb), 0.42);
   background: #226048;
   color: #e4fff4;
 }
@@ -446,14 +466,14 @@ input {
 }
 
 .feedback-msg.error {
-  border-color: rgba(239, 119, 114, 0.28);
-  background: rgba(239, 119, 114, 0.09);
+  border-color: rgba(var(--danger-rgb), 0.28);
+  background: rgba(var(--danger-rgb), 0.09);
   color: #ffc7c4;
 }
 
 .feedback-msg.success {
-  border-color: rgba(99, 221, 176, 0.26);
-  background: rgba(99, 221, 176, 0.08);
+  border-color: rgba(var(--login-accent-rgb), 0.26);
+  background: rgba(var(--login-accent-rgb), 0.08);
   color: #c9f7e4;
 }
 

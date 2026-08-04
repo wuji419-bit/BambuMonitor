@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Lock, RefreshCw } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import MonitorShell from './monitor/MonitorShell';
 import DeviceWorkspace from './monitor/DeviceWorkspace';
 import CompactMonitor from './monitor/CompactMonitor';
@@ -64,6 +64,7 @@ import {
 } from '../services/notifications';
 import { isValidPrinterAddress, normalizePrinterAddress } from '../utils/printerAddress';
 import { applySettingsTransaction, updateServerSettingsWhenReady } from '../utils/settingsTransaction';
+import { getPreviewViewMode, shouldLoadServerSettings } from '../utils/previewMode';
 
 const statusMap = {
   no_ip: ['云端概览', '#8cc8ff', 'rgba(102, 178, 255, 0.14)', 'rgba(102, 178, 255, 0.22)'],
@@ -467,6 +468,7 @@ async function copyTextToClipboard(text) {
 export default function PrinterWidget({
   runtime,
   printers,
+  isPreviewMode = false,
   onUpdateIp,
   onRefreshDevices,
   isRefreshingDevices = false,
@@ -476,9 +478,14 @@ export default function PrinterWidget({
 }) {
   const capabilities = runtime?.capabilities || {};
   const isElectron = runtime?.kind === 'electron';
+  const loadsServerSettings = shouldLoadServerSettings(capabilities, isPreviewMode);
   const [isLocked, setIsLocked] = useState(false);
   const [viewMode, setViewMode] = useState(() => (
-    capabilities.nativeWindow ? (localStorage.getItem(VIEW_MODE_KEY) || 'full') : 'full'
+    isPreviewMode
+      ? getPreviewViewMode(window.location.search)
+      : capabilities.nativeWindow
+        ? (localStorage.getItem(VIEW_MODE_KEY) || 'full')
+        : 'full'
   ));
   const [isAlwaysOnTop, setIsAlwaysOnTop] = useState(() => (
     capabilities.nativeWindow && localStorage.getItem(ALWAYS_ON_TOP_KEY) !== 'false'
@@ -493,7 +500,7 @@ export default function PrinterWidget({
   const [ipDialogError, setIpDialogError] = useState('');
   const [submittingIp, setSubmittingIp] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsReady, setSettingsReady] = useState(() => !capabilities.serverSettings);
+  const [settingsReady, setSettingsReady] = useState(() => !loadsServerSettings);
   const [notificationConfig, setNotificationConfig] = useState(() => createDefaultNotificationConfig());
   const [notificationFeedback, setNotificationFeedback] = useState('');
   const [testingTargetId, setTestingTargetId] = useState('');
@@ -506,6 +513,7 @@ export default function PrinterWidget({
   const [startupEnabled, setStartupEnabledState] = useState(false);
   const [startupFeedback, setStartupFeedback] = useState('');
   const cameraWallOpenRef = useRef(false);
+  const hasAutoOpenedCameraRef = useRef(false);
   const cameraRetryAttemptsRef = useRef({});
   const cameraRetryTimersRef = useRef({});
   const cameraZoomOriginKeyRef = useRef('');
@@ -522,6 +530,7 @@ export default function PrinterWidget({
   const zoomPrinter = cameraZoomKey ? printers.find((printer) => getPrinterCameraKey(printer) === cameraZoomKey) : null;
   const zoomState = cameraZoomKey ? buildCameraZoomState({ key: cameraZoomKey, printer: zoomPrinter, stream: cameraStreams[cameraZoomKey], imageState: cameraImageStates[cameraZoomKey], purpose: 'zoom' }) : null;
   const isCameraZoomActive = Boolean(zoomState?.canZoom);
+  const zoomClearNeeded = shouldClearCameraZoom({ selectedKey: cameraZoomKey, printer: zoomPrinter, zoomState });
   const nativeMode = isCameraZoomActive ? 'zoom' : (cameraOpen ? 'full' : viewMode);
   const activeDialog = ipDialog ? 'ip' : (settingsOpen ? 'settings' : '');
   const isFullPanel = !cameraOpen && !settingsOpen && !ipDialog && !isMini && !isCompact;
@@ -541,7 +550,7 @@ export default function PrinterWidget({
     ? `同步失败：${deviceSyncError}`
     : (isRefreshingDevices ? '正在同步设备...' : formatDeviceSyncTime(lastDeviceSyncAt));
   const displayInfoLine = (printer) => infoLine(printer, { showRawAddress: isElectron });
-  const cameraSourceKey = JSON.stringify(printers.map((printer) => {
+  const cameraSourceKey = useMemo(() => JSON.stringify(printers.map((printer) => {
     const key = getPrinterCameraKey(printer);
     return {
       key,
@@ -557,7 +566,7 @@ export default function PrinterWidget({
       autoCameraSupported: isAutoCameraSupported(printer),
       serverManaged: Boolean(capabilities.serverSettings),
     };
-  }));
+  })), [printers, cameraConfig, capabilities.serverSettings]);
   cameraWallOpenRef.current = cameraOpen;
   nativeModeRef.current = nativeMode;
   submittingIpRef.current = submittingIp;
@@ -625,7 +634,6 @@ export default function PrinterWidget({
     }
   };
 
-  restartCameraRef.current = restartCameraSource;
   useEffect(() => {
     restartCameraRef.current = restartCameraSource;
   });
@@ -728,7 +736,7 @@ export default function PrinterWidget({
   }, [isMini, activeMiniPrinters.length]);
 
   useEffect(() => {
-    if (!capabilities.serverSettings) {
+    if (!loadsServerSettings) {
       setSettingsReady(true);
       setNotificationConfig(getNotificationConfig());
       setCameraConfig(getCameraConfig());
@@ -750,7 +758,7 @@ export default function PrinterWidget({
         if (!cancelled) setNotificationFeedback(error?.message || '读取设置失败');
       });
     return () => { cancelled = true; };
-  }, [capabilities.serverSettings, runtime]);
+  }, [loadsServerSettings, runtime]);
 
   useEffect(() => {
     if (!capabilities.startup) return undefined;
@@ -772,9 +780,15 @@ export default function PrinterWidget({
   }, [capabilities.startup, runtime]);
 
   useEffect(() => {
-    if (cameraConfig.autoOpen && printers.length > 0) {
-      openCameraWorkspace();
+    if (!cameraConfig.autoOpen) {
+      hasAutoOpenedCameraRef.current = false;
+      return;
     }
+    // Auto-open once per session on the first non-empty device list; later
+    // inventory changes must not hijack a workspace the user switched away from.
+    if (hasAutoOpenedCameraRef.current || printers.length === 0) return;
+    hasAutoOpenedCameraRef.current = true;
+    openCameraWorkspace();
   }, [cameraConfig.autoOpen, openCameraWorkspace, printers.length]);
 
   useEffect(() => {
@@ -783,9 +797,9 @@ export default function PrinterWidget({
   }, [cameraOpen, closeCameraZoom]);
 
   useEffect(() => {
-    if (!shouldClearCameraZoom({ selectedKey: cameraZoomKey, printer: zoomPrinter, zoomState })) return;
+    if (!zoomClearNeeded) return;
     closeCameraZoom();
-  }, [cameraZoomKey, closeCameraZoom, zoomPrinter, zoomState]);
+  }, [zoomClearNeeded, closeCameraZoom]);
 
   useEffect(() => {
     if (isCameraZoomActive || !cameraOpen || !cameraZoomOriginKeyRef.current) return undefined;
@@ -950,6 +964,17 @@ export default function PrinterWidget({
       for (const source of sources) {
         const initialState = buildInitialCameraState(source);
         if (!initialState) continue;
+        if (isPreviewMode) {
+          initialStreams[initialState.key] = {
+            success: false,
+            error: '演示模式不连接真实摄像头',
+          };
+          initialImageStates[initialState.key] = {
+            status: 'preview',
+            message: '演示模式不连接真实摄像头',
+          };
+          continue;
+        }
         initialStreams[initialState.key] = initialState.stream;
         initialImageStates[initialState.key] = initialState.imageState;
         if (initialState.shouldStart) startableSources.push(source);
@@ -973,7 +998,7 @@ export default function PrinterWidget({
     return () => {
       cancelled = true;
     };
-  }, [cameraOpen, cameraSourceKey, runtime]);
+  }, [cameraOpen, cameraSourceKey, isPreviewMode, runtime]);
 
   useEffect(() => {
     if (cameraOpen) return undefined;
@@ -1251,7 +1276,11 @@ export default function PrinterWidget({
       return (
         <button
           type="button"
-          onClick={() => onUpdateIp(printer.dev_id, printer.ip)}
+          onClick={() => {
+            // Failure details already land on the card state; swallow the re-thrown
+            // rejection so a failed reconnect does not surface as an unhandled error.
+            Promise.resolve(onUpdateIp(printer.dev_id, printer.ip)).catch(() => {});
+          }}
           style={{ ...buttonStyle, color: '#9ac8ff', background: 'rgba(70,136,255,0.14)', border: '1px solid rgba(70,136,255,0.22)' }}
           title={printer.errorMsg || '重新连接打印机'}
         >
@@ -1315,7 +1344,7 @@ export default function PrinterWidget({
           borderRadius: 0,
           background: 'transparent',
           boxShadow: 'none',
-          color: '#fff',
+          color: 'var(--text-hi)',
           cursor: 'default',
           WebkitAppRegion: 'no-drag',
           overflow: settingsOpen || ipDialog || isFullPanel || isMini ? 'hidden' : 'auto',
@@ -1356,7 +1385,7 @@ export default function PrinterWidget({
       {ipDialog ? (
         <div ref={ipDialogRef} className="monitor-modal-backdrop monitor-ip-backdrop" role="dialog" aria-modal="true" aria-label="设置打印机 IP" tabIndex={-1}>
           <form className="monitor-ip-dialog" onSubmit={submitIpDialog}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: '#f7fbff' }}>设置打印机 IP</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-hi)' }}>设置打印机 IP</div>
             <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(203,217,239,0.68)', lineHeight: 1.5 }}>
               {ipDialog.name || '当前设备'}
               <br />

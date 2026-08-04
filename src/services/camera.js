@@ -71,6 +71,11 @@ export function getCustomCameraUrl(config, printer = {}) {
 }
 
 export function usesPrivateCameraProtocol(printer = {}) {
+  // Mirrors isChamberImageCamera in electron/camera-stream.cjs; camera.test.js
+  // cross-checks the two so the renderer cannot silently diverge from the backend.
+  if (printer.cameraMode === 'chamber-image') return true;
+  if (printer.cameraMode === 'rtsps') return false;
+
   const model = `${printer.name || ''} ${printer.model || ''} ${printer.modelCode || ''}`.toUpperCase();
   if (!model) return false;
   return /A1|P1P|P1S|P1SC|A2L|A2/.test(model);

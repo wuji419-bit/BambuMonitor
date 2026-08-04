@@ -50,6 +50,7 @@ test('readJsonBody rejects aborted, failed, invalid UTF-8, empty, and malformed 
 
   const failed = {
     headers: {},
+    // eslint-disable-next-line require-yield -- the iterator must fail before producing chunks
     async *[Symbol.asyncIterator]() {
       throw new Error('socket secret');
     },

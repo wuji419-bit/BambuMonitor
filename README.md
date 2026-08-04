@@ -22,6 +22,7 @@ chown -R 1000:1000 data
 services:
   bambu-monitor:
     image: ghcr.io/wuji419-bit/bambu-monitor:latest
+    container_name: bambu-monitor
     network_mode: host
     restart: unless-stopped
     environment:
@@ -70,7 +71,7 @@ AGPLv3 要求通过网络服务提供修改版时，向该服务的用户提供�
 
 ### 摄像头墙与放大预览
 
-H2D、X1、P2S 等机型优先通过本机转换 RTSPS；A1、A1 mini、P1、A2 系列尝试设备的本地 JPEG 摄像头协议。也可以为单台设备填写自定义 MJPEG 或快照地址。
+H2D、X1、P2S 等机型优先通过本机转换 RTSPS；A1、A1 mini、P1P / P1S / P1SC、A2 系列尝试设备的本地 JPEG 摄像头协议。也可以为单台设备填写自定义 MJPEG 或快照地址。
 
 | 摄像头墙 | 放大预览 |
 | --- | --- |
@@ -136,6 +137,16 @@ BambuMonitor 可以在任务完成、设备断开和恢复连接时触发通知�
 npm install
 npm run electron:dev
 ```
+
+无需登录即可检查三种窗口布局：
+
+```text
+http://127.0.0.1:5173/?preview=dashboard
+http://127.0.0.1:5173/?preview=dashboard&mode=compact
+http://127.0.0.1:5173/?preview=dashboard&mode=mini
+```
+
+演示模式不会请求服务器设置或连接真实摄像头，适合截图和响应式界面回归检查。
 
 运行检查：
 

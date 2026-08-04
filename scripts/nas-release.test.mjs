@@ -9,7 +9,7 @@ function jobBlock(workflow, name) {
   const start = workflow.indexOf(marker);
   assert.notEqual(start, -1, `missing ${name} job`);
   const remainder = workflow.slice(start + marker.length);
-  const nextJob = /^  [a-zA-Z][\w-]*:\s*$/m.exec(remainder);
+  const nextJob = /^ {2}[a-zA-Z][\w-]*:\s*$/m.exec(remainder);
   return remainder.slice(0, nextJob?.index ?? remainder.length);
 }
 

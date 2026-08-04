@@ -36,7 +36,7 @@ export default defineConfig([
     },
   },
   {
-    files: ['electron/**/*.cjs'],
+    files: ['electron/**/*.cjs', 'core/**/*.cjs'],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 2020,
@@ -45,6 +45,22 @@ export default defineConfig([
       },
       parserOptions: {
         sourceType: 'script',
+      },
+    },
+    rules: {
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', caughtErrors: 'none' }],
+    },
+  },
+  {
+    files: ['server/**/*.js', 'scripts/**/*.mjs'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 2022,
+      globals: {
+        ...globals.node,
+      },
+      parserOptions: {
+        sourceType: 'module',
       },
     },
     rules: {

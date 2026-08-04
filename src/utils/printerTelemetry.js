@@ -219,5 +219,22 @@ export function applyPrinterTelemetry(previous, payload, { now = Date.now() } = 
     next.ams = null;
   }
 
+  // Telemetry arrives about once per second per printer; when nothing rendered
+  // actually changed, keep the previous identity so downstream `updated === printer`
+  // bail-outs skip the React re-render. `lastTelemetryAt` is bookkeeping only.
+  if (previous.connectionState === 'online' && sameRenderedTelemetry(previous, next)) {
+    return previous;
+  }
+
   return next;
+}
+
+function sameRenderedTelemetry(previous, next) {
+  const { lastTelemetryAt: _prevAt, ...prevRest } = previous;
+  const { lastTelemetryAt: _nextAt, ...nextRest } = next;
+  try {
+    return JSON.stringify(prevRest) === JSON.stringify(nextRest);
+  } catch {
+    return false;
+  }
 }

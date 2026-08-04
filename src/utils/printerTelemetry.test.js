@@ -90,6 +90,23 @@ test('applies wrapped print telemetry without mutating prior nested state', () =
   assert.equal(next.filename, 'part.3mf');
 });
 
+test('keeps the previous identity when repeated telemetry changes nothing rendered', () => {
+  const payload = {
+    print: { mc_percent: 50, gcode_state: 'RUNNING', layer_num: 12, total_layer_num: 200 },
+  };
+  const first = applyPrinterTelemetry(createPrinter(), payload, { now: NOW });
+  assert.equal(first.connectionState, 'online');
+
+  const repeat = applyPrinterTelemetry(first, structuredClone(payload), { now: NOW + 1000 });
+  assert.equal(repeat, first);
+
+  const changed = applyPrinterTelemetry(first, {
+    print: { mc_percent: 51, gcode_state: 'RUNNING', layer_num: 12, total_layer_num: 200 },
+  }, { now: NOW + 2000 });
+  assert.notEqual(changed, first);
+  assert.equal(changed.progress, 51);
+});
+
 test('handles direct telemetry, clamps low progress, and maps filament drying', () => {
   const next = applyPrinterTelemetry(createPrinter(), {
     mc_percent: -12,

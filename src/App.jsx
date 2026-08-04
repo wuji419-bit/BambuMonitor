@@ -23,8 +23,18 @@ import {
   WINDOW_SIZE_STORAGE_KEY,
 } from './utils/windowModes';
 
+// Clearing the saved session is destructive, so only do it on explicit auth
+// signals; a transient error mentioning "invalid" must not force a re-login.
+const isTokenInvalidResult = (result) => (
+  result?.status === 401
+  || result?.status === 403
+  || result?.tokenInvalid === true
+  || result?.code === 'UNAUTHORIZED'
+);
+
 const isTokenInvalidError = (errorText) => (
-  /expired|invalid|unauthorized|forbidden|401|token/i.test(String(errorText || ''))
+  /token.*(expired|invalid)|(expired|invalid).*token|unauthorized|登录已过期|登录状态已(过期|失效)|会话已(过期|失效)/i
+    .test(String(errorText || ''))
 );
 
 const AGREEMENT_KEY = 'bambu_terms_agreed';
@@ -296,7 +306,7 @@ function ConnectionScreen({
 
       if (!result.success) {
         const errorText = result.error || '获取设备列表失败';
-        if (result.status === 401 || isTokenInvalidError(errorText)) {
+        if (isTokenInvalidResult(result) || isTokenInvalidError(errorText)) {
           await clearSavedLogin(expectedAttempt);
           if (!isAuthAttemptCurrent(expectedAttempt)) return;
           setSuccessMsg('');
@@ -829,7 +839,9 @@ function App() {
     }
   };
 
-  refreshDevicesRef.current = refreshDeviceInventory;
+  useEffect(() => {
+    refreshDevicesRef.current = refreshDeviceInventory;
+  });
 
   const handleSignOut = async () => {
     const signOutGeneration = deviceSyncGenerationRef.current + 1;
@@ -937,10 +949,11 @@ function App() {
     for (const printer of printers) {
       const previousPrinter = statusMap.get(printer.dev_id);
       const previousJobStatus = previousPrinter?.jobStatus || previousPrinter?.status;
-      const currentJobStatus = printer.jobStatus || printer.status;
       const notificationEvent = getPrinterNotificationEvent(previousPrinter, printer);
 
-      if (previousJobStatus && previousJobStatus !== 'finished' && currentJobStatus === 'finished') {
+      // Speech and webhook share one finish-transition source so a printer
+      // never speaks without notifying (or vice versa).
+      if (notificationEvent === 'print_finished') {
         const message = `${printer.name || '打印机'} 打印完成`;
         try {
           if (typeof window !== 'undefined' && window.speechSynthesis && window.SpeechSynthesisUtterance) {
@@ -1100,6 +1113,7 @@ function App() {
       <PrinterWidget
         runtime={runtime}
         printers={printers}
+        isPreviewMode={isPreviewMode}
         onUpdateIp={handleUpdateIp}
         onRefreshDevices={() => refreshDeviceInventory({ includeLan: true })}
         isRefreshingDevices={isRefreshingDevices}

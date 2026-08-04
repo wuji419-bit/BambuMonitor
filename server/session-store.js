@@ -3,7 +3,6 @@ import * as defaultCrypto from 'node:crypto';
 const SESSION_NAME = 'session.enc';
 const CURRENT_VERSION = 1;
 const SESSION_BYTES = 32;
-const HASH_BYTES = 32;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MAX_SESSIONS = 20;

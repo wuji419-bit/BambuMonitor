@@ -66,7 +66,7 @@ export default function DeviceCard({ printer, renderAction, presentation, showRa
 
       <div className="device-card__facts">
         <span title={meta.right}>{meta.right}</span>
-        {showRemainingTime ? <span>剩余 {printer.timeLeft}</span> : null}
+        {showRemainingTime ? <span className="device-card__remaining">剩余 {printer.timeLeft}</span> : null}
         <span className="device-card__temperature">{temperatureText(printer)}</span>
       </div>
 

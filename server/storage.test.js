@@ -1020,7 +1020,7 @@ test('rejects symlink swaps during key, managed, and backup reads', async (t) =>
 
   await t.test('backup source swap', async () => {
     const dataDir = path.join(root, 'backup-race');
-    const storage = await createStorage({ dataDir });
+    await createStorage({ dataDir });
     const targetPath = path.join(dataDir, 'source.bin');
     const parkedPath = path.join(dataDir, 'source.bin.parked');
     const externalPath = path.join(root, 'external-race.bin');

@@ -51,11 +51,14 @@ export function ChamberSnapshotCanvas({ snapshotUrl, imageKey, alt, isReady, set
         if (!response.ok) throw new Error(`camera frame request failed: ${response.status}`);
         const blob = await response.blob();
         const image = await decodeCameraFrame(blob);
-        if (!signal.aborted && mounted && canvasRef.current) {
-          drawCameraFrame(canvasRef.current, image);
-          markReady();
+        try {
+          if (!signal.aborted && mounted && canvasRef.current) {
+            drawCameraFrame(canvasRef.current, image);
+            markReady();
+          }
+        } finally {
+          if (typeof image.close === 'function') image.close();
         }
-        if (typeof image.close === 'function') image.close();
       },
       onError(error) {
         if (mounted && error?.name !== 'AbortError') markWaiting();

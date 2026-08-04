@@ -1,5 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Sandboxed preload cannot require local modules, so this mirrors
+// createWindowBoundsSaveRequestHandler in window-bounds.cjs.
 function createWindowBoundsSaveRequestHandler(callback, acknowledge) {
   return async (payload) => {
     try {
@@ -7,7 +9,11 @@ function createWindowBoundsSaveRequestHandler(callback, acknowledge) {
     } catch {
       // Closing must continue even if renderer-side persistence fails.
     } finally {
-      acknowledge(payload?.requestId);
+      try {
+        acknowledge(payload?.requestId);
+      } catch {
+        // Main also has a bounded fallback if the renderer is already closing.
+      }
     }
   };
 }

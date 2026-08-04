@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { EventEmitter, once } from 'node:events';
+import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
 

@@ -150,6 +150,7 @@ test('publishes every cloud device in cloud order before LAN discovery completes
   );
   assert.equal(harness.connectCalls.length, 2);
   assert.equal(harness.connectCalls.every((call) => call.mode === 'cloud'), true);
+  assert.equal(harness.connectCalls.every((call) => call.region === 'China'), true);
 
   scan.resolve([]);
   await started;
@@ -611,6 +612,7 @@ test('access token and username fingerprint changes each reconnect exactly once'
   assert.deepEqual(harness.connectCalls.at(-1), {
     serialNumber: 'SERIAL_A',
     mode: 'cloud',
+    region: 'China',
     authToken: 'token-a',
     username: 'user-a',
   });
