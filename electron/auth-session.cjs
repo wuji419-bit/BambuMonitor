@@ -36,6 +36,31 @@ function createProtectedEnvelope(session, protection) {
   };
 }
 
+function readAuthSessionStrict(userDataPath, protection = null) {
+  let raw;
+  try {
+    raw = fs.readFileSync(getAuthSessionPath(userDataPath), 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+
+  const stored = JSON.parse(raw);
+  if (stored?.protected === true) {
+    if (!stored.payload || !canUnprotect(protection)) {
+      throw new Error('Cannot decrypt persisted auth session');
+    }
+    const decrypted = protection.unprotect(Buffer.from(stored.payload, 'base64'));
+    const normalized = normalizeAuthSession(JSON.parse(decrypted));
+    if (!normalized) throw new Error('Invalid persisted auth session');
+    return normalized;
+  }
+
+  const normalized = normalizeAuthSession(stored);
+  if (!normalized) throw new Error('Invalid persisted auth session');
+  return normalized;
+}
+
 function readAuthSession(userDataPath, protection = null) {
   try {
     const raw = fs.readFileSync(getAuthSessionPath(userDataPath), 'utf8');
@@ -83,5 +108,6 @@ module.exports = {
   clearAuthSession,
   getAuthSessionPath,
   readAuthSession,
+  readAuthSessionStrict,
   writeAuthSession,
 };

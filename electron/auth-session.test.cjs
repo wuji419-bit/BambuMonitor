@@ -8,6 +8,7 @@ const {
   clearAuthSession,
   getAuthSessionPath,
   readAuthSession,
+  readAuthSessionStrict,
   writeAuthSession,
 } = require('./auth-session.cjs');
 
@@ -105,4 +106,19 @@ test('returns no session when protected data cannot be decrypted', () => {
   writeAuthSession(dir, { accessToken: 'secret-token' }, makeProtectionAdapter('key-a:'));
 
   assert.equal(readAuthSession(dir, makeProtectionAdapter('key-b:')), null);
+});
+
+test('strict reader distinguishes a missing session from corrupt or undecryptable data', () => {
+  const dir = makeTempDir();
+  assert.equal(readAuthSessionStrict(dir), null);
+
+  fs.writeFileSync(getAuthSessionPath(dir), '{broken', { mode: 0o600 });
+  assert.throws(() => readAuthSessionStrict(dir), SyntaxError);
+
+  writeAuthSession(dir, { account: 'secure@example.com', accessToken: 'secret-token' }, makeProtectionAdapter('key-a:'));
+  assert.throws(() => readAuthSessionStrict(dir), /Cannot decrypt/);
+  assert.throws(
+    () => readAuthSessionStrict(dir, makeProtectionAdapter('key-b:')),
+    /cannot decrypt/,
+  );
 });

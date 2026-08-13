@@ -195,6 +195,113 @@ test('leaves memory and disk unchanged when an atomic mutation fails', () => {
   assert.deepEqual(fs.readdirSync(dir).filter((name) => name.endsWith('.tmp')), []);
 });
 
+test('rolls back the repository when post-rename verification fails', () => {
+  const dir = makeTempDir();
+  const { store } = createStore(dir);
+  const account = store.addAccount({ account: 'maker@example.com', accessToken: 'token-one' });
+  const repositoryPath = getAccountStorePath(dir);
+  const beforeDisk = fs.readFileSync(repositoryPath, 'utf8');
+  const beforeMemory = store.getPrivateAccounts();
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = (filePath, ...args) => {
+    const raw = originalReadFileSync(filePath, ...args);
+    if (filePath === repositoryPath && Buffer.from(raw).toString('utf8') !== beforeDisk) {
+      throw new Error('verification read failed');
+    }
+    return raw;
+  };
+  try {
+    let error;
+    try {
+      store.updateRemark(account.accountId, 'Blocked');
+    } catch (failure) {
+      error = failure;
+    }
+    assert.match(error.message, /Unable to read Bambu account repository/);
+    assert.equal(error.cause.message, 'verification read failed');
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+
+  assert.deepEqual(store.getPrivateAccounts(), beforeMemory);
+  assert.equal(fs.readFileSync(repositoryPath, 'utf8'), beforeDisk);
+  assert.deepEqual(createStore(dir).store.getPrivateAccounts(), beforeMemory);
+  assert.deepEqual(fs.readdirSync(dir).filter((name) => name.endsWith('.tmp')), []);
+});
+
+test('surfaces a recoverable error when rollback cannot restore the previous repository', () => {
+  const dir = makeTempDir();
+  const { store } = createStore(dir);
+  const account = store.addAccount({ account: 'maker@example.com', accessToken: 'token-one' });
+  const repositoryPath = getAccountStorePath(dir);
+  const beforeDisk = fs.readFileSync(repositoryPath, 'utf8');
+  const originalReadFileSync = fs.readFileSync;
+  const originalRenameSync = fs.renameSync;
+  let renameCount = 0;
+  fs.readFileSync = (filePath, ...args) => {
+    const raw = originalReadFileSync(filePath, ...args);
+    if (filePath === repositoryPath && Buffer.from(raw).toString('utf8') !== beforeDisk) {
+      throw new Error('verification read failed');
+    }
+    return raw;
+  };
+  fs.renameSync = (...args) => {
+    renameCount += 1;
+    if (renameCount === 2) throw new Error('rollback is locked');
+    return originalRenameSync(...args);
+  };
+  try {
+    let error;
+    try {
+      store.updateRemark(account.accountId, 'Blocked');
+    } catch (failure) {
+      error = failure;
+    }
+    assert.ok(error instanceof AccountStoreRecoverableError);
+    assert.equal(error.cause.message, 'rollback is locked');
+    assert.match(error.verificationError.message, /Unable to read Bambu account repository/);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    fs.renameSync = originalRenameSync;
+  }
+});
+
+test('removes a failed migration candidate after post-rename verification and preserves legacy data', () => {
+  const dir = makeTempDir();
+  writeAuthSession(dir, { account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50 });
+  const repositoryPath = getAccountStorePath(dir);
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = (filePath, ...args) => {
+    const raw = originalReadFileSync(filePath, ...args);
+    if (filePath === repositoryPath) throw new Error('verification read failed');
+    return raw;
+  };
+  try {
+    assert.throws(() => createStore(dir), /Unable to read Bambu account repository/);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+
+  assert.equal(fs.existsSync(repositoryPath), false);
+  assert.equal(fs.existsSync(getAuthSessionPath(dir)), true);
+});
+
+test('rejects an undecryptable protected legacy session without creating a repository', () => {
+  const dir = makeTempDir();
+  writeAuthSession(
+    dir,
+    { account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50 },
+    makeProtectionAdapter('key-a:'),
+  );
+
+  assert.throws(
+    () => createStore(dir, { protection: makeProtectionAdapter('key-b:') }),
+    (error) => error instanceof AccountStoreRecoverableError && error.code === 'BAMBU_ACCOUNT_STORE_RECOVERABLE',
+  );
+  assert.equal(fs.existsSync(getAuthSessionPath(dir)), true);
+  assert.equal(fs.existsSync(getAccountStorePath(dir)), false);
+});
+
 test('throws recoverable errors for corrupt and unknown-version repositories', () => {
   const dir = makeTempDir();
   fs.writeFileSync(getAccountStorePath(dir), '{broken', { mode: 0o600 });

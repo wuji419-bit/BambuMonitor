@@ -7,7 +7,7 @@ const {
   updateAccountRecord,
   validateAccountRecord,
 } = require('../core/account-records.cjs');
-const { getAuthSessionPath, readAuthSession } = require('./auth-session.cjs');
+const { getAuthSessionPath, readAuthSessionStrict } = require('./auth-session.cjs');
 
 const ACCOUNT_STORE_FILE = 'bambu-accounts.json';
 const REPOSITORY_VERSION = 1;
@@ -137,27 +137,91 @@ function createAccountStore({ userDataPath, protection = null, randomId, now } =
     }
   }
 
-  function writeRepository(repository) {
-    const serialized = serializeRepository(repository, protection);
+  function fsyncDirectory() {
+    let descriptor;
+    try {
+      descriptor = fs.openSync(userDataPath, 'r');
+      fs.fsyncSync(descriptor);
+    } catch {
+      // Directory fsync is unavailable on some platforms, including Windows.
+    } finally {
+      if (descriptor !== undefined) {
+        try {
+          fs.closeSync(descriptor);
+        } catch {
+          // Best-effort durability must not turn a successful rename into a failure.
+        }
+      }
+    }
+  }
+
+  function writeAtomically(raw) {
     const temporaryPath = `${accountStorePath}.${process.pid}.${Date.now()}.${temporaryCounter += 1}.tmp`;
     let descriptor;
     try {
       fs.mkdirSync(userDataPath, { recursive: true });
       descriptor = fs.openSync(temporaryPath, 'wx', 0o600);
-      fs.writeFileSync(descriptor, serialized, 'utf8');
+      fs.writeFileSync(descriptor, raw);
       fs.fsyncSync(descriptor);
       fs.closeSync(descriptor);
       descriptor = undefined;
       fs.renameSync(temporaryPath, accountStorePath);
-      return readRepository();
+      fsyncDirectory();
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);
       fs.rmSync(temporaryPath, { force: true });
     }
   }
 
+  function captureRepositoryFile() {
+    try {
+      return { exists: true, raw: fs.readFileSync(accountStorePath) };
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { exists: false, raw: null };
+      throw error;
+    }
+  }
+
+  function restoreRepositoryFile(previous) {
+    if (previous.exists) {
+      writeAtomically(previous.raw);
+      return;
+    }
+    fs.rmSync(accountStorePath, { force: true });
+    fsyncDirectory();
+  }
+
+  function writeRepository(repository) {
+    const serialized = serializeRepository(repository, protection);
+    const previous = captureRepositoryFile();
+    writeAtomically(serialized);
+    try {
+      return readRepository();
+    } catch (verificationError) {
+      try {
+        restoreRepositoryFile(previous);
+      } catch (rollbackError) {
+        const error = new AccountStoreRecoverableError(
+          'Unable to restore Bambu account repository after verification failure',
+          rollbackError,
+        );
+        error.verificationError = verificationError;
+        throw error;
+      }
+      throw verificationError;
+    }
+  }
+
   function migrateLegacySession() {
-    const session = readAuthSession(userDataPath, protection);
+    const legacyPath = getAuthSessionPath(userDataPath);
+    if (!fs.existsSync(legacyPath)) return { version: REPOSITORY_VERSION, accounts: [] };
+
+    let session;
+    try {
+      session = readAuthSessionStrict(userDataPath, protection);
+    } catch (error) {
+      throw new AccountStoreRecoverableError('Unable to migrate Bambu auth session', error);
+    }
     if (!session) return { version: REPOSITORY_VERSION, accounts: [] };
     const repository = {
       version: REPOSITORY_VERSION,
@@ -167,7 +231,7 @@ function createAccountStore({ userDataPath, protection = null, randomId, now } =
       })],
     };
     const written = writeRepository(repository);
-    fs.rmSync(getAuthSessionPath(userDataPath));
+    fs.rmSync(legacyPath);
     return written;
   }
 
