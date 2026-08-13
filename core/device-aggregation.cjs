@@ -22,6 +22,40 @@ const PRIVATE_DEVICE_KEYS = new Set([
   'streamurl',
   'sources',
 ]);
+const PRIVATE_KEY_FRAGMENTS = Object.freeze([
+  'accesscode',
+  'authorization',
+  'credential',
+  'password',
+  'secret',
+  'token',
+  'username',
+]);
+const PRIVATE_ACCOUNT_FRAGMENTS = Object.freeze([
+  'loginaccount',
+  'privateaccount',
+  'rawaccount',
+  'sourceaccount',
+]);
+const PRIVATE_ADDRESS_FRAGMENTS = Object.freeze([
+  'deviceaddress',
+  'deviceip',
+  'hostaddress',
+  'hostip',
+  'ipaddress',
+  'lanaddress',
+  'lanip',
+  'localaddress',
+  'localip',
+  'networkaddress',
+  'networkip',
+  'printeraddress',
+  'printerip',
+  'privateaddress',
+  'privateip',
+  'remoteaddress',
+  'remoteip',
+]);
 
 function isObject(value) {
   return value !== null && typeof value === 'object';
@@ -39,12 +73,32 @@ function normalizedKey(key) {
   return String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+function keyTerms(key) {
+  return String(key)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function isPrivateDeviceKey(key) {
+  const compact = normalizedKey(key);
+  if (!compact) return false;
+  if (PRIVATE_DEVICE_KEYS.has(compact)) return true;
+  if (PRIVATE_KEY_FRAGMENTS.some((fragment) => compact.includes(fragment))) return true;
+  if (PRIVATE_ACCOUNT_FRAGMENTS.some((fragment) => compact.includes(fragment))) return true;
+  if (PRIVATE_ADDRESS_FRAGMENTS.some((fragment) => compact.includes(fragment))) return true;
+
+  const terms = keyTerms(key);
+  return terms.includes('address') || terms.includes('ip');
+}
+
 function projectPublicValue(value) {
   if (Array.isArray(value)) return value.map(projectPublicValue);
   if (!isObject(value)) return value;
   const projected = {};
   for (const [key, child] of Object.entries(value)) {
-    if (PRIVATE_DEVICE_KEYS.has(normalizedKey(key))) continue;
+    if (isPrivateDeviceKey(key)) continue;
     if (typeof child === 'string' && /^rtsps?:\/\//i.test(child.trim())) continue;
     projected[key] = projectPublicValue(child);
   }

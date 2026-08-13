@@ -106,6 +106,82 @@ test('keeps private source metadata outside the public device projection', () =>
   }
 });
 
+test('removes common secret and address key variants recursively', () => {
+  const privateFields = {
+    local_ip: 'top-local-ip',
+    localIp: 'top-localIp',
+    api_secret: 'top-api-secret',
+    session_token: 'top-session-token',
+    credential_value: 'top-credential-value',
+    raw_account: 'top-raw-account',
+    privateAddress: 'top-private-address',
+  };
+  const nestedPrivateFields = {
+    cached_local_ip_value: 'nested-local-ip',
+    fallbackLocalIpValue: 'nested-localIp',
+    api_secret_digest: 'nested-api-secret',
+    previous_session_token_hash: 'nested-session-token',
+    encrypted_credential_value_blob: 'nested-credential-value',
+    legacy_raw_account_name: 'nested-raw-account',
+    cachedPrivateAddressValue: 'nested-private-address',
+  };
+  const [device] = aggregateDeviceInventories([{
+    account: privateAccount('a', '公司'),
+    devices: [{
+      id: 'SERIAL',
+      name: 'A2L01',
+      ...privateFields,
+      temperature: { nozzle: 220, bed: 60 },
+      progress: 42,
+      status: 'printing',
+      layer: '4 / 10',
+      model: 'P1S',
+      online: true,
+      chipTemperature: 48,
+      cameraPreview: 'rtsp://user:secret@192.168.1.5/live',
+      secureCameraPreview: 'rtsps://user:secret@192.168.1.5/live',
+      nested: {
+        ...nestedPrivateFields,
+        temperature: 35,
+        progress: 43,
+        status: 'active',
+        layer: 4,
+        model: 'AMS',
+        online: false,
+      },
+    }],
+  }]);
+
+  for (const key of Object.keys(privateFields)) {
+    assert.equal(Object.hasOwn(device, key), false, `public device kept ${key}`);
+  }
+  for (const key of Object.keys(nestedPrivateFields)) {
+    assert.equal(Object.hasOwn(device.nested, key), false, `nested device kept ${key}`);
+  }
+  assert.equal(Object.hasOwn(device, 'cameraPreview'), false);
+  assert.equal(Object.hasOwn(device, 'secureCameraPreview'), false);
+  assert.deepEqual(device.temperature, { nozzle: 220, bed: 60 });
+  assert.equal(device.progress, 42);
+  assert.equal(device.status, 'printing');
+  assert.equal(device.layer, '4 / 10');
+  assert.equal(device.model, 'P1S');
+  assert.equal(device.online, true);
+  assert.equal(device.chipTemperature, 48);
+  assert.deepEqual(device.nested, {
+    temperature: 35,
+    progress: 43,
+    status: 'active',
+    layer: 4,
+    model: 'AMS',
+    online: false,
+  });
+
+  const json = JSON.stringify(device);
+  for (const secret of [...Object.values(privateFields), ...Object.values(nestedPrivateFields)]) {
+    assert.equal(json.includes(secret), false, `public JSON leaked ${secret}`);
+  }
+});
+
 test('source removal retains a printer owned by another inventory', () => {
   const company = {
     account: privateAccount('a', '公司'),
