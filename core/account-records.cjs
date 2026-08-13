@@ -56,6 +56,11 @@ function maskAccount(value) {
   return '***';
 }
 
+function isSupportedAccountMask(value) {
+  if (value === '***') return true;
+  return /^(?:\d{3}\*{4}\d{4}|[\s\S]\*{3}@[\s\S]+|[\s\S]{2}\*{3}[\s\S]{2})$/u.test(value);
+}
+
 function accountLabel(record) {
   const remark = normalizeRemark(record?.remark);
   if (remark) return remark;
@@ -107,7 +112,7 @@ function validatePublicAccount(value) {
     && isBoundedString(value.accountId, MAX_ACCOUNT_ID_LENGTH)
     && ACCOUNT_ID_PATTERN.test(value.accountId)
     && isBoundedString(value.accountMasked, MAX_ACCOUNT_MASK_LENGTH)
-    && value.accountMasked.includes('***')
+    && isSupportedAccountMask(value.accountMasked)
     && typeof value.remark === 'string'
     && value.remark === normalizeRemark(value.remark)
     && isBoundedString(value.label, MAX_ACCOUNT_MASK_LENGTH)

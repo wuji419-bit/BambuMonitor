@@ -171,6 +171,30 @@ test('public account validation rejects an unmasked account-looking value', () =
   );
 });
 
+test('public account validation only accepts supported mask formats', () => {
+  const record = createAccountRecord({
+    account: 'maker@example.com',
+    accessToken: 'secret-token',
+  }, { accountId: 'acc-1', timestamp: 100 });
+  const publicRecord = toPublicAccount(record);
+
+  for (const accountMasked of ['maker***@example.com', 'ma*ker', 'abc***def', '***oops']) {
+    assert.throws(
+      () => validatePublicAccount({ ...publicRecord, accountMasked, label: accountMasked }),
+      /Invalid public account/,
+    );
+  }
+});
+
+test('public account validation accepts the exact mask for account identifiers with multiple at signs', () => {
+  const record = createAccountRecord({
+    account: 'maker@region@example.com',
+    accessToken: 'secret-token',
+  }, { accountId: 'acc-1', timestamp: 100 });
+
+  assert.deepEqual(validatePublicAccount(toPublicAccount(record)), toPublicAccount(record));
+});
+
 test('desktop package includes both shared multi-account core modules', () => {
   const packageJson = require('../package.json');
 
