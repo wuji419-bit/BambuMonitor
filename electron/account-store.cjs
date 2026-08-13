@@ -7,9 +7,13 @@ const {
   updateAccountRecord,
   validateAccountRecord,
 } = require('../core/account-records.cjs');
-const { getAuthSessionPath, readAuthSessionStrict } = require('./auth-session.cjs');
+const {
+  getAuthSessionPath,
+  readAuthSessionStrictAtPath,
+} = require('./auth-session.cjs');
 
 const ACCOUNT_STORE_FILE = 'bambu-accounts.json';
+const LEGACY_MIGRATION_STAGING_FILE = 'bambu-auth-session.json.migrating';
 const REPOSITORY_VERSION = 1;
 const MAX_ACCOUNTS = 50;
 
@@ -23,6 +27,10 @@ class AccountStoreRecoverableError extends Error {
 
 function getAccountStorePath(userDataPath) {
   return path.join(userDataPath, ACCOUNT_STORE_FILE);
+}
+
+function getLegacyMigrationStagingPath(userDataPath) {
+  return path.join(userDataPath, LEGACY_MIGRATION_STAGING_FILE);
 }
 
 function isPlainObject(value) {
@@ -163,6 +171,21 @@ function createAccountStore({ userDataPath, protection = null, randomId, now } =
     }
   }
 
+  function renameAndSync(fromPath, toPath) {
+    fs.renameSync(fromPath, toPath);
+    fsyncDirectory();
+  }
+
+  function removeAndSync(filePath) {
+    try {
+      fs.rmSync(filePath);
+      fsyncDirectory();
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
+  }
+
   function writeAtomically(raw) {
     const temporaryPath = `${accountStorePath}.${process.pid}.${Date.now()}.${temporaryCounter += 1}.tmp`;
     let descriptor;
@@ -220,14 +243,76 @@ function createAccountStore({ userDataPath, protection = null, randomId, now } =
     }
   }
 
+  function reconcileLegacyMigration() {
+    const legacyPath = getAuthSessionPath(userDataPath);
+    const stagingPath = getLegacyMigrationStagingPath(userDataPath);
+    const hasLegacy = fs.existsSync(legacyPath);
+    const hasStaging = fs.existsSync(stagingPath);
+    if (!hasStaging) return;
+    if (hasLegacy) {
+      throw new AccountStoreRecoverableError('Ambiguous Bambu auth session migration state');
+    }
+
+    if (fs.existsSync(accountStorePath)) {
+      readRepository();
+      try {
+        removeAndSync(stagingPath);
+      } catch (error) {
+        throw new AccountStoreRecoverableError('Unable to finish Bambu account migration cleanup', error);
+      }
+      return;
+    }
+
+    try {
+      renameAndSync(stagingPath, legacyPath);
+    } catch (error) {
+      throw new AccountStoreRecoverableError('Unable to restore interrupted Bambu auth session migration', error);
+    }
+  }
+
+  function rollbackStagedMigration(stagingPath, migrationError) {
+    const cleanupErrors = [];
+    if (fs.existsSync(accountStorePath)) {
+      try {
+        removeAndSync(accountStorePath);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (fs.existsSync(stagingPath)) {
+      try {
+        renameAndSync(stagingPath, getAuthSessionPath(userDataPath));
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+
+    if (cleanupErrors.length) {
+      const error = new AccountStoreRecoverableError(
+        'Unable to clean up incomplete Bambu account migration',
+        cleanupErrors[0],
+      );
+      error.legacyDeletionError = migrationError;
+      throw error;
+    }
+    throw new AccountStoreRecoverableError('Unable to migrate Bambu auth session', migrationError);
+  }
+
   function migrateLegacySession() {
     const legacyPath = getAuthSessionPath(userDataPath);
     if (!fs.existsSync(legacyPath)) return { version: REPOSITORY_VERSION, accounts: [] };
+    const stagingPath = getLegacyMigrationStagingPath(userDataPath);
+
+    try {
+      renameAndSync(legacyPath, stagingPath);
+    } catch (error) {
+      throw new AccountStoreRecoverableError('Unable to stage Bambu auth session migration', error);
+    }
 
     let session;
     let record;
     try {
-      session = readAuthSessionStrict(userDataPath, protection);
+      session = readAuthSessionStrictAtPath(stagingPath, protection);
       if (session) {
         record = createAccountRecord(session, {
           randomId,
@@ -235,36 +320,22 @@ function createAccountStore({ userDataPath, protection = null, randomId, now } =
         });
       }
     } catch (error) {
-      throw new AccountStoreRecoverableError('Unable to migrate Bambu auth session', error);
+      return rollbackStagedMigration(stagingPath, error);
     }
-    if (!session) return { version: REPOSITORY_VERSION, accounts: [] };
-    const repository = {
-      version: REPOSITORY_VERSION,
-      accounts: [record],
-    };
-    const written = writeRepository(repository);
     try {
-      fs.rmSync(legacyPath);
-      fsyncDirectory();
-    } catch (legacyDeletionError) {
-      try {
-        fs.rmSync(accountStorePath);
-        fsyncDirectory();
-      } catch (cleanupError) {
-        const error = new AccountStoreRecoverableError(
-          'Unable to clean up incomplete Bambu account migration',
-          cleanupError,
-        );
-        error.legacyDeletionError = legacyDeletionError;
-        throw error;
-      }
-      throw new AccountStoreRecoverableError(
-        'Unable to remove legacy Bambu auth session during migration',
-        legacyDeletionError,
-      );
+      if (!session) throw new Error('Invalid persisted auth session');
+      const written = writeRepository({
+        version: REPOSITORY_VERSION,
+        accounts: [record],
+      });
+      removeAndSync(stagingPath);
+      return written;
+    } catch (error) {
+      return rollbackStagedMigration(stagingPath, error);
     }
-    return written;
   }
+
+  reconcileLegacyMigration();
 
   let repository;
   if (fs.existsSync(accountStorePath)) {
@@ -364,7 +435,9 @@ function createAccountStore({ userDataPath, protection = null, randomId, now } =
 module.exports = {
   ACCOUNT_STORE_FILE,
   AccountStoreRecoverableError,
+  LEGACY_MIGRATION_STAGING_FILE,
   MAX_ACCOUNTS,
   createAccountStore,
   getAccountStorePath,
+  getLegacyMigrationStagingPath,
 };

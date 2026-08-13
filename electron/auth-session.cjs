@@ -36,10 +36,10 @@ function createProtectedEnvelope(session, protection) {
   };
 }
 
-function readAuthSessionStrict(userDataPath, protection = null) {
+function readAuthSessionStrictAtPath(sessionPath, protection = null) {
   let raw;
   try {
-    raw = fs.readFileSync(getAuthSessionPath(userDataPath), 'utf8');
+    raw = fs.readFileSync(sessionPath, 'utf8');
   } catch (error) {
     if (error?.code === 'ENOENT') return null;
     throw error;
@@ -59,6 +59,10 @@ function readAuthSessionStrict(userDataPath, protection = null) {
   const normalized = normalizeAuthSession(stored);
   if (!normalized) throw new Error('Invalid persisted auth session');
   return normalized;
+}
+
+function readAuthSessionStrict(userDataPath, protection = null) {
+  return readAuthSessionStrictAtPath(getAuthSessionPath(userDataPath), protection);
 }
 
 function readAuthSession(userDataPath, protection = null) {
@@ -109,5 +113,6 @@ module.exports = {
   getAuthSessionPath,
   readAuthSession,
   readAuthSessionStrict,
+  readAuthSessionStrictAtPath,
   writeAuthSession,
 };

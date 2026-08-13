@@ -9,6 +9,7 @@ const {
   getAuthSessionPath,
   readAuthSession,
   readAuthSessionStrict,
+  readAuthSessionStrictAtPath,
   writeAuthSession,
 } = require('./auth-session.cjs');
 
@@ -121,4 +122,17 @@ test('strict reader distinguishes a missing session from corrupt or undecryptabl
     () => readAuthSessionStrict(dir, makeProtectionAdapter('key-b:')),
     /cannot decrypt/,
   );
+});
+
+test('strict reader accepts an explicit owned migration path without changing legacy reads', () => {
+  const dir = makeTempDir();
+  const migrationPath = path.join(dir, 'bambu-auth-session.json.migrating');
+  fs.writeFileSync(migrationPath, JSON.stringify({
+    account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50,
+  }), { mode: 0o600 });
+
+  assert.deepEqual(readAuthSessionStrictAtPath(migrationPath), {
+    account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50,
+  });
+  assert.equal(readAuthSessionStrict(dir), null);
 });

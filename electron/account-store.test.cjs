@@ -8,6 +8,7 @@ const {
   AccountStoreRecoverableError,
   createAccountStore,
   getAccountStorePath,
+  getLegacyMigrationStagingPath,
 } = require('./account-store.cjs');
 const { getAuthSessionPath, writeAuthSession } = require('./auth-session.cjs');
 
@@ -220,7 +221,10 @@ test('keeps the legacy session when migration cannot persist the new repository'
   const originalRenameSync = fs.renameSync;
   fs.renameSync = () => { throw new Error('disk is locked'); };
   try {
-    assert.throws(() => createStore(dir), /disk is locked/);
+    assert.throws(
+      () => createStore(dir),
+      (error) => error instanceof AccountStoreRecoverableError && error.cause.message === 'disk is locked',
+    );
   } finally {
     fs.renameSync = originalRenameSync;
   }
@@ -241,11 +245,12 @@ for (const { name, protection } of [
       protection,
     );
     const legacyPath = getAuthSessionPath(dir);
+    const stagingPath = getLegacyMigrationStagingPath(dir);
     const repositoryPath = getAccountStorePath(dir);
     const legacyBytes = fs.readFileSync(legacyPath);
     const originalRmSync = fs.rmSync;
     fs.rmSync = (filePath, ...args) => {
-      if (filePath === legacyPath) throw new Error('legacy session is locked');
+      if (filePath === stagingPath) throw new Error('legacy session is locked');
       return originalRmSync(filePath, ...args);
     };
     try {
@@ -269,11 +274,11 @@ for (const { name, protection } of [
 test('surfaces a diagnosable recoverable error when incomplete migration cleanup fails', () => {
   const dir = makeTempDir();
   writeAuthSession(dir, { account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50 });
-  const legacyPath = getAuthSessionPath(dir);
+  const stagingPath = getLegacyMigrationStagingPath(dir);
   const repositoryPath = getAccountStorePath(dir);
   const originalRmSync = fs.rmSync;
   fs.rmSync = (filePath, ...args) => {
-    if (filePath === legacyPath || filePath === repositoryPath) throw new Error('cleanup is locked');
+    if (filePath === stagingPath || filePath === repositoryPath) throw new Error('cleanup is locked');
     return originalRmSync(filePath, ...args);
   };
   try {
@@ -290,6 +295,100 @@ test('surfaces a diagnosable recoverable error when incomplete migration cleanup
   } finally {
     fs.rmSync = originalRmSync;
   }
+});
+
+test('reconciles a staged-only legacy migration by restoring and migrating it', () => {
+  const dir = makeTempDir();
+  writeAuthSession(dir, { account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50 });
+  const legacyPath = getAuthSessionPath(dir);
+  const stagingPath = getLegacyMigrationStagingPath(dir);
+  fs.renameSync(legacyPath, stagingPath);
+
+  const { store } = createStore(dir);
+
+  assert.equal(store.getPrivateAccounts()[0].accessToken, 'legacy-token');
+  assert.equal(fs.existsSync(legacyPath), false);
+  assert.equal(fs.existsSync(stagingPath), false);
+  assert.equal(fs.existsSync(getAccountStorePath(dir)), true);
+});
+
+test('reconciles a completed staged migration by deleting staging before using the repository', () => {
+  const dir = makeTempDir();
+  const { store: existing } = createStore(dir);
+  existing.addAccount({ account: 'new@example.com', accessToken: 'new-token' });
+  const stagingPath = getLegacyMigrationStagingPath(dir);
+  fs.writeFileSync(stagingPath, JSON.stringify({ accessToken: 'legacy-token', savedAt: 50 }), { mode: 0o600 });
+
+  const { store } = createStore(dir);
+
+  assert.deepEqual(store.getPrivateAccounts(), existing.getPrivateAccounts());
+  assert.equal(fs.existsSync(stagingPath), false);
+});
+
+test('treats an already removed staging file as successful completed-migration cleanup', () => {
+  const dir = makeTempDir();
+  const { store: existing } = createStore(dir);
+  existing.addAccount({ account: 'new@example.com', accessToken: 'new-token' });
+  const stagingPath = getLegacyMigrationStagingPath(dir);
+  fs.writeFileSync(stagingPath, JSON.stringify({ accessToken: 'legacy-token', savedAt: 50 }), { mode: 0o600 });
+  const originalRmSync = fs.rmSync;
+  fs.rmSync = (filePath, ...args) => {
+    if (filePath === stagingPath) {
+      originalRmSync(filePath, ...args);
+      const error = new Error('already removed');
+      error.code = 'ENOENT';
+      throw error;
+    }
+    return originalRmSync(filePath, ...args);
+  };
+  try {
+    assert.deepEqual(createStore(dir).store.getPrivateAccounts(), existing.getPrivateAccounts());
+  } finally {
+    fs.rmSync = originalRmSync;
+  }
+  assert.equal(fs.existsSync(stagingPath), false);
+});
+
+test('retries staged completed-migration cleanup after a staging lock clears', () => {
+  const dir = makeTempDir();
+  const { store: existing } = createStore(dir);
+  existing.addAccount({ account: 'new@example.com', accessToken: 'new-token' });
+  const stagingPath = getLegacyMigrationStagingPath(dir);
+  fs.writeFileSync(stagingPath, JSON.stringify({ accessToken: 'legacy-token', savedAt: 50 }), { mode: 0o600 });
+  const originalRmSync = fs.rmSync;
+  fs.rmSync = (filePath, ...args) => {
+    if (filePath === stagingPath) throw new Error('staging is locked');
+    return originalRmSync(filePath, ...args);
+  };
+  try {
+    assert.throws(
+      () => createStore(dir),
+      (error) => error instanceof AccountStoreRecoverableError && error.code === 'BAMBU_ACCOUNT_STORE_RECOVERABLE',
+    );
+  } finally {
+    fs.rmSync = originalRmSync;
+  }
+
+  assert.deepEqual(createStore(dir).store.getPrivateAccounts(), existing.getPrivateAccounts());
+  assert.equal(fs.existsSync(stagingPath), false);
+});
+
+test('rejects ambiguous legacy and staging files without overwriting either', () => {
+  const dir = makeTempDir();
+  writeAuthSession(dir, { account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50 });
+  const legacyPath = getAuthSessionPath(dir);
+  const stagingPath = getLegacyMigrationStagingPath(dir);
+  fs.writeFileSync(stagingPath, JSON.stringify({ accessToken: 'staged-token', savedAt: 60 }), { mode: 0o600 });
+  const legacyBytes = fs.readFileSync(legacyPath);
+  const stagingBytes = fs.readFileSync(stagingPath);
+
+  assert.throws(
+    () => createStore(dir),
+    (error) => error instanceof AccountStoreRecoverableError && error.code === 'BAMBU_ACCOUNT_STORE_RECOVERABLE',
+  );
+  assert.deepEqual(fs.readFileSync(legacyPath), legacyBytes);
+  assert.deepEqual(fs.readFileSync(stagingPath), stagingBytes);
+  assert.equal(fs.existsSync(getAccountStorePath(dir)), false);
 });
 
 test('refreshes duplicate accounts in place and only changes an explicitly supplied remark', () => {
@@ -438,7 +537,12 @@ test('removes a failed migration candidate after post-rename verification and pr
     return raw;
   };
   try {
-    assert.throws(() => createStore(dir), /Unable to read Bambu account repository/);
+    assert.throws(
+      () => createStore(dir),
+      (error) => error instanceof AccountStoreRecoverableError
+        && error.cause instanceof AccountStoreRecoverableError
+        && /Unable to read Bambu account repository/.test(error.cause.message),
+    );
   } finally {
     fs.readFileSync = originalReadFileSync;
   }
