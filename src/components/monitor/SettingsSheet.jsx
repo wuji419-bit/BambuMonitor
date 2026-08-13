@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { Camera, Copy, LogOut, Send, X } from 'lucide-react';
 import { getCustomCameraUrl, getPrinterCameraKey } from '../../services/camera';
+import AccountCenter from './AccountCenter';
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
-export default function SettingsSheet({ dialogRef, printers, baseline, capabilities = {}, testingTargetId, externalFeedback, onClose, onSignOut, onCopyIntegration, onTestNotification, onSave }) {
+export default function SettingsSheet({ dialogRef, runtime, printers, baseline, capabilities = {}, testingTargetId, externalFeedback, onClose, onSignOut, onAccountsChanged, onFinalAccountRemoved, onCopyIntegration, onTestNotification, onSave }) {
   const [openedBaseline] = useState(() => clone(baseline));
   const [draft, setDraft] = useState(() => clone(openedBaseline));
   const [busyAction, setBusyAction] = useState('');
@@ -33,7 +34,16 @@ export default function SettingsSheet({ dialogRef, printers, baseline, capabilit
         <section className="settings-section"><h2>通知与集成</h2><label className="settings-toggle"><span>启用外部通知</span><input type="checkbox" checked={draft.notificationConfig.enabled} onChange={(e) => patchNotification({ enabled: e.target.checked })} /></label><label className="settings-number"><span>同一事件冷却时间（秒）</span><input type="number" min="5" max="3600" value={Math.round((Number(draft.notificationConfig.cooldownMs) || 30000) / 1000)} onChange={(e) => patchNotification({ cooldownMs: Math.max(5, Number(e.target.value) || 30) * 1000 })} /></label>
           <div className="settings-targets">{draft.notificationConfig.targets.map((target) => <div className="settings-target" key={target.id}><div className="settings-target__header"><strong>{target.name}</strong><label><span>启用</span><input type="checkbox" checked={Boolean(target.enabled)} onChange={(e) => patchTarget(target.id, { enabled: e.target.checked })} /></label></div><input type="text" value={target.url || ''} onChange={(e) => patchTarget(target.id, { url: e.target.value })} placeholder={`${target.name} Webhook URL`} aria-label={`${target.name} Webhook URL`} /><input type="password" value={target.secret || ''} onChange={(e) => patchTarget(target.id, { secret: e.target.value })} placeholder="HMAC Secret（可选）" aria-label={`${target.name} HMAC Secret（可选）`} /><div className="settings-target__actions"><button type="button" aria-label={`复制 ${target.name} 接入代码`} onClick={() => onCopyIntegration(target)}><Copy size={13} />接入代码</button><button type="button" aria-label={`测试 ${target.name} 通知`} disabled={disabled || testingTargetId === target.id || !target.url} onClick={() => onTestNotification(target)}><Send size={13} />{testingTargetId === target.id ? '测试中' : '测试'}</button></div></div>)}</div>
         </section>
-        <section className="settings-section settings-account"><h2>账号</h2><button type="button" className="settings-signout" disabled={disabled} onClick={() => run('signout', onSignOut)}><LogOut size={15} />{busyAction === 'signout' ? '退出中' : '退出账号'}</button></section>
+        <section className="settings-section settings-account">
+          <h2>账号</h2>
+          <AccountCenter
+            runtime={runtime}
+            disabled={disabled}
+            onInventoryChanged={onAccountsChanged}
+            onFinalAccountRemoved={onFinalAccountRemoved}
+          />
+          <button type="button" className="settings-signout" disabled={disabled} onClick={() => run('signout', onSignOut)}><LogOut size={15} />{busyAction === 'signout' ? '退出中' : '退出全部账号'}</button>
+        </section>
         {feedback || externalFeedback ? <p className="settings-feedback" role={/失败/.test(feedback || externalFeedback) ? 'alert' : 'status'}>{feedback || externalFeedback}</p> : null}
       </div>
       <footer className="settings-sheet__footer"><button type="button" disabled={disabled} onClick={() => { setDraft(clone(openedBaseline)); setFeedback('已还原为打开设置时的内容'); }}>还原</button><button type="button" className="is-primary" disabled={disabled} onClick={() => run('save', () => onSave(draft))}>{busyAction === 'save' ? '保存中' : '保存设置'}</button></footer>

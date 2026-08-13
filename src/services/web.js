@@ -41,6 +41,30 @@ function adaptSnapshot(data) {
   };
 }
 
+function adaptAccounts(data) {
+  const result = {
+    success: true,
+    accounts: Array.isArray(data?.accounts) ? clone(data.accounts) : [],
+    states: Array.isArray(data?.states) ? clone(data.states) : [],
+  };
+  if (data?.account && typeof data.account === 'object') result.account = clone(data.account);
+  if (typeof data?.authenticated === 'boolean') result.authenticated = data.authenticated;
+  if (typeof data?.removedAccountId === 'string') result.removedAccountId = data.removedAccountId;
+  return result;
+}
+
+function safeAccountState(value) {
+  if (!value || typeof value !== 'object') return null;
+  const connectionState = ['idle', 'syncing', 'connected', 'invalid', 'error'].includes(value.connectionState)
+    ? value.connectionState : 'error';
+  return {
+    connectionState,
+    errorCode: typeof value.errorCode === 'string' ? value.errorCode : null,
+    syncedAt: Number.isFinite(value.syncedAt) ? value.syncedAt : null,
+    deviceCount: Number.isSafeInteger(value.deviceCount) && value.deviceCount >= 0 ? value.deviceCount : 0,
+  };
+}
+
 function knownEvent(value) {
   if (!value || typeof value !== 'object') return null;
   if (value.type === 'devices.snapshot' && Array.isArray(value.devices)) {
@@ -53,6 +77,15 @@ function knownEvent(value) {
   }
   if (value.type === 'device.updated' && value.device && typeof value.device === 'object') {
     return { type: value.type, device: clone(value.device) };
+  }
+  if ((value.type === 'account.updated' || value.type === 'account.invalid')
+    && typeof value.accountId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value.accountId)) {
+    const state = safeAccountState(value.state);
+    return state ? { type: value.type, accountId: value.accountId, state } : null;
+  }
+  if (value.type === 'account.removed'
+    && typeof value.accountId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value.accountId)) {
+    return { type: value.type, accountId: value.accountId };
   }
   if (value.type === 'session.invalid') return { type: value.type };
   return null;
@@ -74,6 +107,9 @@ export function createWebRuntime({
   const listeners = {
     'devices.snapshot': new Set(),
     'device.updated': new Set(),
+    'account.updated': new Set(),
+    'account.invalid': new Set(),
+    'account.removed': new Set(),
     'session.invalid': new Set(),
   };
   let csrfToken = '';
@@ -140,7 +176,7 @@ export function createWebRuntime({
     const requestSessionGeneration = sessionGeneration;
     const requestCsrfToken = csrfToken;
     const headers = { Accept: 'application/json' };
-    const mutation = ['POST', 'PATCH', 'PUT'].includes(method);
+    const mutation = ['POST', 'PATCH', 'PUT', 'DELETE'].includes(method);
     if (mutation) {
       headers['Content-Type'] = 'application/json';
       if (requestCsrfToken) headers['X-CSRF-Token'] = requestCsrfToken;
@@ -363,6 +399,49 @@ export function createWebRuntime({
         return { success: false, error: '局域网扫描仅在桌面版可用', code: 'UNSUPPORTED' };
       },
     },
+    accounts: {
+      async list() {
+        const result = await request('/api/accounts');
+        return result.success ? adaptAccounts(result.data) : result;
+      },
+      async add(payload) {
+        const result = await request('/api/accounts/login', { method: 'POST', body: payload });
+        return result.success ? adaptAccounts(result.data) : result;
+      },
+      async requestVerifyCode(payload) {
+        const result = await request('/api/accounts/code/request', { method: 'POST', body: payload });
+        return result.success ? { success: true, sent: result.data?.sent === true } : result;
+      },
+      async addWithCode(payload) {
+        const result = await request('/api/accounts/code/verify', { method: 'POST', body: payload });
+        return result.success ? adaptAccounts(result.data) : result;
+      },
+      async updateRemark(accountId, remark) {
+        const result = await request(`/api/accounts/${encodeURIComponent(accountId)}`, {
+          method: 'PATCH', body: { remark },
+        });
+        return result.success ? adaptAccounts(result.data) : result;
+      },
+      async reauthenticate(accountId, payload) {
+        const withAccountId = { ...payload, accountId };
+        const path = Object.hasOwn(payload || {}, 'code')
+          ? '/api/accounts/code/verify' : '/api/accounts/login';
+        const result = await request(path, { method: 'POST', body: withAccountId });
+        return result.success ? adaptAccounts(result.data) : result;
+      },
+      async remove(accountId) {
+        const result = await request(`/api/accounts/${encodeURIComponent(accountId)}`, {
+          method: 'DELETE', body: {},
+        });
+        return result.success ? adaptAccounts(result.data) : result;
+      },
+      async refresh(accountId) {
+        const result = await request(`/api/accounts/${encodeURIComponent(accountId)}/refresh`, {
+          method: 'POST', body: {},
+        });
+        return result.success ? adaptAccounts(result.data) : result;
+      },
+    },
     camera: {
       async start({ serialNumber } = {}) {
         const serial = encodeURIComponent(String(serialNumber || ''));
@@ -396,6 +475,9 @@ export function createWebRuntime({
     events: {
       onDeviceSnapshot(listener) { return subscribe('devices.snapshot', listener); },
       onDeviceUpdate(listener) { return subscribe('device.updated', listener); },
+      onAccountUpdated(listener) { return subscribe('account.updated', listener); },
+      onAccountInvalid(listener) { return subscribe('account.invalid', listener); },
+      onAccountRemoved(listener) { return subscribe('account.removed', listener); },
       onSessionInvalid(listener) { return subscribe('session.invalid', listener); },
       close: closeEvents,
     },

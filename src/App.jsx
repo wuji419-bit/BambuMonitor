@@ -182,11 +182,13 @@ function ConnectionScreen({
   sessionWarning = '',
 }) {
   const isElectron = runtime.kind === 'electron';
+  const usesManagedAccounts = isElectron && Boolean(runtime.accounts);
   const [isPasswordMode, setIsPasswordMode] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [account, setAccount] = useState('');
   const [password, setPassword] = useState('');
   const [verifyCode, setVerifyCode] = useState('');
+  const [remark, setRemark] = useState('');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -300,7 +302,7 @@ function ConnectionScreen({
 
     try {
       const result = await runtime.auth.getDeviceList(
-        isElectron ? { accessToken: token } : undefined,
+        isElectron && !usesManagedAccounts ? { accessToken: token } : undefined,
       );
       if (!isAuthAttemptCurrent(expectedAttempt)) return;
 
@@ -325,7 +327,7 @@ function ConnectionScreen({
         return;
       }
 
-      const initialPrinters = isElectron
+      const initialPrinters = isElectron && !usesManagedAccounts
         ? buildDeviceSync(cloudDevices).initialPrinters
         : replaceRuntimeSnapshot([], cloudDevices);
 
@@ -335,10 +337,14 @@ function ConnectionScreen({
       if (isElectron) connectCloudDevices(initialPrinters, token, result.username);
       setLoading(false);
       const connectionGeneration = onConnect(initialPrinters, {
-        ...(isElectron ? { accessToken: token } : { serverSession: true }),
+        ...(usesManagedAccounts
+          ? { managedSession: true }
+          : (isElectron ? { accessToken: token } : { serverSession: true })),
         username: result.username || '',
       });
-      if (isElectron) refreshLanDevicesInBackground(cloudDevices, connectionGeneration);
+      if (isElectron && !usesManagedAccounts) {
+        refreshLanDevicesInBackground(cloudDevices, connectionGeneration);
+      }
     } catch (err) {
       if (!isAuthAttemptCurrent(expectedAttempt)) return;
       console.error('Fetch device list error:', err);
@@ -381,15 +387,24 @@ function ConnectionScreen({
     setSuccessMsg('');
 
     try {
+      const optionalRemark = remark.trim();
       const result = isPasswordMode
-        ? await runtime.auth.cloudLogin({ account, password })
-        : await runtime.auth.cloudLoginCode({ account, code: verifyCode });
+        ? await runtime.auth.cloudLogin({
+          account,
+          password,
+          ...(optionalRemark ? { remark: optionalRemark } : {}),
+        })
+        : await runtime.auth.cloudLoginCode({
+          account,
+          code: verifyCode,
+          ...(optionalRemark ? { remark: optionalRemark } : {}),
+        });
       if (!isAuthAttemptCurrent(expectedAttempt) || result?.stale) return;
 
       if (result.success) {
         setSuccessMsg('登录成功，正在同步设备...');
         localStorage.setItem('bambu_account', account);
-        if (isElectron) {
+        if (isElectron && !usesManagedAccounts) {
           await runtime.auth.saveSession({ account, accessToken: result.accessToken });
           if (!isAuthAttemptCurrent(expectedAttempt)) return;
         }
@@ -449,7 +464,7 @@ function ConnectionScreen({
         const result = await runtime.auth.getSavedSession();
         if (!isAuthAttemptCurrent(expectedAttempt) || result?.stale) return;
         const session = result?.session;
-        if (session?.accessToken || session?.serverSession) {
+        if (session?.accessToken || session?.serverSession || session?.managedSession) {
           hasSavedSession = true;
           savedToken = session.accessToken;
           savedAccount = session.account || savedAccount;
@@ -568,6 +583,18 @@ function ConnectionScreen({
                 value={account}
                 onChange={(event) => setAccount(event.target.value)}
                 placeholder="输入 Bambu Lab 或 MakerWorld 账号"
+              />
+            </div>
+
+            <div className="input-group">
+              <label className="input-label" htmlFor="account-remark">账号备注（可选）</label>
+              <input
+                id="account-remark"
+                type="text"
+                value={remark}
+                maxLength={40}
+                onChange={(event) => setRemark(event.target.value)}
+                placeholder="例如：公司、工作室；可以直接跳过"
               />
             </div>
 
@@ -697,7 +724,7 @@ function App() {
 
   const handleConnect = (initialPrinters = [], session = null, expectedGeneration = null) => {
     if (!acceptsConnectionGeneration(deviceSyncGenerationRef.current, expectedGeneration)) return null;
-    if (session?.accessToken || session?.serverSession) {
+    if (session?.accessToken || session?.serverSession || session?.managedSession) {
       deviceSyncGenerationRef.current = beginConnectionGeneration(deviceSyncGenerationRef.current);
       deviceSyncBusyRef.current = false;
       deviceSyncBusyGenerationRef.current = null;
@@ -751,7 +778,7 @@ function App() {
     }
     if (deviceSyncBusyRef.current) return;
 
-    if (!isElectron) {
+    if (!isElectron || runtime.accounts) {
       const generation = deviceSyncGenerationRef.current;
       deviceSyncBusyRef.current = true;
       setIsRefreshingDevices(true);
@@ -760,7 +787,14 @@ function App() {
         const result = await runtime.devices.refresh();
         if (deviceSyncGenerationRef.current !== generation) return;
         if (!result?.success) throw new Error(result?.error || '同步设备失败');
-        setPrinters((current) => replaceRuntimeSnapshot(current, result.devices));
+        const refreshedPrinters = replaceRuntimeSnapshot([], result.devices);
+        if (isElectron) {
+          const removedIds = getRemovedPrinterIds(bambuClient.getAllPrinters(), refreshedPrinters);
+          await Promise.allSettled(removedIds.map((serialNumber) => bambuClient.disconnect(serialNumber)));
+          if (deviceSyncGenerationRef.current !== generation) return;
+          connectCloudPrinters(refreshedPrinters, '', '');
+        }
+        setPrinters(refreshedPrinters);
         setLastDeviceSyncAt(result.syncedAt || Date.now());
       } catch (error) {
         if (deviceSyncGenerationRef.current === generation) {
@@ -843,6 +877,36 @@ function App() {
     refreshDevicesRef.current = refreshDeviceInventory;
   });
 
+  const resetConnectedWorkspace = ({ warning = '' } = {}) => {
+    deviceSyncGenerationRef.current = beginConnectionGeneration(deviceSyncGenerationRef.current);
+    deviceSyncBusyRef.current = false;
+    deviceSyncBusyGenerationRef.current = null;
+    authSessionRef.current = null;
+    lastPrinterStatusRef.current.clear();
+    localStorage.removeItem('bambu_account');
+    if (isElectron) localStorage.removeItem('bambu_token');
+    setPrinters([]);
+    setIsRefreshingDevices(false);
+    setLastDeviceSyncAt(0);
+    setDeviceSyncError('');
+    setSuppressAutoLogin(true);
+    setSessionWarning(warning);
+    setIsConnected(false);
+  };
+
+  const handleAccountsEmpty = async () => {
+    if (isElectron) {
+      try {
+        await bambuClient.disconnect();
+      } catch (error) {
+        console.warn('Disconnect after final account removal failed:', error);
+      }
+    } else {
+      runtime.events.close();
+    }
+    resetConnectedWorkspace({ warning: '已移除最后一个账号，请重新登录或添加账号' });
+  };
+
   const handleSignOut = async () => {
     const signOutGeneration = deviceSyncGenerationRef.current + 1;
     deviceSyncGenerationRef.current = signOutGeneration;
@@ -868,22 +932,11 @@ function App() {
         }
         if (deviceSyncGenerationRef.current === signOutGeneration) {
           if (!isElectron) runtime.events.close();
-          localStorage.removeItem('bambu_account');
-          if (isElectron) localStorage.removeItem('bambu_token');
-          authSessionRef.current = null;
-          lastPrinterStatusRef.current.clear();
-          deviceSyncBusyRef.current = false;
-          deviceSyncBusyGenerationRef.current = null;
-          setPrinters([]);
-          setIsRefreshingDevices(false);
-          setLastDeviceSyncAt(0);
-          setDeviceSyncError('');
-          setSessionWarning(sessionClearError
+          resetConnectedWorkspace({ warning: sessionClearError
             ? (isElectron
               ? '已退出账号，但加密登录文件删除失败；本次运行不会自动登录，请稍后重试。'
               : '退出登录失败，请稍后重试。')
-            : (disconnectError ? '设备断开失败，但你已退出账号。' : ''));
-          setIsConnected(false);
+            : (disconnectError ? '设备断开失败，但你已退出账号。' : '') });
         }
       }
     }
@@ -898,13 +951,20 @@ function App() {
   }, [isConnected, isElectron, isPreviewMode]);
 
   useEffect(() => {
-    if (!isConnected || isElectron || isPreviewMode) return undefined;
+    const managedDesktop = isElectron && Boolean(runtime.accounts);
+    if (!isConnected || isPreviewMode || (isElectron && !managedDesktop)) return undefined;
     const generation = deviceSyncGenerationRef.current;
     const isCurrent = () => deviceSyncGenerationRef.current === generation;
 
     const offSnapshot = runtime.events.onDeviceSnapshot((event) => {
       if (!isCurrent()) return;
-      setPrinters((current) => replaceRuntimeSnapshot(current, event.devices));
+      const nextPrinters = replaceRuntimeSnapshot([], event.devices);
+      if (managedDesktop) {
+        const removedIds = getRemovedPrinterIds(bambuClient.getAllPrinters(), nextPrinters);
+        void Promise.allSettled(removedIds.map((serialNumber) => bambuClient.disconnect(serialNumber)));
+        connectCloudPrinters(nextPrinters, '', '');
+      }
+      setPrinters(nextPrinters);
       setLastDeviceSyncAt(event.syncedAt || Date.now());
       setDeviceSyncError('');
     });
@@ -928,11 +988,16 @@ function App() {
       setSessionWarning('登录状态已过期，请重新登录');
       setIsConnected(false);
     });
+    const offAccountInvalid = runtime.events.onAccountInvalid?.((event) => {
+      if (!isCurrent()) return;
+      setDeviceSyncError(`账号 ${event.accountId} 需要重新登录；其他账号仍会继续同步`);
+    }) || (() => {});
 
     return () => {
       offSnapshot();
       offUpdate();
       offInvalid();
+      offAccountInvalid();
     };
   }, [isConnected, isElectron, isPreviewMode, runtime]);
 
@@ -1120,6 +1185,7 @@ function App() {
         lastDeviceSyncAt={lastDeviceSyncAt}
         deviceSyncError={deviceSyncError}
         onSignOut={handleSignOut}
+        onAccountsEmpty={handleAccountsEmpty}
       />
     </>
   );

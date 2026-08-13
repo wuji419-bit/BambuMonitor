@@ -214,6 +214,67 @@ test('device, settings, and notification mutations preserve exact payloads and a
   runtime.events.close();
 });
 
+test('account service lists and mutates accounts with CSRF including DELETE bodies', async () => {
+  const account = { accountId: 'first', accountMasked: 'f***@example.com', remark: '', label: 'f***@example.com' };
+  const renamed = { ...account, remark: 'Office', label: 'Office' };
+  const queue = createFetchQueue([
+    jsonResponse({ ok: true, data: { csrfToken: 'csrf-accounts', accountMasked: 'f***@example.com' } }),
+    jsonResponse({ ok: true, data: { accounts: [account], states: [] } }),
+    jsonResponse({ ok: true, data: { account: renamed, accounts: [renamed], states: [] } }),
+    jsonResponse({ ok: true, data: { account: { ...account, accountId: 'second' }, accounts: [renamed], states: [] } }),
+    jsonResponse({ ok: true, data: { authenticated: true, removedAccountId: 'second', accounts: [renamed], states: [] } }),
+  ]);
+  const runtime = createRuntime(queue.fetchImpl);
+  await runtime.auth.cloudLogin({ account: 'first@example.com', password: 'password' });
+
+  assert.deepEqual(await runtime.accounts.list(), { success: true, accounts: [account], states: [] });
+  assert.deepEqual(await runtime.accounts.updateRemark('first', 'Office'), {
+    success: true, account: renamed, accounts: [renamed], states: [],
+  });
+  assert.equal((await runtime.accounts.add({ account: 'second@example.com', password: 'secret', remark: '' })).success, true);
+  assert.equal((await runtime.accounts.remove('second')).success, true);
+
+  assert.deepEqual(queue.calls.map(({ url }) => url), [
+    '/api/auth/login', '/api/accounts', '/api/accounts/first', '/api/accounts/login', '/api/accounts/second',
+  ]);
+  for (const index of [2, 3, 4]) {
+    assert.equal(queue.calls[index].options.headers['X-CSRF-Token'], 'csrf-accounts');
+  }
+  assert.equal(queue.calls[2].options.method, 'PATCH');
+  assert.equal(queue.calls[4].options.method, 'DELETE');
+  assert.equal(queue.calls[4].options.body, '{}');
+  runtime.events.close();
+});
+
+test('account.invalid remains account-scoped and does not invalidate the browser session', async () => {
+  const queue = createFetchQueue([
+    jsonResponse({ ok: true, data: { csrfToken: 'csrf', accountMasked: 'a***' } }),
+    jsonResponse({ ok: true, data: { type: 'devices.snapshot', devices: [] } }),
+    jsonResponse({ ok: true, data: { accounts: [], states: [] } }),
+  ]);
+  const runtime = createRuntime(queue.fetchImpl);
+  const accountEvents = [];
+  let sessionInvalidations = 0;
+  runtime.events.onAccountInvalid((event) => accountEvents.push(event));
+  runtime.events.onSessionInvalid(() => { sessionInvalidations += 1; });
+  await runtime.auth.cloudLogin({ account: 'a', password: 'b' });
+  await Promise.resolve();
+  const socket = FakeWebSocket.instances[0];
+
+  socket.message({
+    type: 'account.invalid', accountId: 'first',
+    state: { connectionState: 'invalid', errorCode: '401', syncedAt: 10, deviceCount: 2, accessToken: 'drop' },
+  });
+  assert.deepEqual(accountEvents, [{
+    type: 'account.invalid', accountId: 'first',
+    state: { connectionState: 'invalid', errorCode: '401', syncedAt: 10, deviceCount: 2 },
+  }]);
+  assert.equal(sessionInvalidations, 0);
+  assert.equal(socket.closeCalls.length, 0);
+  assert.equal((await runtime.accounts.list()).success, true);
+  runtime.events.close();
+});
+
 test('camera URLs are same-origin and never accept or expose printer secrets', async () => {
   const queue = createFetchQueue([]);
   const runtime = createRuntime(queue.fetchImpl);

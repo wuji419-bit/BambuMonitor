@@ -475,6 +475,7 @@ export default function PrinterWidget({
   lastDeviceSyncAt = 0,
   deviceSyncError = '',
   onSignOut,
+  onAccountsEmpty,
 }) {
   const capabilities = runtime?.capabilities || {};
   const isElectron = runtime?.kind === 'electron';
@@ -1369,6 +1370,7 @@ export default function PrinterWidget({
       {settingsOpen ? (
         <SettingsSheet
           dialogRef={settingsDialogRef}
+          runtime={isPreviewMode ? null : runtime}
           printers={displayPrinters}
           baseline={{ isAlwaysOnTop, windowOpacity, startupEnabled, cameraConfig, notificationConfig }}
           capabilities={capabilities}
@@ -1376,6 +1378,8 @@ export default function PrinterWidget({
           externalFeedback={notificationFeedback || startupFeedback || cameraFeedback}
           onClose={() => setSettingsOpen(false)}
           onSignOut={onSignOut}
+          onAccountsChanged={() => onRefreshDevices?.()}
+          onFinalAccountRemoved={onAccountsEmpty}
           onCopyIntegration={copyIntegrationCode}
           onTestNotification={testNotificationTarget}
           onSave={applySettingsDraft}

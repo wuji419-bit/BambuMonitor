@@ -17,15 +17,22 @@ export function getRuntime() {
 }
 
 export function replaceRuntimeSnapshot(_current, devices) {
-  return Array.isArray(devices) ? devices.map((device) => ({ ...device })) : [];
+  return Array.isArray(devices) ? devices.map(normalizeRuntimeDevice) : [];
+}
+
+function normalizeRuntimeDevice(device = {}) {
+  const next = { ...device };
+  const displayName = typeof next.displayName === 'string' ? next.displayName.trim() : '';
+  if (displayName) next.name = displayName;
+  return next;
 }
 
 export function mergeRuntimeDevice(current, device) {
   if (!device?.dev_id) return current;
   const index = current.findIndex((item) => item.dev_id === device.dev_id);
-  if (index < 0) return [...current, { ...device }];
+  if (index < 0) return [...current, normalizeRuntimeDevice(device)];
   const next = [...current];
-  next[index] = { ...next[index], ...device };
+  next[index] = normalizeRuntimeDevice({ ...next[index], ...device });
   return next;
 }
 

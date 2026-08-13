@@ -8,11 +8,13 @@ const mqtt = require('mqtt');
 const { installSafeConsole } = require('./safe-console.cjs');
 const { enforceSingleInstance } = require('./single-instance.cjs');
 const { connectMqttForRenderer } = require('./mqtt-ipc-result.cjs');
+const { createAccountStore } = require('./account-store.cjs');
+const { createAccountRuntime } = require('./account-runtime.cjs');
 const {
-  clearAuthSession,
-  readAuthSession,
-  writeAuthSession,
-} = require('./auth-session.cjs');
+  registerAccountIpc,
+  resolveManagedCameraPayload,
+  resolveManagedMqttPayload,
+} = require('./account-ipc.cjs');
 const { buildMqttConnectionOptions } = require('./mqtt-options.cjs');
 const { createBambuCloudClient } = require('../core/bambu-cloud.cjs');
 const { scanBambuPrinters } = require('../core/lan-discovery.cjs');
@@ -31,6 +33,8 @@ const {
 
 installSafeConsole();
 const bambuCloud = createBambuCloudClient({ logger: console });
+let desktopAccountStore = null;
+let desktopAccountRuntime = null;
 
 function getAuthSessionProtection() {
   try {
@@ -42,6 +46,27 @@ function getAuthSessionProtection() {
   } catch {
     return null;
   }
+}
+
+function getAccountStore() {
+  if (!desktopAccountStore) {
+    desktopAccountStore = createAccountStore({
+      userDataPath: app.getPath('userData'),
+      protection: getAuthSessionProtection(),
+    });
+  }
+  return desktopAccountStore;
+}
+
+function getAccountRuntime() {
+  if (!desktopAccountRuntime) {
+    desktopAccountRuntime = createAccountRuntime({
+      accountStore: getAccountStore(),
+      cloud: bambuCloud,
+      scan: () => scanBambuPrinters({ logger: console }),
+    });
+  }
+  return desktopAccountRuntime;
 }
 
 let mainWindow;
@@ -88,6 +113,27 @@ function sendRendererEvent(channel, payload) {
     mainWindow.webContents.send(channel, payload);
   }
 }
+
+async function reconcileAccountConnections({ disconnectSerials = [] } = {}) {
+  const serialNumbers = [...new Set(disconnectSerials.map((value) => String(value || '').trim()))]
+    .filter(Boolean);
+  await Promise.allSettled(serialNumbers.map((serialNumber) => (
+    mqttConnectionManager.disconnect(serialNumber)
+  )));
+  for (const serialNumber of serialNumbers) {
+    cameraSources.delete(serialNumber);
+    stopChamberStream(serialNumber);
+  }
+  if (serialNumbers.length > 0) stopCameraProcesses();
+}
+
+registerAccountIpc({
+  ipcMain,
+  getRuntime: getAccountRuntime,
+  emit: sendRendererEvent,
+  reconcileConnections: reconcileAccountConnections,
+  logger: console,
+});
 
 function clearWindowBoundsTimer() {
   if (!windowBoundsTimer) return;
@@ -983,22 +1029,29 @@ ipcMain.handle('startup-set', async (_event, { enabled }) => {
 
 ipcMain.handle('camera-start', async (_event, payload = {}) => {
   try {
-    const id = String(payload.serialNumber || payload.cloudId || payload.id || payload.ip || '').trim();
-    const mode = isChamberImageCamera(payload) ? 'chamber-image' : 'rtsps';
-    const streamUrl = mode === 'rtsps' ? buildBambuRtspUrl(payload) : '';
+    const connectionPayload = resolveManagedCameraPayload(getAccountRuntime, payload);
+    const id = String(
+      connectionPayload.serialNumber
+      || connectionPayload.cloudId
+      || connectionPayload.id
+      || connectionPayload.ip
+      || '',
+    ).trim();
+    const mode = isChamberImageCamera(connectionPayload) ? 'chamber-image' : 'rtsps';
+    const streamUrl = mode === 'rtsps' ? buildBambuRtspUrl(connectionPayload) : '';
 
-    if (!id || !payload.ip || !payload.accessCode || (mode === 'rtsps' && !streamUrl)) {
+    if (!id || !connectionPayload.ip || !connectionPayload.accessCode || (mode === 'rtsps' && !streamUrl)) {
       return { success: false, error: '缺少打印机 IP 或访问码，无法打开摄像头' };
     }
 
     const port = await ensureCameraServer();
     cameraSources.set(id, {
       id,
-      name: payload.name || id,
-      model: payload.model || '',
-      modelCode: payload.modelCode || '',
-      ip: payload.ip,
-      accessCode: payload.accessCode,
+      name: connectionPayload.name || id,
+      model: connectionPayload.model || '',
+      modelCode: connectionPayload.modelCode || '',
+      ip: connectionPayload.ip,
+      accessCode: connectionPayload.accessCode,
       mode,
       url: streamUrl,
     });
@@ -1037,56 +1090,6 @@ ipcMain.handle('scan-printers', async () => {
     return await scanBambuPrinters({ logger: console });
   } catch (err) {
     throw new Error(err.message || '扫描打印机失败');
-  }
-});
-
-ipcMain.handle('cloud-login', async (_event, credentials) => (
-  bambuCloud.loginPassword(credentials)
-));
-
-ipcMain.handle('auth-session-get', async () => ({
-  success: true,
-  session: readAuthSession(app.getPath('userData'), getAuthSessionProtection()),
-}));
-
-ipcMain.handle('auth-session-set', async (_event, session) => {
-  try {
-    return {
-      success: true,
-      session: writeAuthSession(app.getPath('userData'), session, getAuthSessionProtection()),
-    };
-  } catch (err) {
-    return { success: false, error: err.message || '保存登录状态失败' };
-  }
-});
-
-ipcMain.handle('auth-session-clear', async () => {
-  try {
-    clearAuthSession(app.getPath('userData'));
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err.message || '清除登录状态失败' };
-  }
-});
-
-ipcMain.handle('request-verify-code', async (_event, payload) => (
-  bambuCloud.requestVerifyCode(payload)
-));
-
-ipcMain.handle('cloud-login-code', async (_event, payload) => (
-  bambuCloud.loginCode(payload)
-));
-
-ipcMain.handle('get-device-list', async (_event, { accessToken }) => {
-  try {
-    return await bambuCloud.listDevices(accessToken);
-  } catch (err) {
-    return {
-      success: false,
-      error: err.message,
-      status: err.status,
-      tokenInvalid: Boolean(err.tokenInvalid),
-    };
   }
 });
 
@@ -1139,7 +1142,12 @@ ipcMain.handle('notification-send', async (_event, { targets = [], payload }) =>
 });
 
 ipcMain.handle('mqtt-connect', async (_event, payload = {}) => {
-  return connectMqttForRenderer(mqttConnectionManager, payload, console);
+  try {
+    const connectionPayload = resolveManagedMqttPayload(getAccountRuntime, payload);
+    return connectMqttForRenderer(mqttConnectionManager, connectionPayload, console);
+  } catch (err) {
+    return { success: false, error: err.message || '无法读取已保存的打印机连接信息' };
+  }
 });
 
 ipcMain.handle('mqtt-disconnect', async (_event, { serialNumber } = {}) => {

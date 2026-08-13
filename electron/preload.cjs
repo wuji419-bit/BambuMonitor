@@ -59,14 +59,15 @@ function subscribeWindowBoundsSaveRequest(callback) {
 
 contextBridge.exposeInMainWorld('bambuApi', {
   isElectron: true,
-  auth: {
-    cloudLogin: (payload) => ipcRenderer.invoke('cloud-login', payload),
-    requestVerifyCode: (payload) => ipcRenderer.invoke('request-verify-code', payload),
-    cloudLoginCode: (payload) => ipcRenderer.invoke('cloud-login-code', payload),
-    getDeviceList: (payload) => ipcRenderer.invoke('get-device-list', payload),
-    getSavedSession: () => ipcRenderer.invoke('auth-session-get'),
-    saveSession: (payload) => ipcRenderer.invoke('auth-session-set', payload),
-    clearSavedSession: () => ipcRenderer.invoke('auth-session-clear'),
+  accounts: {
+    list: () => ipcRenderer.invoke('accounts-list'),
+    loginPassword: (payload) => ipcRenderer.invoke('accounts-login-password', payload),
+    requestVerifyCode: (payload) => ipcRenderer.invoke('accounts-code-request', payload),
+    loginCode: (payload) => ipcRenderer.invoke('accounts-login-code', payload),
+    updateRemark: (payload) => ipcRenderer.invoke('accounts-update-remark', payload),
+    reauthenticate: (payload) => ipcRenderer.invoke('accounts-reauthenticate', payload),
+    remove: (payload) => ipcRenderer.invoke('accounts-remove', payload),
+    refresh: (payload) => ipcRenderer.invoke('accounts-refresh', payload),
   },
   devices: {
     scanPrinters: () => ipcRenderer.invoke('scan-printers'),
@@ -109,5 +110,6 @@ contextBridge.exposeInMainWorld('bambuApi', {
     onMqttConnected: subscribe('mqtt-connected'),
     onMqttReconnecting: subscribe('mqtt-reconnecting'),
     onMqttDisconnected: subscribe('mqtt-disconnected'),
+    onAccountsChanged: subscribe('accounts-changed'),
   },
 });

@@ -193,6 +193,14 @@ function validateCode(value) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= 128;
 }
 
+function validateRemark(value) {
+  return typeof value === 'string' && value.length <= 80 && Array.from(value.trim()).length <= 40;
+}
+
+function validateAccountId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+}
+
 function maskAccount(account) {
   const value = String(account || '').trim();
   const at = value.indexOf('@');
@@ -206,6 +214,34 @@ function isMaskedAccount(value) {
     || /^\d{3}\*{4}\d{4}$/.test(value)
     || /^[\s\S]\*{3}@[\s\S]+$/u.test(value)
     || /^[\s\S]{2}\*{3}[\s\S]{2}$/u.test(value));
+}
+
+function projectPublicAccount(value) {
+  if (!isPlainObject(value) || !validateAccountId(value.accountId)) return null;
+  const accountMasked = isMaskedAccount(value.accountMasked) ? value.accountMasked : '***';
+  const remark = validateRemark(value.remark) ? value.remark.trim() : '';
+  const projected = {
+    accountId: value.accountId,
+    accountMasked,
+    remark,
+    label: remark || accountMasked,
+  };
+  if (Number.isSafeInteger(value.savedAt) && value.savedAt >= 0) projected.savedAt = value.savedAt;
+  if (Number.isSafeInteger(value.updatedAt) && value.updatedAt >= 0) projected.updatedAt = value.updatedAt;
+  return projected;
+}
+
+function projectAccountState(value) {
+  if (!isPlainObject(value) || !validateAccountId(value.accountId)) return null;
+  const connectionState = ['idle', 'syncing', 'connected', 'invalid', 'error'].includes(value.connectionState)
+    ? value.connectionState : 'error';
+  return {
+    accountId: value.accountId,
+    connectionState,
+    errorCode: typeof value.errorCode === 'string' && value.errorCode.length <= 128 ? value.errorCode : null,
+    syncedAt: Number.isSafeInteger(value.syncedAt) && value.syncedAt >= 0 ? value.syncedAt : null,
+    deviceCount: Number.isSafeInteger(value.deviceCount) && value.deviceCount >= 0 ? value.deviceCount : 0,
+  };
 }
 
 function decodeSegment(value) {
@@ -562,54 +598,92 @@ export function createHttpApp(deps = {}) {
     if (!hasOnlyKeys(body, [])) throw apiError(400, 'BAD_REQUEST', 'Invalid request');
   }
 
-  async function completeLogin(req, res, body, method) {
-    assertOrigin(req, trustProxy);
-    const expected = method === 'loginCode' ? ['account', 'code'] : ['account', 'password'];
-    if (!hasOnlyKeys(body, expected, { exact: true }) || !validateAccount(body.account)
+  function requireAccountSupport() {
+    const storeMethods = [
+      'listAccounts', 'getPrivateAccount', 'addAccount', 'updateRemark', 'reauthenticateAccount', 'removeAccount',
+    ];
+    const runtimeMethods = [
+      'getAccountStates', 'addAccount', 'updateAccount', 'updateAccountRemark', 'removeAccount',
+    ];
+    if (storeMethods.some((method) => typeof sessionStore[method] !== 'function')
+      || runtimeMethods.some((method) => typeof deviceRuntime[method] !== 'function')) {
+      throw apiError(501, 'ACCOUNT_MANAGEMENT_UNSUPPORTED', 'Account management is unavailable');
+    }
+  }
+
+  function accountSnapshot() {
+    requireAccountSupport();
+    const accounts = sessionStore.listAccounts().map(projectPublicAccount).filter(Boolean);
+    const states = deviceRuntime.getAccountStates().map(projectAccountState).filter(Boolean);
+    return { accounts, states };
+  }
+
+  async function authenticateCloud(req, body, method, { accountManagement = false, allowRemark = accountManagement } = {}) {
+    const secretField = method === 'loginCode' ? 'code' : 'password';
+    const allowed = ['account', secretField];
+    if (accountManagement) allowed.push('accountId');
+    if (allowRemark) allowed.push('remark');
+    if (!hasOnlyKeys(body, allowed)
+      || !Object.hasOwn(body, 'account') || !Object.hasOwn(body, secretField)
+      || !validateAccount(body.account)
       || method === 'loginCode' && !validateCode(body.code)
-      || method === 'loginPassword' && !validatePassword(body.password)) {
+      || method === 'loginPassword' && !validatePassword(body.password)
+      || Object.hasOwn(body, 'accountId') && !validateAccountId(body.accountId)
+      || Object.hasOwn(body, 'remark') && !validateRemark(body.remark)) {
       throw apiError(400, 'BAD_REQUEST', 'Invalid request');
     }
     enforceLimit(loginLimiter, limiterKey(req, body.account, trustProxy));
+    const payload = { account: body.account, [secretField]: body[secretField] };
     let result;
     try {
-      result = await cloud[method](body);
+      result = await cloud[method](payload);
     } finally {
-      if (Object.hasOwn(body, 'password')) body.password = '';
-      if (Object.hasOwn(body, 'code')) body.code = '';
+      payload[secretField] = '';
+      body[secretField] = '';
     }
     if (!result?.success || typeof result.accessToken !== 'string' || result.accessToken.length < 1
       || result.accessToken.length > 16_384) {
       result = null;
       throw apiError(401, 'AUTH_FAILED', 'Authentication failed');
     }
-    let accessToken = result.accessToken;
     let username = typeof result.username === 'string' ? result.username.trim().slice(0, 256) : '';
     if (!username && typeof cloud.getCloudUsername === 'function') {
       try {
-        const value = await cloud.getCloudUsername(accessToken);
+        const value = await cloud.getCloudUsername(result.accessToken);
         if (typeof value === 'string') username = value.trim().slice(0, 256);
       } catch {
         username = '';
       }
     }
-    const created = await sessionStore.create({ account: body.account, accessToken, username });
+    return {
+      account: body.account.trim(),
+      accessToken: result.accessToken,
+      username,
+      ...(Object.hasOwn(body, 'remark') ? { remark: body.remark.trim() } : {}),
+    };
+  }
+
+  async function completeLogin(req, res, body, method) {
+    assertOrigin(req, trustProxy);
+    const credentials = await authenticateCloud(req, body, method, { allowRemark: true });
+    let accessToken = credentials.accessToken;
+    const created = await sessionStore.create(credentials);
     if (typeof sessionStore.getPrivateAccounts === 'function') {
       const accounts = sessionStore.getPrivateAccounts();
       await deviceRuntime.start({ accounts: Array.isArray(accounts) ? accounts : [] });
     } else {
       const saved = typeof sessionStore.getBambuSession === 'function'
         ? sessionStore.getBambuSession()
-        : { accessToken, username };
-      await deviceRuntime.start({ accessToken: saved?.accessToken || accessToken, username: saved?.username || username });
+        : credentials;
+      await deviceRuntime.start({ accessToken: saved?.accessToken || accessToken, username: saved?.username || credentials.username });
     }
     accessToken = null;
-    result = null;
+    credentials.accessToken = null;
     const secure = requestIsSecure(req, { trustProxy });
     sendSuccess(res, {
       csrfToken: created.csrfToken,
       expiresAt: created.expiresAt,
-      accountMasked: maskAccount(created.account ?? body.account),
+      accountMasked: maskAccount(created.account ?? credentials.account),
     }, 200, { 'Set-Cookie': buildSessionCookie(created.sessionId, { secure }) });
   }
 
@@ -644,6 +718,148 @@ export function createHttpApp(deps = {}) {
       return sendSuccess(res, { authenticated: false }, 200, {
         'Set-Cookie': clearSessionCookie({ secure: requestIsSecure(req, { trustProxy }) }),
       });
+    }
+    return false;
+  }
+
+  async function completeAccountLogin(req, res, body, method) {
+    requireAccountSupport();
+    const auth = await requireSession(req);
+    assertMutation(req, auth);
+    const accountId = body?.accountId;
+    const credentials = await authenticateCloud(req, body, method, { accountManagement: true });
+    let publicAccount;
+    try {
+      if (accountId !== undefined && !sessionStore.getPrivateAccount(accountId)) {
+        throw apiError(404, 'ACCOUNT_NOT_FOUND', 'Account not found');
+      }
+      publicAccount = accountId
+        ? await sessionStore.reauthenticateAccount(accountId, credentials)
+        : await sessionStore.addAccount(credentials);
+      if (!publicAccount) throw apiError(404, 'ACCOUNT_NOT_FOUND', 'Account not found');
+      const privateAccount = sessionStore.getPrivateAccount(publicAccount.accountId);
+      if (!privateAccount) throw new Error('Persisted account is unavailable');
+      const alreadyRunning = deviceRuntime.getAccountStates()
+        .some((state) => state?.accountId === publicAccount.accountId);
+      if (accountId || alreadyRunning) {
+        if (!deviceRuntime.updateAccount(privateAccount)) throw new Error('Runtime account is unavailable');
+        await deviceRuntime.refresh({ accountId: publicAccount.accountId });
+      } else {
+        await deviceRuntime.addAccount(privateAccount);
+      }
+    } catch (error) {
+      if (error?.apiStatus) throw error;
+      if (error?.message === 'Cannot update credentials for a different account'
+        || error?.message === 'Invalid account input') {
+        throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      }
+      if (error?.message === 'Account limit reached') {
+        throw apiError(409, 'ACCOUNT_LIMIT_REACHED', 'Account limit reached');
+      }
+      throw error;
+    } finally {
+      credentials.accessToken = null;
+    }
+    return sendSuccess(res, { account: projectPublicAccount(publicAccount), ...accountSnapshot() });
+  }
+
+  async function accountRoutes(req, res, pathname) {
+    if (pathname === '/api/accounts' && req.method === 'GET') {
+      await requireSession(req);
+      return sendSuccess(res, accountSnapshot());
+    }
+    if (pathname === '/api/accounts/login' && req.method === 'POST') {
+      return completeAccountLogin(req, res, await jsonBody(req, limits.bodyBytes), 'loginPassword');
+    }
+    if (pathname === '/api/accounts/code/verify' && req.method === 'POST') {
+      return completeAccountLogin(req, res, await jsonBody(req, limits.bodyBytes), 'loginCode');
+    }
+    if (pathname === '/api/accounts/code/request' && req.method === 'POST') {
+      requireAccountSupport();
+      const auth = await requireSession(req);
+      assertMutation(req, auth);
+      const body = await jsonBody(req, limits.bodyBytes);
+      if (!hasOnlyKeys(body, ['account'], { exact: true }) || !validateAccount(body.account)) {
+        throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      }
+      enforceLimit(requestCodeLimiter, limiterKey(req, body.account, trustProxy));
+      const result = await cloud.requestVerifyCode({ account: body.account });
+      if (!result?.success) throw apiError(502, 'CODE_REQUEST_FAILED', 'Unable to request verification code');
+      return sendSuccess(res, { sent: true });
+    }
+    const refreshMatch = /^\/api\/accounts\/([^/]+)\/refresh$/.exec(pathname);
+    if (refreshMatch && req.method === 'POST') {
+      requireAccountSupport();
+      const auth = await requireSession(req);
+      assertMutation(req, auth);
+      await requireEmptyJson(req);
+      const accountId = decodeSegment(refreshMatch[1]);
+      if (!validateAccountId(accountId) || !sessionStore.getPrivateAccount(accountId)) {
+        throw apiError(404, 'ACCOUNT_NOT_FOUND', 'Account not found');
+      }
+      await deviceRuntime.refresh({ accountId });
+      return sendSuccess(res, accountSnapshot());
+    }
+    const accountMatch = /^\/api\/accounts\/([^/]+)$/.exec(pathname);
+    if (accountMatch && req.method === 'PATCH') {
+      requireAccountSupport();
+      const auth = await requireSession(req);
+      assertMutation(req, auth);
+      const accountId = decodeSegment(accountMatch[1]);
+      const body = await jsonBody(req, limits.bodyBytes);
+      if (!validateAccountId(accountId) || !hasOnlyKeys(body, ['remark'], { exact: true })
+        || !validateRemark(body.remark)) {
+        throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      }
+      const account = await sessionStore.updateRemark(accountId, body.remark);
+      if (!account) throw apiError(404, 'ACCOUNT_NOT_FOUND', 'Account not found');
+      deviceRuntime.updateAccountRemark(accountId, account);
+      return sendSuccess(res, { account: projectPublicAccount(account), ...accountSnapshot() });
+    }
+    if (accountMatch && req.method === 'DELETE') {
+      requireAccountSupport();
+      const auth = await requireSession(req);
+      assertMutation(req, auth);
+      await requireEmptyJson(req);
+      const accountId = decodeSegment(accountMatch[1]);
+      if (!validateAccountId(accountId)) throw apiError(400, 'BAD_REQUEST', 'Invalid request');
+      const removed = await sessionStore.removeAccount(accountId);
+      if (!removed) throw apiError(404, 'ACCOUNT_NOT_FOUND', 'Account not found');
+      let runtimeRemovalFailed = false;
+      try {
+        await deviceRuntime.removeAccount(accountId);
+      } catch (error) {
+        runtimeRemovalFailed = true;
+        logSafe(logger, 'warn', 'account-runtime-remove-failed', {
+          accountId,
+          errorName: error?.name || 'Error',
+        });
+      }
+      const accounts = sessionStore.listAccounts();
+      if (accounts.length === 0) {
+        try {
+          await deviceRuntime.stopSession();
+        } catch (error) {
+          logSafe(logger, 'warn', 'account-runtime-stop-failed', {
+            errorName: error?.name || 'Error',
+          });
+        }
+        closeAllSessionSockets(1008, 'Session ended');
+        return sendSuccess(res, { authenticated: false, removedAccountId: accountId, accounts: [], states: [] }, 200, {
+          'Set-Cookie': clearSessionCookie({ secure: requestIsSecure(req, { trustProxy }) }),
+        });
+      }
+      if (runtimeRemovalFailed && typeof sessionStore.getPrivateAccounts === 'function'
+        && typeof deviceRuntime.start === 'function') {
+        try {
+          await deviceRuntime.start({ accounts: sessionStore.getPrivateAccounts() });
+        } catch (error) {
+          logSafe(logger, 'warn', 'account-runtime-resync-failed', {
+            errorName: error?.name || 'Error',
+          });
+        }
+      }
+      return sendSuccess(res, { authenticated: true, removedAccountId: accountId, ...accountSnapshot() });
     }
     return false;
   }
@@ -951,8 +1167,9 @@ export function createHttpApp(deps = {}) {
   function knownApiPath(pathname) {
     return new Set([
       '/api/auth/login', '/api/auth/code/request', '/api/auth/code/verify', '/api/auth/logout',
+      '/api/accounts', '/api/accounts/login', '/api/accounts/code/request', '/api/accounts/code/verify',
       '/api/session', '/api/devices', '/api/devices/refresh', '/api/settings', '/api/notifications/test',
-    ]).has(pathname) || /^\/api\/(devices|cameras)\//.test(pathname);
+    ]).has(pathname) || /^\/api\/(accounts|devices|cameras)\//.test(pathname);
   }
 
   async function requestHandler(req, res) {
@@ -973,6 +1190,7 @@ export function createHttpApp(deps = {}) {
       }
       if (rawPath.startsWith('/api/')) {
         if (await authRoute(req, res, rawPath) !== false) return;
+        if (await accountRoutes(req, res, rawPath) !== false) return;
         if (await sessionAndDataRoutes(req, res, rawPath) !== false) return;
         if (await cameraRoutes(req, res, rawPath) !== false) return;
         if (knownApiPath(rawPath)) throw apiError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');

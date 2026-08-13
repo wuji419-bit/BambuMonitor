@@ -234,6 +234,126 @@ function createHarness(overrides = {}) {
   };
 }
 
+function createMultiAccountHarness() {
+  const operations = [];
+  const browserSessions = new Map([
+    [SESSION_ID, { accountMasked: 'f***@example.com', csrfToken: CSRF, expiresAt: 2_000_000_000_000 }],
+  ]);
+  const accounts = [{
+    accountId: 'first',
+    account: 'first@example.com',
+    accountMasked: 'f***@example.com',
+    remark: 'Office',
+    accessToken: 'first-token',
+    username: 'first-user',
+    savedAt: 100,
+    updatedAt: 100,
+  }];
+  const publicAccount = (account) => ({
+    accountId: account.accountId,
+    accountMasked: account.accountMasked,
+    remark: account.remark,
+    label: account.remark || account.accountMasked,
+    savedAt: account.savedAt,
+    updatedAt: account.updatedAt,
+  });
+  const sessionStore = {
+    async create() { throw new Error('not used'); },
+    async authenticate(id) { return browserSessions.get(id) ?? null; },
+    listAccounts: () => accounts.map((account) => structuredClone(publicAccount(account))),
+    getPrivateAccounts: () => structuredClone(accounts),
+    getPrivateAccount(accountId) {
+      return structuredClone(accounts.find((account) => account.accountId === accountId) ?? null);
+    },
+    async addAccount(input) {
+      operations.push(['persist-add', input.account]);
+      const existing = accounts.find((account) => account.account === input.account);
+      const account = existing ?? {
+        accountId: `account-${accounts.length + 1}`,
+        account: input.account,
+        accountMasked: input.account.startsWith('second') ? 's***@example.com' : '***',
+        remark: '',
+        savedAt: 200,
+        updatedAt: 200,
+      };
+      Object.assign(account, {
+        accessToken: input.accessToken,
+        username: input.username,
+        remark: Object.hasOwn(input, 'remark') ? input.remark.trim() : account.remark,
+        updatedAt: account.updatedAt + 1,
+      });
+      if (!existing) accounts.push(account);
+      return structuredClone(publicAccount(account));
+    },
+    async updateRemark(accountId, remark) {
+      operations.push(['persist-remark', accountId]);
+      const account = accounts.find((item) => item.accountId === accountId);
+      if (!account) return null;
+      account.remark = remark.trim();
+      account.updatedAt += 1;
+      return structuredClone(publicAccount(account));
+    },
+    async reauthenticateAccount(accountId, input) {
+      operations.push(['persist-reauth', accountId]);
+      const account = accounts.find((item) => item.accountId === accountId);
+      if (!account) return null;
+      if (account.account !== input.account) throw new Error('Cannot update credentials for a different account');
+      account.accessToken = input.accessToken;
+      account.username = input.username;
+      if (Object.hasOwn(input, 'remark')) account.remark = input.remark.trim();
+      account.updatedAt += 1;
+      return structuredClone(publicAccount(account));
+    },
+    async removeAccount(accountId) {
+      operations.push(['persist-remove', accountId]);
+      const index = accounts.findIndex((account) => account.accountId === accountId);
+      if (index < 0) return null;
+      const [removed] = accounts.splice(index, 1);
+      if (accounts.length === 0) browserSessions.clear();
+      return structuredClone(publicAccount(removed));
+    },
+    async clear() { accounts.length = 0; browserSessions.clear(); },
+  };
+  const harness = createHarness({ sessionStore });
+  const runtimeAccounts = new Map([['first', structuredClone(accounts[0])]]);
+  harness.calls.accountAdd = [];
+  harness.calls.accountUpdate = [];
+  harness.calls.accountRemark = [];
+  harness.calls.accountRemove = [];
+  harness.calls.accountRefresh = [];
+  harness.deviceRuntime.getAccountStates = () => [...runtimeAccounts.keys()].map((accountId) => ({
+    accountId, connectionState: 'connected', errorCode: null, syncedAt: 300, deviceCount: 1,
+  }));
+  harness.deviceRuntime.addAccount = async (account) => {
+    operations.push(['runtime-add', account.accountId]);
+    harness.calls.accountAdd.push(structuredClone(account));
+    runtimeAccounts.set(account.accountId, structuredClone(account));
+    return harness.deviceRuntime.snapshot();
+  };
+  harness.deviceRuntime.updateAccount = (account) => {
+    operations.push(['runtime-update', account.accountId]);
+    harness.calls.accountUpdate.push(structuredClone(account));
+    runtimeAccounts.set(account.accountId, structuredClone(account));
+    return harness.deviceRuntime.getAccountStates().find((state) => state.accountId === account.accountId);
+  };
+  harness.deviceRuntime.updateAccountRemark = (accountId, account) => {
+    operations.push(['runtime-remark', accountId]);
+    harness.calls.accountRemark.push([accountId, structuredClone(account)]);
+    return harness.deviceRuntime.getAccountStates().find((state) => state.accountId === accountId);
+  };
+  harness.deviceRuntime.removeAccount = (accountId) => {
+    operations.push(['runtime-remove', accountId]);
+    harness.calls.accountRemove.push(accountId);
+    return runtimeAccounts.delete(accountId);
+  };
+  harness.deviceRuntime.refresh = async (options = {}) => {
+    operations.push(['runtime-refresh', options.accountId ?? null]);
+    harness.calls.accountRefresh.push(structuredClone(options));
+    return harness.deviceRuntime.snapshot();
+  };
+  return { ...harness, accounts, browserSessions, operations };
+}
+
 async function startHarness(harness) {
   const returned = harness.app.listen(0, '127.0.0.1');
   assert.equal(returned, harness.app.server);
@@ -390,13 +510,14 @@ test('password login enforces origin and exact bounded JSON then creates a secur
 
   const loggedIn = await request(base, '/api/auth/login', {
     method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ account: 'test@example.com', password: 'private-password' }),
+    body: JSON.stringify({ account: 'test@example.com', password: 'private-password', remark: '  Office  ' }),
   });
   assert.equal(loggedIn.response.status, 200);
   assert.match(loggedIn.response.headers.get('set-cookie'), /^bambu_session=.*HttpOnly; SameSite=Lax/);
   assert.deepEqual(Object.keys(loggedIn.body.data).sort(), ['accountMasked', 'csrfToken', 'expiresAt']);
   assert.equal(JSON.stringify(loggedIn.body).includes('private-access-token'), false);
   assert.equal(harness.calls.cloudRaw[0].password, '');
+  assert.equal(harness.sessionStore.saved.remark, 'Office');
   assert.deepEqual(harness.calls.start, [{ accessToken: 'private-access-token', username: 'cloud-user' }]);
 });
 
@@ -466,6 +587,136 @@ test('multi-account login preserves existing sockets and starts every stored acc
   assert.equal((await secondUpdate).devices[0].dev_id, 'NEW_ACCOUNT_DEVICE');
   assert.equal(oldSocket.readyState, WebSocket.OPEN);
   await closeSocket(oldSocket);
+});
+
+test('authenticated browser can list, add, rename, refresh, and remove another account safely', async (t) => {
+  const harness = createMultiAccountHarness();
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const listed = await request(base, '/api/accounts', { headers: { Cookie: cookie() } });
+  assert.equal(listed.response.status, 200);
+  assert.deepEqual(listed.body.data.accounts.map(({ accountId, label }) => ({ accountId, label })), [
+    { accountId: 'first', label: 'Office' },
+  ]);
+  assert.equal(JSON.stringify(listed.body).includes('first@example.com'), false);
+  assert.equal(JSON.stringify(listed.body).includes('first-token'), false);
+
+  const missingCsrf = await request(base, '/api/accounts/login', {
+    method: 'POST',
+    headers: { Cookie: cookie(), Origin: base, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account: 'second@example.com', password: 'private-password' }),
+  });
+  assert.equal(missingCsrf.response.status, 403);
+
+  const added = await request(base, '/api/accounts/login', {
+    method: 'POST', headers: apiHeaders(base),
+    body: JSON.stringify({ account: 'second@example.com', password: 'private-password', remark: 'Workshop' }),
+  });
+  assert.equal(added.response.status, 200);
+  assert.equal(added.response.headers.get('set-cookie'), null);
+  assert.deepEqual(added.body.data.account, {
+    accountId: 'account-2', accountMasked: 's***@example.com', remark: 'Workshop', label: 'Workshop', savedAt: 200, updatedAt: 201,
+  });
+  assert.equal(JSON.stringify(added.body).includes('second@example.com'), false);
+  assert.equal(JSON.stringify(added.body).includes('private-access-token'), false);
+  assert.deepEqual(harness.operations.slice(-2), [['persist-add', 'second@example.com'], ['runtime-add', 'account-2']]);
+
+  const renamed = await request(base, '/api/accounts/account-2', {
+    method: 'PATCH', headers: apiHeaders(base), body: JSON.stringify({ remark: '  Studio  ' }),
+  });
+  assert.equal(renamed.response.status, 200);
+  assert.equal(renamed.body.data.account.label, 'Studio');
+  assert.deepEqual(harness.operations.slice(-2), [['persist-remark', 'account-2'], ['runtime-remark', 'account-2']]);
+
+  const refreshed = await request(base, '/api/accounts/account-2/refresh', {
+    method: 'POST', headers: apiHeaders(base), body: '{}',
+  });
+  assert.equal(refreshed.response.status, 200);
+  assert.deepEqual(harness.calls.accountRefresh.at(-1), { accountId: 'account-2' });
+
+  const removed = await request(base, '/api/accounts/account-2', {
+    method: 'DELETE', headers: apiHeaders(base), body: '{}',
+  });
+  assert.equal(removed.response.status, 200);
+  assert.equal(removed.body.data.authenticated, true);
+  assert.deepEqual(removed.body.data.accounts.map(({ accountId }) => accountId), ['first']);
+  assert.deepEqual(harness.operations.slice(-2), [['persist-remove', 'account-2'], ['runtime-remove', 'account-2']]);
+  assert.ok(harness.browserSessions.has(SESSION_ID));
+});
+
+test('account verification reauthenticates only the selected account and never returns credentials', async (t) => {
+  const harness = createMultiAccountHarness();
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const requested = await request(base, '/api/accounts/code/request', {
+    method: 'POST', headers: apiHeaders(base), body: JSON.stringify({ account: 'first@example.com' }),
+  });
+  assert.equal(requested.response.status, 200);
+
+  const verified = await request(base, '/api/accounts/code/verify', {
+    method: 'POST', headers: apiHeaders(base),
+    body: JSON.stringify({ accountId: 'first', account: 'first@example.com', code: '123456' }),
+  });
+  assert.equal(verified.response.status, 200);
+  assert.equal(verified.body.data.account.accountId, 'first');
+  assert.equal(JSON.stringify(verified.body).includes('private-code-token'), false);
+  assert.equal(JSON.stringify(verified.body).includes('first@example.com'), false);
+  assert.equal(harness.calls.cloudRaw.at(-1).code, '');
+  assert.deepEqual(harness.operations.slice(-3), [
+    ['persist-reauth', 'first'], ['runtime-update', 'first'], ['runtime-refresh', 'first'],
+  ]);
+});
+
+test('removing the final account clears the browser session, cookie, sockets, and runtime', async (t) => {
+  const harness = createMultiAccountHarness();
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+  const socket = await openSocket(base);
+  await nextMessage(socket);
+  const closed = once(socket, 'close');
+
+  const removed = await request(base, '/api/accounts/first', {
+    method: 'DELETE', headers: apiHeaders(base), body: '{}',
+  });
+  assert.equal(removed.response.status, 200);
+  assert.equal(removed.body.data.authenticated, false);
+  assert.match(removed.response.headers.get('set-cookie'), /bambu_session=;.*Max-Age=0/);
+  const [code] = await closed;
+  assert.equal(code, 1008);
+  assert.equal(harness.calls.runtimeStopSession, 1);
+  assert.equal((await request(base, '/api/accounts', { headers: { Cookie: cookie() } })).response.status, 401);
+});
+
+test('removing the final account clears browser access even when runtime cleanup fails', async (t) => {
+  const harness = createMultiAccountHarness();
+  harness.deviceRuntime.removeAccount = async (accountId) => {
+    harness.calls.accountRemove.push(accountId);
+    throw new Error('runtime remove failed');
+  };
+  harness.deviceRuntime.stopSession = async () => {
+    harness.calls.runtimeStopSession += 1;
+    throw new Error('runtime stop failed');
+  };
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+  const socket = await openSocket(base);
+  await nextMessage(socket);
+  const closed = once(socket, 'close');
+
+  const removed = await request(base, '/api/accounts/first', {
+    method: 'DELETE', headers: apiHeaders(base), body: '{}',
+  });
+
+  assert.equal(removed.response.status, 200);
+  assert.equal(removed.body.data.authenticated, false);
+  assert.match(removed.response.headers.get('set-cookie'), /bambu_session=;.*Max-Age=0/);
+  const [code] = await closed;
+  assert.equal(code, 1008);
+  assert.deepEqual(harness.calls.accountRemove, ['first']);
+  assert.equal(harness.calls.runtimeStopSession, 1);
+  assert.equal((await request(base, '/api/accounts', { headers: { Cookie: cookie() } })).response.status, 401);
 });
 
 test('same-account login keeps existing websocket subscriptions and session cap ownership', async (t) => {
