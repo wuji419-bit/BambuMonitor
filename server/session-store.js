@@ -1,11 +1,21 @@
 import * as defaultCrypto from 'node:crypto';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const {
+  createAccountRecord,
+  toPublicAccount,
+  updateAccountRecord,
+  validateAccountRecord,
+} = require('../core/account-records.cjs');
 
 const SESSION_NAME = 'session.enc';
-const CURRENT_VERSION = 1;
+const CURRENT_VERSION = 2;
 const SESSION_BYTES = 32;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MAX_SESSIONS = 20;
+const MAX_ACCOUNTS = 50;
 const MAX_COLLISION_ATTEMPTS = 8;
 const MAX_ACCOUNT_LENGTH = 320;
 const MAX_USERNAME_LENGTH = 256;
@@ -50,22 +60,22 @@ function validateUsername(value) {
   return typeof value === 'string' && value.length <= MAX_USERNAME_LENGTH;
 }
 
-function normalizeInput(value) {
+function normalizeInput(value, { allowEmptyAccount = false } = {}) {
   const username = isPlainObject(value) && Object.hasOwn(value, 'username') ? value.username : '';
   if (!isPlainObject(value)
     || !validateText(value.account, MAX_ACCOUNT_LENGTH)
+    || (!allowEmptyAccount && value.account.trim().length === 0)
     || !validateText(value.accessToken, MAX_ACCESS_TOKEN_LENGTH)
+    || value.accessToken.trim().length === 0
     || !validateUsername(username)) {
-    throw namedError('Invalid session input');
+    throw namedError('Invalid account input');
   }
-  return {
-    account: value.account,
-    accessToken: value.accessToken,
-    username,
-  };
+  const input = { account: value.account, accessToken: value.accessToken, username };
+  if (Object.hasOwn(value, 'remark')) input.remark = value.remark;
+  return input;
 }
 
-function validateBambu(value) {
+function validateLegacyBambu(value) {
   if (!hasExactKeys(value, ['account', 'accessToken', 'username', 'savedAt'])
     || !validateText(value.account, MAX_ACCOUNT_LENGTH)
     || !validateText(value.accessToken, MAX_ACCESS_TOKEN_LENGTH)
@@ -91,30 +101,57 @@ function validateSession(value) {
   return { ...value };
 }
 
-function validateState(value) {
-  if (!isPlainObject(value) || value.version !== CURRENT_VERSION) {
-    if (Number.isInteger(value?.version) && value.version !== CURRENT_VERSION) {
-      throw namedError('Unsupported session store version');
-    }
+function validateSessions(sessions) {
+  if (!Array.isArray(sessions) || sessions.length > MAX_SESSIONS) {
     throw namedError('Invalid session store');
   }
-  if (!hasExactKeys(value, ['version', 'bambu', 'sessions']) || !Array.isArray(value.sessions)
-    || value.sessions.length > MAX_SESSIONS) {
+  const validated = sessions.map(validateSession);
+  if (new Set(validated.map(({ idHash }) => idHash)).size !== validated.length) {
     throw namedError('Invalid session store');
   }
-  const bambu = validateBambu(value.bambu);
-  const sessions = value.sessions.map(validateSession);
-  if (new Set(sessions.map(({ idHash }) => idHash)).size !== sessions.length) {
-    throw namedError('Invalid session store');
-  }
-  return { version: CURRENT_VERSION, bambu, sessions };
+  return validated;
 }
 
-function validateDependencies(storage, now, randomBytes, cryptoApi) {
+function validateV1State(value) {
+  if (!hasExactKeys(value, ['version', 'bambu', 'sessions']) || value.version !== 1) {
+    throw namedError('Invalid session store');
+  }
+  return { version: 1, bambu: validateLegacyBambu(value.bambu), sessions: validateSessions(value.sessions) };
+}
+
+function validateV2State(value) {
+  if (!hasExactKeys(value, ['version', 'accounts', 'sessions']) || value.version !== CURRENT_VERSION
+    || !Array.isArray(value.accounts) || value.accounts.length === 0 || value.accounts.length > MAX_ACCOUNTS) {
+    throw namedError('Invalid session store');
+  }
+  let accounts;
+  try {
+    accounts = value.accounts.map(validateAccountRecord);
+  } catch {
+    throw namedError('Invalid session store');
+  }
+  const accountIds = new Set(accounts.map(({ accountId }) => accountId));
+  const rawAccounts = new Set(accounts.map(({ account }) => account));
+  if (accountIds.size !== accounts.length || rawAccounts.size !== accounts.length) {
+    throw namedError('Invalid session store');
+  }
+  return { version: CURRENT_VERSION, accounts, sessions: validateSessions(value.sessions) };
+}
+
+function validateLoadedState(value) {
+  if (!isPlainObject(value) || !Number.isInteger(value.version)) {
+    throw namedError('Invalid session store');
+  }
+  if (value.version === 1) return validateV1State(value);
+  if (value.version === CURRENT_VERSION) return validateV2State(value);
+  throw namedError('Unsupported session store version');
+}
+
+function validateDependencies(storage, now, randomBytes, randomId, cryptoApi) {
   const storageMethods = ['getSecretKey', 'readEncrypted', 'writeEncrypted', 'remove'];
   const cryptoMethods = ['createHash', 'createHmac', 'timingSafeEqual'];
   if (!storage || storageMethods.some((method) => typeof storage[method] !== 'function')
-    || typeof now !== 'function' || typeof randomBytes !== 'function'
+    || typeof now !== 'function' || typeof randomBytes !== 'function' || typeof randomId !== 'function'
     || !cryptoApi || cryptoMethods.some((method) => typeof cryptoApi[method] !== 'function')) {
     throw namedError('Invalid session store dependencies');
   }
@@ -137,28 +174,70 @@ function evictSessions(sessions, limit = MAX_SESSIONS) {
   return sessions.filter(({ idHash }) => !evicted.has(idHash));
 }
 
-function cloneBambu(state) {
-  return state === null ? null : structuredClone(state.bambu);
+function cloneAccount(account) {
+  return account === null ? null : structuredClone(account);
 }
 
 export async function createSessionStore({
   storage,
   now = Date.now,
   randomBytes = defaultCrypto.randomBytes,
+  randomId = defaultCrypto.randomUUID,
   cryptoApi = defaultCrypto,
 }) {
-  validateDependencies(storage, now, randomBytes, cryptoApi);
+  validateDependencies(storage, now, randomBytes, randomId, cryptoApi);
   const secretKey = storage.getSecretKey();
   if (!Buffer.isBuffer(secretKey) || secretKey.length !== SESSION_BYTES) {
     secretKey?.fill?.(0);
     throw namedError('Invalid session store dependencies');
   }
 
+  function createUniqueAccount(input, timestamp, accounts = []) {
+    for (let attempt = 0; attempt < MAX_COLLISION_ATTEMPTS; attempt += 1) {
+      let candidate;
+      try {
+        candidate = createAccountRecord(input, { randomId, timestamp });
+      } catch {
+        throw namedError('Invalid account input');
+      }
+      if (!accounts.some(({ accountId }) => accountId === candidate.accountId)) return candidate;
+    }
+    throw namedError('Unable to create unique account');
+  }
+
+  function migrateV1State(legacy) {
+    const bambu = legacy.bambu;
+    return {
+      version: CURRENT_VERSION,
+      accounts: [createUniqueAccount({ ...bambu, remark: '' }, bambu.savedAt)],
+      sessions: legacy.sessions,
+    };
+  }
+
   let state;
   try {
     const loaded = await storage.readEncrypted(SESSION_NAME);
-    state = loaded === null ? null : validateState(loaded);
-    if (state !== null) {
+    if (loaded === null) {
+      state = null;
+    } else {
+      const validated = validateLoadedState(loaded);
+      if (validated.version === 1) {
+        const migrated = migrateV1State(validated);
+        try {
+          await storage.writeEncrypted(SESSION_NAME, migrated);
+        } catch (error) {
+          try {
+            const onDisk = await storage.readEncrypted(SESSION_NAME);
+            if (onDisk !== null) validateV2State(onDisk);
+          } catch {
+            // The original storage failure communicates the migration outcome.
+          }
+          throw error;
+        }
+        state = migrated;
+      } else {
+        state = validated;
+      }
       const timestamp = readTime(now);
       const pruned = pruneSessions(state, timestamp);
       if (pruned.changed) {
@@ -185,7 +264,7 @@ export async function createSessionStore({
       if (loaded === null) {
         state = null;
       } else {
-        const validated = validateState(loaded);
+        const validated = validateV2State(loaded);
         state = pruneSessions(validated, readTime(now)).state;
       }
     } catch {
@@ -287,24 +366,125 @@ export async function createSessionStore({
   }
 
   function publicSession(sessionId, session) {
+    const first = state.accounts[0];
     return {
-      account: state.bambu.account,
-      username: state.bambu.username,
+      accountMasked: first.accountMasked,
+      username: first.username,
       csrfToken: csrfFor(sessionId),
       expiresAt: session.expiresAt,
     };
   }
 
+  function upsertAccount(accounts, input, timestamp) {
+    const existingIndex = accounts.findIndex(({ account }) => account === input.account.trim());
+    if (existingIndex !== -1) {
+      let updated;
+      try {
+        updated = updateAccountRecord(accounts[existingIndex], input, { timestamp });
+      } catch (error) {
+        throw error?.message === 'Cannot update credentials for a different account'
+          ? error : namedError('Invalid account input');
+      }
+      return {
+        accounts: accounts.map((account, index) => index === existingIndex ? updated : account),
+        account: updated,
+      };
+    }
+    if (accounts.length >= MAX_ACCOUNTS) throw namedError('Account limit reached');
+    const created = createUniqueAccount(input, timestamp, accounts);
+    return { accounts: [...accounts, created], account: created };
+  }
+
   return {
+    listAccounts() {
+      return state === null ? [] : state.accounts.map((account) => structuredClone(toPublicAccount(account)));
+    },
+
+    getPrivateAccounts() {
+      return state === null ? [] : state.accounts.map((account) => cloneAccount(account));
+    },
+
+    getPrivateAccount(accountId) {
+      if (state === null || typeof accountId !== 'string') return null;
+      return cloneAccount(state.accounts.find((account) => account.accountId === accountId) ?? null);
+    },
+
+    addAccount(input) {
+      return serialize(async () => {
+        const accountInput = normalizeInput(input);
+        const timestamp = readTime(now);
+        const currentAccounts = state?.accounts ?? [];
+        const upserted = upsertAccount(currentAccounts, accountInput, timestamp);
+        const candidate = {
+          version: CURRENT_VERSION,
+          accounts: upserted.accounts,
+          sessions: state?.sessions ?? [],
+        };
+        await persistState(candidate);
+        return structuredClone(toPublicAccount(upserted.account));
+      });
+    },
+
+    updateRemark(accountId, remark) {
+      return serialize(async () => {
+        if (state === null || typeof accountId !== 'string') return null;
+        const index = state.accounts.findIndex((account) => account.accountId === accountId);
+        if (index === -1) return null;
+        const timestamp = readTime(now);
+        let updated;
+        try {
+          updated = updateAccountRecord(state.accounts[index], { remark }, { timestamp });
+        } catch {
+          throw namedError('Invalid account input');
+        }
+        const candidate = { ...state, accounts: state.accounts.map((account, current) => current === index ? updated : account) };
+        await persistState(candidate);
+        return structuredClone(toPublicAccount(updated));
+      });
+    },
+
+    reauthenticateAccount(accountId, input) {
+      return serialize(async () => {
+        if (state === null || typeof accountId !== 'string') return null;
+        const index = state.accounts.findIndex((account) => account.accountId === accountId);
+        if (index === -1) return null;
+        const accountInput = normalizeInput(input);
+        const timestamp = readTime(now);
+        let updated;
+        try {
+          updated = updateAccountRecord(state.accounts[index], accountInput, { timestamp });
+        } catch (error) {
+          throw error?.message === 'Cannot update credentials for a different account'
+            ? error : namedError('Invalid account input');
+        }
+        const candidate = { ...state, accounts: state.accounts.map((account, current) => current === index ? updated : account) };
+        await persistState(candidate);
+        return structuredClone(toPublicAccount(updated));
+      });
+    },
+
+    removeAccount(accountId) {
+      return serialize(async () => {
+        if (state === null || typeof accountId !== 'string') return null;
+        const index = state.accounts.findIndex((account) => account.accountId === accountId);
+        if (index === -1) return null;
+        const removed = state.accounts[index];
+        if (state.accounts.length === 1) {
+          await removeState();
+        } else {
+          await persistState({ ...state, accounts: state.accounts.filter((_, current) => current !== index) });
+        }
+        return structuredClone(toPublicAccount(removed));
+      });
+    },
+
     create(input) {
       return serialize(async () => {
-        const bambuInput = normalizeInput(input);
+        const accountInput = normalizeInput(input);
         const timestamp = readTime(now);
         const pruned = pruneSessions(state, timestamp).state;
-        const sameIdentity = pruned !== null
-          && pruned.bambu.account === bambuInput.account;
-        const priorSessions = sameIdentity ? pruned.sessions : [];
-        const collisionSessions = pruned === null ? [] : pruned.sessions;
+        const upserted = upsertAccount(pruned?.accounts ?? [], accountInput, timestamp);
+        const collisionSessions = pruned?.sessions ?? [];
         const { sessionId, idHash } = newSessionId(collisionSessions);
         const session = {
           idHash,
@@ -314,15 +494,15 @@ export async function createSessionStore({
         };
         const candidate = {
           version: CURRENT_VERSION,
-          bambu: { ...bambuInput, savedAt: timestamp },
-          sessions: [...evictSessions(priorSessions, MAX_SESSIONS - 1), session],
+          accounts: upserted.accounts,
+          sessions: [...evictSessions(collisionSessions, MAX_SESSIONS - 1), session],
         };
         await persistState(candidate);
         return {
           sessionId,
           csrfToken: csrfFor(sessionId),
           expiresAt: session.expiresAt,
-          account: bambuInput.account,
+          account: upserted.account.account,
         };
       });
     },
@@ -336,22 +516,14 @@ export async function createSessionStore({
         const idHash = hashSessionId(parsedId);
         const session = findSession(pruned.state.sessions, idHash);
         if (session === null) {
-          if (pruned.changed) {
-            await persistState(pruned.state);
-          }
+          if (pruned.changed) await persistState(pruned.state);
           return null;
         }
         if (!renew || timestamp - session.lastSeenAt < RENEWAL_INTERVAL_MS) {
-          if (pruned.changed) {
-            await persistState(pruned.state);
-          }
+          if (pruned.changed) await persistState(pruned.state);
           return publicSession(parsedId, session);
         }
-        const renewed = {
-          ...session,
-          lastSeenAt: timestamp,
-          expiresAt: timestamp + SESSION_TTL_MS,
-        };
+        const renewed = { ...session, lastSeenAt: timestamp, expiresAt: timestamp + SESSION_TTL_MS };
         const candidate = {
           ...pruned.state,
           sessions: pruned.state.sessions.map((entry) => entry.idHash === session.idHash ? renewed : entry),
@@ -362,12 +534,12 @@ export async function createSessionStore({
     },
 
     getBambuSession() {
-      return cloneBambu(state);
+      return cloneAccount(state?.accounts[0] ?? null);
     },
 
     clear() {
       return serialize(async () => {
-        await removeState();
+        if (state !== null) await removeState();
       });
     },
   };
