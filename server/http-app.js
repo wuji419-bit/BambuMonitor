@@ -593,23 +593,16 @@ export function createHttpApp(deps = {}) {
         username = '';
       }
     }
-    const priorBambuSession = typeof sessionStore.getBambuSession === 'function'
-      ? sessionStore.getBambuSession()
-      : null;
-    const priorAccount = typeof priorBambuSession?.account === 'string'
-      ? priorBambuSession.account
-      : null;
     const created = await sessionStore.create({ account: body.account, accessToken, username });
-    const saved = typeof sessionStore.getBambuSession === 'function'
-      ? sessionStore.getBambuSession()
-      : { accessToken, username };
-    const savedAccount = typeof saved?.account === 'string'
-      ? saved.account
-      : created.account ?? body.account;
-    if (priorAccount !== null && priorAccount !== savedAccount) {
-      terminateAllSessionSockets();
+    if (typeof sessionStore.getPrivateAccounts === 'function') {
+      const accounts = sessionStore.getPrivateAccounts();
+      await deviceRuntime.start({ accounts: Array.isArray(accounts) ? accounts : [] });
+    } else {
+      const saved = typeof sessionStore.getBambuSession === 'function'
+        ? sessionStore.getBambuSession()
+        : { accessToken, username };
+      await deviceRuntime.start({ accessToken: saved?.accessToken || accessToken, username: saved?.username || username });
     }
-    await deviceRuntime.start({ accessToken: saved?.accessToken || accessToken, username: saved?.username || username });
     accessToken = null;
     result = null;
     const secure = requestIsSecure(req, { trustProxy });
@@ -1026,13 +1019,6 @@ export function createHttpApp(deps = {}) {
 
   function closeAllSessionSockets(code = 1008, reason = 'Session invalid') {
     for (const sessionId of [...wsBySession.keys()]) closeSessionSockets(sessionId, code, reason);
-  }
-
-  function terminateAllSessionSockets() {
-    for (const [ws, cleanup] of [...wsCleanup]) {
-      cleanup();
-      try { ws.terminate(); } catch { /* already closed */ }
-    }
   }
 
   function safeWsSend(ws, event, afterSend) {

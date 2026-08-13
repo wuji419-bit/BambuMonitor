@@ -400,8 +400,31 @@ test('password login enforces origin and exact bounded JSON then creates a secur
   assert.deepEqual(harness.calls.start, [{ accessToken: 'private-access-token', username: 'cloud-user' }]);
 });
 
-test('cross-account login synchronously removes old websocket subscriptions before runtime start', async (t) => {
+test('multi-account login preserves existing sockets and starts every stored account', async (t) => {
+  const accounts = [{
+    accountId: 'first', account: 'first@example.com', accountMasked: 'f***@example.com', remark: 'Office', accessToken: 'first-token', username: 'first-user',
+  }];
   const harness = createHarness({
+    sessionStore: {
+      async create(input) {
+        const existing = accounts.findIndex((account) => account.account === input.account);
+        const record = {
+          accountId: existing >= 0 ? accounts[existing].accountId : 'second',
+          account: input.account,
+          accountMasked: input.account === 'second@example.com' ? 's***@example.com' : '***',
+          remark: existing >= 0 ? accounts[existing].remark : '',
+          accessToken: input.accessToken,
+          username: input.username,
+        };
+        if (existing >= 0) accounts.splice(existing, 1, record); else accounts.push(record);
+        return { sessionId: SESSION_ID, account: input.account, csrfToken: CSRF, expiresAt: 2_000_000_000_000 };
+      },
+      async authenticate(id) {
+        return id === SESSION_ID ? { account: 'test@example.com', csrfToken: CSRF, expiresAt: 2_000_000_000_000 } : null;
+      },
+      getPrivateAccounts: () => structuredClone(accounts),
+      async clear() {},
+    },
     startSnapshot: {
       type: 'devices.snapshot',
       devices: [{ dev_id: 'NEW_ACCOUNT_DEVICE', name: 'New account printer' }],
@@ -415,18 +438,34 @@ test('cross-account login synchronously removes old websocket subscriptions befo
   await nextMessage(oldSocket);
   assert.equal(harness.runtimeListeners.size, 1);
 
+  const firstUpdate = nextMessage(oldSocket);
   const login = await request(base, '/api/auth/login', {
     method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ account: 'new-account@example.com', password: 'private-password' }),
+    body: JSON.stringify({ account: 'second@example.com', password: 'private-password' }),
   });
   assert.equal(login.response.status, 200);
-  assert.deepEqual(harness.calls.startListenerCounts, [0]);
-  assert.equal(harness.runtimeListeners.size, 0);
-  await waitFor(() => oldSocket.readyState === WebSocket.CLOSED, 'cross-account websocket close', 20);
-  assert.equal(
-    oldSocket.testMessages.some((message) => JSON.stringify(message).includes('NEW_ACCOUNT_DEVICE')),
-    false,
-  );
+  assert.equal(login.body.data.accountMasked, 's***@example.com');
+  assert.deepEqual(harness.calls.startListenerCounts, [1]);
+  assert.deepEqual(harness.calls.start, [{ accounts: [
+    { accountId: 'first', account: 'first@example.com', accountMasked: 'f***@example.com', remark: 'Office', accessToken: 'first-token', username: 'first-user' },
+    { accountId: 'second', account: 'second@example.com', accountMasked: 's***@example.com', remark: '', accessToken: 'private-access-token', username: 'cloud-user' },
+  ] }]);
+  assert.equal((await firstUpdate).devices[0].dev_id, 'NEW_ACCOUNT_DEVICE');
+  assert.equal(oldSocket.readyState, WebSocket.OPEN);
+  assert.equal(harness.runtimeListeners.size, 1);
+
+  const secondUpdate = nextMessage(oldSocket);
+  const relogin = await request(base, '/api/auth/login', {
+    method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account: 'second@example.com', password: 'private-password' }),
+  });
+  assert.equal(relogin.response.status, 200);
+  assert.equal(relogin.body.data.accountMasked, 's***@example.com');
+  assert.deepEqual(harness.calls.startListenerCounts, [1, 1]);
+  assert.deepEqual(harness.calls.start[1], harness.calls.start[0]);
+  assert.equal((await secondUpdate).devices[0].dev_id, 'NEW_ACCOUNT_DEVICE');
+  assert.equal(oldSocket.readyState, WebSocket.OPEN);
+  await closeSocket(oldSocket);
 });
 
 test('same-account login keeps existing websocket subscriptions and session cap ownership', async (t) => {
