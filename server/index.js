@@ -136,6 +136,7 @@ function unavailableDependencies() {
       authenticate: throwUnavailable,
       clear: throwUnavailable,
       getBambuSession: () => null,
+      getPrivateAccounts: () => [],
     },
     deviceRuntime: {
       start: throwUnavailable,
@@ -246,7 +247,7 @@ function createController({
   readiness,
   timers,
   writer,
-  restoredSession = null,
+  restoredAccounts = [],
   restoreTimeoutMs = RESTORE_TIMEOUT_MS,
 }) {
   let closingPromise = null;
@@ -257,7 +258,7 @@ function createController({
 
   const startRestoration = () => {
     if (restorationPromise) return restorationPromise;
-    if (!restoredSession) {
+    if (restoredAccounts.length === 0) {
       readiness.ready = !readiness.degraded;
       readiness.syncing = false;
       restorationPromise = Promise.resolve({ timedOut: false, aborted: false, skipped: true });
@@ -288,11 +289,7 @@ function createController({
 
     let restoreWork;
     try {
-      restoreWork = Promise.resolve(components.deviceRuntime.start({
-        accessToken: restoredSession.accessToken,
-        username: typeof restoredSession.username === 'string' ? restoredSession.username : '',
-        signal,
-      }));
+      restoreWork = Promise.resolve(components.deviceRuntime.start({ accounts: restoredAccounts, signal }));
     } catch (error) {
       restoreWork = Promise.reject(error);
     }
@@ -488,19 +485,18 @@ export async function composeServer({
       distDir: DIST_DIR,
     });
 
-    const session = components.sessionStore.getBambuSession?.();
-    const restoredSession = session && typeof session.accessToken === 'string' && session.accessToken.length > 0
-      ? session
-      : null;
-    readiness.ready = !restoredSession;
-    readiness.syncing = Boolean(restoredSession);
+    const restoredAccounts = components.sessionStore.getPrivateAccounts?.()
+      ?.filter((account) => account && typeof account.accessToken === 'string' && account.accessToken.length > 0)
+      ?? [];
+    readiness.ready = restoredAccounts.length === 0;
+    readiness.syncing = restoredAccounts.length > 0;
     return createController({
       app,
       components,
       readiness,
       timers,
       writer,
-      restoredSession,
+      restoredAccounts,
       restoreTimeoutMs,
     });
   } catch (error) {

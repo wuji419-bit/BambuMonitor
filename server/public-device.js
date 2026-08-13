@@ -27,6 +27,7 @@ function projectValue(value) {
   if (!value || typeof value !== 'object') return value;
   const projected = {};
   for (const [key, child] of Object.entries(value)) {
+    if (normalizedKey(key) === 'sources') continue;
     if (PRIVATE_DEVICE_KEYS.has(normalizedKey(key))) continue;
     if (typeof child === 'string' && /^rtsps?:\/\//i.test(child.trim())) continue;
     projected[key] = projectValue(child);

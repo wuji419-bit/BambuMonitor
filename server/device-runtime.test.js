@@ -456,7 +456,7 @@ test('reuses one MQTT connection across refresh and retains a cached IP after sc
   assert.equal(harness.connectCalls.length, 1);
 });
 
-test('401 and 403 emit a credential-free session.invalid while preserving prior devices', async () => {
+test('401 and 403 emit a credential-free account.invalid while preserving prior devices', async () => {
   for (const status of [401, 403]) {
     const authError = Object.assign(new Error('expired token-secret code-SERIAL_A'), {
       status,
@@ -478,7 +478,8 @@ test('401 and 403 emit a credential-free session.invalid while preserving prior 
 
     assert.deepEqual(harness.runtime.snapshot().devices.map((device) => device.dev_id), ['SERIAL_A']);
     assert.equal(harness.runtime.snapshot().cloudState, 'invalid');
-    assert.equal(events.some((event) => event.type === 'session.invalid'), true);
+    assert.equal(events.some((event) => event.type === 'session.invalid'), false);
+    assert.equal(events.some((event) => event.type === 'account.invalid' && event.accountId === 'legacy'), true);
     const publicEvents = JSON.stringify(events);
     assert.equal(publicEvents.includes('token-secret'), false);
     assert.equal(publicEvents.includes('code-SERIAL_A'), false);
@@ -914,4 +915,175 @@ test('unsubscribe and shutdown are idempotent and prevent all post-shutdown emis
   assert.equal(events.length, 1);
   assert.equal(harness.mqttListeners.size, 0);
   assert.equal(harness.mqttShutdownCalls, 1);
+});
+
+test('aggregates account inventories in insertion order with one MQTT connection per serial', async () => {
+  const harness = createHarness({
+    cloudResults: [
+      { success: true, username: 'first-user', devices: [cloudDevice('FIRST'), cloudDevice('DUPLICATE')] },
+      { success: true, username: 'second-user', devices: [cloudDevice('DUPLICATE'), cloudDevice('SECOND')] },
+    ],
+    scanResults: [[]],
+  });
+
+  await harness.runtime.start({
+    accounts: [
+      { accountId: 'first', accountMasked: 'f***@example.com', remark: 'Office', accessToken: 'first-token', username: 'first-user' },
+      { accountId: 'second', accountMasked: 's***@example.com', remark: 'Studio', accessToken: 'second-token', username: 'second-user' },
+    ],
+  });
+
+  const devices = harness.runtime.snapshot().devices;
+  assert.deepEqual(devices.map((device) => device.dev_id), ['FIRST', 'DUPLICATE', 'SECOND']);
+  assert.deepEqual(devices[1].accountIds, ['first', 'second']);
+  assert.deepEqual(devices[1].accountLabels, ['Office', 'Studio']);
+  assert.equal(devices[1].displayName, 'Printer DUPLICATE（Office / Studio）');
+  assert.equal(harness.connectCalls.filter((call) => call.serialNumber === 'DUPLICATE').length, 1);
+  assert.equal(harness.scanCalls.length, 1);
+  assert.deepEqual(harness.runtime.getAccountStates().map((state) => state.connectionState), ['connected', 'connected']);
+});
+
+test('isolates an invalid account without invalidating the aggregate runtime', async () => {
+  const invalid = Object.assign(new Error('expired'), { status: 401, tokenInvalid: true });
+  const harness = createHarness({
+    cloudResults: [
+      { success: true, devices: [cloudDevice('FIRST')] },
+      invalid,
+    ],
+    scanResults: [[]],
+  });
+  const events = [];
+  harness.runtime.subscribe((event) => events.push(event));
+
+  await harness.runtime.start({ accounts: [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token', username: '' },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: '', accessToken: 'second-token', username: '' },
+  ] });
+
+  assert.equal(harness.runtime.snapshot().cloudState, 'connected');
+  assert.deepEqual(harness.runtime.snapshot().devices.map((device) => device.dev_id), ['FIRST']);
+  assert.equal(events.some((event) => event.type === 'session.invalid'), false);
+  assert.equal(events.some((event) => event.type === 'account.invalid' && event.accountId === 'second'), true);
+});
+
+test('remark-only updates relabel duplicate devices without reconnecting', async () => {
+  const harness = createHarness({
+    cloudResults: [
+      { success: true, devices: [cloudDevice('DUPLICATE')] },
+      { success: true, devices: [cloudDevice('DUPLICATE')] },
+    ],
+    scanResults: [[]],
+  });
+  await harness.runtime.start({ accounts: [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: 'Office', accessToken: 'first-token' },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: 'Studio', accessToken: 'second-token' },
+  ] });
+  const connections = harness.connectCalls.length;
+
+  harness.runtime.updateAccountRemark('second', 'Lab');
+
+  assert.equal(harness.connectCalls.length, connections);
+  assert.deepEqual(harness.runtime.getDevice('DUPLICATE').accountLabels, ['Office', 'Lab']);
+  assert.equal(harness.runtime.getDevice('DUPLICATE').displayName, 'Printer DUPLICATE（Office / Lab）');
+});
+
+test('fails over a cloud source and removes the device only after its final account is removed', async () => {
+  const harness = createHarness({
+    cloudResults: [
+      { success: true, devices: [cloudDevice('DUPLICATE')] },
+      { success: true, devices: [cloudDevice('DUPLICATE')] },
+    ],
+    scanResults: [[]],
+  });
+  await harness.runtime.start({ accounts: [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token', username: 'first-user' },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: '', accessToken: 'second-token', username: 'second-user' },
+  ] });
+  assert.equal(harness.connectCalls.at(-1).authToken, 'first-token');
+
+  assert.equal(harness.runtime.removeAccount('first'), true);
+  assert.equal(harness.runtime.getDevice('DUPLICATE').accountIds[0], 'second');
+  assert.equal(harness.connectCalls.at(-1).authToken, 'second-token');
+  assert.deepEqual(harness.disconnectCalls, []);
+
+  assert.equal(harness.runtime.removeAccount('second'), true);
+  assert.equal(harness.runtime.getDevice('DUPLICATE'), null);
+  assert.deepEqual(harness.disconnectCalls, ['DUPLICATE']);
+});
+
+test('keeps an equivalent local connection when one duplicate source is removed', async () => {
+  const harness = createHarness({
+    cache: { DUPLICATE: { ip: '192.168.1.44' } },
+    cloudResults: [
+      { success: true, devices: [cloudDevice('DUPLICATE', { accessCode: 'same-code' })] },
+      { success: true, devices: [cloudDevice('DUPLICATE', { accessCode: 'same-code' })] },
+    ],
+    scanResults: [[]],
+  });
+  await harness.runtime.start({ accounts: [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token' },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: '', accessToken: 'second-token' },
+  ] });
+  const connections = harness.connectCalls.length;
+
+  harness.runtime.removeAccount('first');
+
+  assert.equal(harness.runtime.getCameraConfig('DUPLICATE').accessCode, 'same-code');
+  assert.equal(harness.connectCalls.length, connections);
+});
+
+test('marks aggregate state invalid only when every selected account is invalid', async () => {
+  const invalid = () => Object.assign(new Error('expired'), { status: 403, tokenInvalid: true });
+  const harness = createHarness({ cloudResults: [invalid(), invalid()], scanResults: [[]] });
+  await harness.runtime.start({ accounts: [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token' },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: '', accessToken: 'second-token' },
+  ] });
+
+  assert.equal(harness.runtime.snapshot().cloudState, 'invalid');
+  assert.deepEqual(harness.runtime.getAccountStates().map((state) => state.connectionState), ['invalid', 'invalid']);
+});
+
+test('limits simultaneous account cloud requests to three', async () => {
+  const pending = [];
+  let active = 0;
+  let maximum = 0;
+  const harness = createHarness({
+    cloudResults: Array.from({ length: 5 }, (_value, index) => () => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      const request = deferred();
+      pending.push({ index, request });
+      return request.promise.finally(() => { active -= 1; });
+    }),
+    scanResults: [[]],
+  });
+  const started = harness.runtime.start({ accounts: Array.from({ length: 5 }, (_value, index) => ({
+    accountId: `account-${index}`, accountMasked: `a${index}***@example.com`, remark: '', accessToken: `token-${index}`,
+  })) });
+  await Promise.resolve();
+  assert.equal(pending.length, 3);
+  pending.splice(0).forEach(({ index, request }) => request.resolve({ success: true, devices: [cloudDevice(`SERIAL_${index}`)] }));
+  while (pending.length < 2) await new Promise((resolve) => setImmediate(resolve));
+  pending.splice(0).forEach(({ index, request }) => request.resolve({ success: true, devices: [cloudDevice(`SERIAL_${index}`)] }));
+  await started;
+
+  assert.equal(maximum, 3);
+  assert.equal(harness.runtime.snapshot().devices.length, 5);
+});
+
+test('updates account credentials in place without replacing its masked public label', async () => {
+  const harness = createHarness({
+    cloudResults: [{ success: true, devices: [cloudDevice('SERIAL_A')] }],
+    scanResults: [[]],
+  });
+  await harness.runtime.start({ accounts: [{
+    accountId: 'office', account: 'office@example.com', accountMasked: 'o***@example.com', remark: '', accessToken: 'old-token', username: 'old-user',
+  }] });
+
+  harness.runtime.updateAccount({ accountId: 'office', accessToken: 'new-token' });
+
+  assert.equal(harness.connectCalls.at(-1).authToken, 'new-token');
+  assert.deepEqual(harness.runtime.getDevice('SERIAL_A').accountLabels, ['o***@example.com']);
+  assert.equal(JSON.stringify(harness.runtime.snapshot()).includes('office@example.com'), false);
 });

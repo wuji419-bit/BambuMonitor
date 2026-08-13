@@ -31,6 +31,10 @@ function fakeComponents(overrides = {}) {
   const sessionStore = {
     create: async () => ({}), authenticate: async () => null, clear: async () => {},
     getBambuSession: () => ({ accessToken: 'restored-token', username: 'restored-user' }),
+    getPrivateAccounts: () => [
+      { accountId: 'first', account: 'first@example.com', accountMasked: 'f***@example.com', remark: 'Office', accessToken: 'restored-token', username: 'restored-user', savedAt: 1, updatedAt: 1 },
+      { accountId: 'second', account: 'second@example.com', accountMasked: 's***@example.com', remark: 'Studio', accessToken: 'second-token', username: 'second-user', savedAt: 1, updatedAt: 1 },
+    ],
   };
   const cloud = { loginPassword: async () => ({}), requestVerifyCode: async () => ({}), loginCode: async () => ({}) };
   const mqttManager = { connect: async () => {}, disconnect: async () => {}, shutdown: async () => {} };
@@ -123,11 +127,24 @@ test('composeServer creates one production component in dependency order and own
   );
   await controller.startRestoration();
   assert.equal(harness.calls.restore.length, 1);
-  assert.equal(harness.calls.restore[0].accessToken, 'restored-token');
-  assert.equal(harness.calls.restore[0].username, 'restored-user');
+  assert.deepEqual(harness.calls.restore[0].accounts.map((account) => account.accountId), ['first', 'second']);
+  assert.equal(harness.calls.restore[0].accessToken, undefined);
+  assert.equal(harness.calls.restore[0].username, undefined);
   assert.ok(harness.calls.restore[0].signal instanceof AbortSignal);
   assert.equal(controller.readiness.ready, true);
   assert.equal(controller.readiness.syncing, false);
+  await controller.close();
+});
+
+test('restoration does not log private account fields', async () => {
+  const writes = [];
+  const harness = fakeComponents();
+  const controller = await composeServer({ env: VALID_ENV, factories: harness.factories, writer: (line) => writes.push(line) });
+  await controller.startRestoration();
+  const diagnostics = writes.join('');
+  assert.equal(diagnostics.includes('restored-token'), false);
+  assert.equal(diagnostics.includes('second-token'), false);
+  assert.equal(diagnostics.includes('first@example.com'), false);
   await controller.close();
 });
 
