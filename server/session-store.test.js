@@ -251,8 +251,10 @@ test('browser authentication remains hashed, timing-safe, renewable, and never r
 
   assert.equal(Buffer.from(created.sessionId, 'base64url').length, 32);
   assert.equal(Buffer.from(created.csrfToken, 'base64url').length, 32);
-  assert.deepEqual(Object.keys(authenticated).sort(), ['accountMasked', 'csrfToken', 'expiresAt', 'username']);
+  assert.deepEqual(Object.keys(authenticated).sort(), ['accountMasked', 'csrfToken', 'expiresAt']);
   assert.equal(JSON.stringify(authenticated).includes(BAMBU.accessToken), false);
+  assert.equal(JSON.stringify(authenticated).includes(BAMBU.account), false);
+  assert.equal(JSON.stringify(authenticated).includes(BAMBU.username), false);
   assert.equal(JSON.stringify(storage.value).includes(created.sessionId), false);
   assert.equal(JSON.stringify(storage.value).includes(created.csrfToken), false);
   assert.equal(await store.authenticate('not-a-session-id'), null);

@@ -369,7 +369,6 @@ export async function createSessionStore({
     const first = state.accounts[0];
     return {
       accountMasked: first.accountMasked,
-      username: first.username,
       csrfToken: csrfFor(sessionId),
       expiresAt: session.expiresAt,
     };

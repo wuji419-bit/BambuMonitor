@@ -543,6 +543,35 @@ test('session is minimal, protected mutations require CSRF, and logout clears st
   assert.match(idempotent.response.headers.get('set-cookie'), /Max-Age=0/);
 });
 
+test('session returns an already masked store identity without private account fields', async (t) => {
+  const harness = createHarness({
+    sessionStore: {
+      async create() { throw new Error('not used'); },
+      async authenticate() {
+        return {
+          accountMasked: 'm***@example.test',
+          csrfToken: CSRF,
+          expiresAt: 2_000_000_000_000,
+        };
+      },
+      async clear() {},
+    },
+  });
+  const base = await startHarness(harness);
+  t.after(() => harness.app.close());
+
+  const response = await request(base, '/api/session', { headers: { Cookie: cookie() } });
+  assert.deepEqual(response.body.data, {
+    authenticated: true,
+    accountMasked: 'm***@example.test',
+    csrfToken: CSRF,
+  });
+  const serialized = JSON.stringify(response.body.data);
+  assert.equal(serialized.includes('username'), false);
+  assert.equal(serialized.includes('accessToken'), false);
+  assert.equal(serialized.includes('maker@example.test'), false);
+});
+
 test('logout resets the runtime and a later login starts and synchronizes it again', async (t) => {
   const harness = createHarness();
   const base = await startHarness(harness);

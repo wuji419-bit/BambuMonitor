@@ -201,6 +201,13 @@ function maskAccount(account) {
   return `${value.slice(0, 2)}***${value.slice(-2)}`;
 }
 
+function isMaskedAccount(value) {
+  return typeof value === 'string' && value.length <= 512 && (value === '***'
+    || /^\d{3}\*{4}\d{4}$/.test(value)
+    || /^[\s\S]\*{3}@[\s\S]+$/u.test(value)
+    || /^[\s\S]{2}\*{3}[\s\S]{2}$/u.test(value));
+}
+
 function decodeSegment(value) {
   let decoded;
   try {
@@ -654,7 +661,9 @@ export function createHttpApp(deps = {}) {
       if (!auth) return sendSuccess(res, { authenticated: false });
       return sendSuccess(res, {
         authenticated: true,
-        accountMasked: maskAccount(auth.session.account),
+        accountMasked: isMaskedAccount(auth.session.accountMasked)
+          ? auth.session.accountMasked
+          : maskAccount(auth.session.account),
         csrfToken: auth.session.csrfToken,
       });
     }
