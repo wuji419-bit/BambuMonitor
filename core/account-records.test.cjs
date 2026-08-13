@@ -153,3 +153,27 @@ test('strict validators reject malformed or over-permissive records', () => {
     /different account/,
   );
 });
+
+test('public account validation rejects an unmasked account-looking value', () => {
+  const record = createAccountRecord({
+    account: 'maker@example.com',
+    accessToken: 'secret-token',
+  }, { accountId: 'acc-1', timestamp: 100 });
+  const publicRecord = toPublicAccount(record);
+
+  assert.throws(
+    () => validatePublicAccount({
+      ...publicRecord,
+      accountMasked: 'maker@example.com',
+      label: 'maker@example.com',
+    }),
+    /Invalid public account/,
+  );
+});
+
+test('desktop package includes both shared multi-account core modules', () => {
+  const packageJson = require('../package.json');
+
+  assert.equal(packageJson.build.files.includes('core/account-records.cjs'), true);
+  assert.equal(packageJson.build.files.includes('core/device-aggregation.cjs'), true);
+});

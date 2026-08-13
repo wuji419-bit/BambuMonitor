@@ -39,6 +39,8 @@
       "dist/**/*",
       "core/bambu-token.cjs",
       "core/bambu-cloud.cjs",
+      "core/account-records.cjs",
+      "core/device-aggregation.cjs",
       "core/lan-discovery.cjs",
       "core/mqtt-options.cjs",
       "core/mqtt-connection-manager.cjs",

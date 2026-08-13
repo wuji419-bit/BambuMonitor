@@ -4,7 +4,7 @@ const MAX_REMARK_LENGTH = 40;
 const MAX_ACCOUNT_ID_LENGTH = 128;
 const MAX_ACCOUNT_LENGTH = 320;
 const MAX_ACCOUNT_MASK_LENGTH = 512;
-const MAX_ACCESS_TOKEN_LENGTH = 16_384;
+const MAX_ACCESS_TOKEN_LENGTH = 16384;
 const MAX_USERNAME_LENGTH = 256;
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -107,6 +107,7 @@ function validatePublicAccount(value) {
     && isBoundedString(value.accountId, MAX_ACCOUNT_ID_LENGTH)
     && ACCOUNT_ID_PATTERN.test(value.accountId)
     && isBoundedString(value.accountMasked, MAX_ACCOUNT_MASK_LENGTH)
+    && value.accountMasked.includes('***')
     && typeof value.remark === 'string'
     && value.remark === normalizeRemark(value.remark)
     && isBoundedString(value.label, MAX_ACCOUNT_MASK_LENGTH)

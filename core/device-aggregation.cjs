@@ -1,61 +1,118 @@
 const { accountLabel } = require('./account-records.cjs');
 
-const PRIVATE_DEVICE_KEYS = new Set([
-  'account',
-  'rawaccount',
-  'username',
-  'password',
-  'secret',
-  'token',
-  'accesstoken',
-  'authtoken',
-  'credential',
-  'accesscode',
-  'devaccesscode',
-  'ip',
-  'address',
-  'localaddress',
-  'rtsps',
-  'rtspsurl',
-  'cameraurl',
-  'snapshoturl',
-  'streamurl',
-  'sources',
+const OMIT = Symbol('omit');
+const SAFE_DEVICE_SCALAR_FIELDS = Object.freeze([
+  'id',
+  'dev_id',
+  'cloudId',
+  'mqttSerial',
+  'serial',
+  'serialNumber',
+  'name',
+  'displayName',
+  'model',
+  'modelCode',
+  'dev_model_name',
+  'dev_product_name',
+  'productName',
+  'printerType',
+  'nozzle',
+  'nozzleDiameter',
+  'nozzle_diameter',
+  'online',
+  'cloudOnline',
+  'cloudState',
+  'printStatus',
+  'print_status',
+  'connectionMode',
+  'connectionState',
+  'statusSource',
+  'localMatchSource',
+  'status',
+  'jobStatus',
+  'lastJobStatus',
+  'progress',
+  'timeLeft',
+  'fan',
+  'speed',
+  'layer',
+  'filename',
+  'error',
+  'errorCode',
+  'errorMsg',
+  'errorMessage',
+  'remainingMinutesRaw',
+  'remainingUpdatedAt',
+  'remainingStatus',
+  'lastTelemetryAt',
+  'lastUpdatedAt',
+  'lastSeenAt',
+  'lastMessageAt',
+  'syncedAt',
+  'updatedAt',
+  'telemetrySequence',
+  'telemetryVersion',
+  'cameraMode',
+  'hasLocalAddress',
 ]);
-const PRIVATE_KEY_FRAGMENTS = Object.freeze([
-  'accesscode',
-  'authorization',
-  'credential',
-  'password',
-  'secret',
-  'token',
-  'username',
+const SAFE_TELEMETRY_SCALAR_FIELDS = Object.freeze([
+  'model',
+  'modelCode',
+  'online',
+  'cloudOnline',
+  'connectionMode',
+  'connectionState',
+  'statusSource',
+  'status',
+  'jobStatus',
+  'lastJobStatus',
+  'progress',
+  'timeLeft',
+  'fan',
+  'speed',
+  'layer',
+  'filename',
+  'error',
+  'errorCode',
+  'errorMsg',
+  'errorMessage',
+  'remainingMinutesRaw',
+  'remainingUpdatedAt',
+  'remainingStatus',
+  'lastTelemetryAt',
+  'lastUpdatedAt',
+  'lastSeenAt',
+  'lastMessageAt',
+  'telemetrySequence',
+  'telemetryVersion',
 ]);
-const PRIVATE_ACCOUNT_FRAGMENTS = Object.freeze([
-  'loginaccount',
-  'privateaccount',
-  'rawaccount',
-  'sourceaccount',
+const SAFE_TEMPERATURE_FIELDS = Object.freeze([
+  'nozzle',
+  'bed',
+  'chamber',
+  'nozzleTarget',
+  'bedTarget',
+  'chamberTarget',
 ]);
-const PRIVATE_ADDRESS_FRAGMENTS = Object.freeze([
-  'deviceaddress',
-  'deviceip',
-  'hostaddress',
-  'hostip',
-  'ipaddress',
-  'lanaddress',
-  'lanip',
-  'localaddress',
-  'localip',
-  'networkaddress',
-  'networkip',
-  'printeraddress',
-  'printerip',
-  'privateaddress',
-  'privateip',
-  'remoteaddress',
-  'remoteip',
+const SAFE_AMS_UNIT_FIELDS = Object.freeze([
+  'index',
+  'humidityIndex',
+  'humidityRaw',
+  'temperature',
 ]);
+const SAFE_AMS_TRAY_FIELDS = Object.freeze([
+  'id',
+  'remain',
+  'trayWeight',
+  'type',
+  'color',
+  'idx',
+  'subBrand',
+  'name',
+  'trayUuid',
+]);
+const RTSP_URL_PATTERN = /rtsps?:\/\//i;
+const CREDENTIAL_URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/[^\s/?#]*@/i;
 
 function isObject(value) {
   return value !== null && typeof value === 'object';
@@ -69,38 +126,110 @@ function cloneValue(value) {
   return clone;
 }
 
-function normalizedKey(key) {
-  return String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+function isRecord(value) {
+  return isObject(value) && !Array.isArray(value);
 }
 
-function keyTerms(key) {
-  return String(key)
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean);
+function isUnsafePublicString(value) {
+  const text = String(value).trim();
+  return RTSP_URL_PATTERN.test(text) || CREDENTIAL_URL_PATTERN.test(text);
 }
 
-function isPrivateDeviceKey(key) {
-  const compact = normalizedKey(key);
-  if (!compact) return false;
-  if (PRIVATE_DEVICE_KEYS.has(compact)) return true;
-  if (PRIVATE_KEY_FRAGMENTS.some((fragment) => compact.includes(fragment))) return true;
-  if (PRIVATE_ACCOUNT_FRAGMENTS.some((fragment) => compact.includes(fragment))) return true;
-  if (PRIVATE_ADDRESS_FRAGMENTS.some((fragment) => compact.includes(fragment))) return true;
+function projectSafeScalar(value) {
+  if (typeof value === 'string') return isUnsafePublicString(value) ? OMIT : value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : OMIT;
+  if (typeof value === 'boolean' || value === null) return value;
+  return OMIT;
+}
 
-  const terms = keyTerms(key);
-  return terms.includes('address') || terms.includes('ip');
+function projectScalarFields(value, fields) {
+  if (!isRecord(value)) return OMIT;
+  const projected = {};
+  for (const field of fields) {
+    if (!Object.hasOwn(value, field)) continue;
+    const child = projectSafeScalar(value[field]);
+    if (child !== OMIT) projected[field] = child;
+  }
+  return projected;
+}
+
+function projectTemperature(value) {
+  if (value === null) return null;
+  return projectScalarFields(value, SAFE_TEMPERATURE_FIELDS);
+}
+
+function projectAmsTray(value) {
+  return projectScalarFields(value, SAFE_AMS_TRAY_FIELDS);
+}
+
+function projectAmsUnit(value) {
+  const projected = projectScalarFields(value, SAFE_AMS_UNIT_FIELDS);
+  if (projected === OMIT) return OMIT;
+  if (Array.isArray(value.trays)) {
+    projected.trays = value.trays
+      .map(projectAmsTray)
+      .filter((tray) => tray !== OMIT);
+  }
+  if (Object.hasOwn(value, 'activeTray')) {
+    const activeTray = value.activeTray === null ? null : projectAmsTray(value.activeTray);
+    if (activeTray !== OMIT) projected.activeTray = activeTray;
+  }
+  return projected;
+}
+
+function projectAms(value) {
+  if (value === null) return null;
+  if (!isRecord(value)) return OMIT;
+  const projected = projectScalarFields(value, ['activeAmsIndex', 'activeTrayIndex']);
+  if (Array.isArray(value.units)) {
+    projected.units = value.units
+      .map(projectAmsUnit)
+      .filter((unit) => unit !== OMIT);
+  }
+  return projected;
+}
+
+function projectTelemetry(value) {
+  const projected = projectScalarFields(value, SAFE_TELEMETRY_SCALAR_FIELDS);
+  if (projected === OMIT) return OMIT;
+  if (Object.hasOwn(value, 'temperature')) {
+    const temperature = projectTemperature(value.temperature);
+    if (temperature !== OMIT) projected.temperature = temperature;
+  }
+  if (Object.hasOwn(value, 'ams')) {
+    const ams = projectAms(value.ams);
+    if (ams !== OMIT) projected.ams = ams;
+  }
+  return projected;
 }
 
 function projectPublicValue(value) {
-  if (Array.isArray(value)) return value.map(projectPublicValue);
-  if (!isObject(value)) return value;
-  const projected = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (isPrivateDeviceKey(key)) continue;
-    if (typeof child === 'string' && /^rtsps?:\/\//i.test(child.trim())) continue;
-    projected[key] = projectPublicValue(child);
+  const projected = projectScalarFields(value, SAFE_DEVICE_SCALAR_FIELDS);
+  if (projected === OMIT) return {};
+  if (Object.hasOwn(value, 'temperature')) {
+    const temperature = projectTemperature(value.temperature);
+    if (temperature !== OMIT) projected.temperature = temperature;
+  }
+  if (Object.hasOwn(value, 'ams')) {
+    const ams = projectAms(value.ams);
+    if (ams !== OMIT) projected.ams = ams;
+  }
+  if (Object.hasOwn(value, 'telemetry')) {
+    const telemetry = projectTelemetry(value.telemetry);
+    if (telemetry !== OMIT) projected.telemetry = telemetry;
+  }
+  return projected;
+}
+
+function projectUniqueStrings(values) {
+  if (!Array.isArray(values)) return [];
+  const projected = [];
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const safeValue = projectSafeScalar(value);
+    if (safeValue === OMIT) continue;
+    const normalized = safeValue.trim();
+    if (normalized && !projected.includes(normalized)) projected.push(normalized);
   }
   return projected;
 }
@@ -197,18 +326,11 @@ function toPublicAggregatedDevice(record) {
   if (!serialNumber) throw new TypeError('Invalid aggregated device record');
 
   const device = projectPublicValue(record.device ?? {});
-  const rawName = readRawName(record.device);
+  const projectedName = projectSafeScalar(readRawName(record.device));
+  const rawName = projectedName === OMIT ? '' : projectedName;
   const displayBase = rawName.trim() || serialNumber;
-  const accountIds = [...new Set(
-    (Array.isArray(record.accountIds) ? record.accountIds : [])
-      .map((value) => String(value ?? '').trim())
-      .filter(Boolean),
-  )];
-  const accountLabels = [...new Set(
-    (Array.isArray(record.accountLabels) ? record.accountLabels : [])
-      .map((value) => String(value ?? '').trim())
-      .filter(Boolean),
-  )];
+  const accountIds = projectUniqueStrings(record.accountIds);
+  const accountLabels = projectUniqueStrings(record.accountLabels);
 
   return {
     ...device,
