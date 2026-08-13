@@ -229,6 +229,69 @@ test('keeps the legacy session when migration cannot persist the new repository'
   assert.equal(fs.existsSync(getAccountStorePath(dir)), false);
 });
 
+for (const { name, protection } of [
+  { name: 'plaintext', protection: null },
+  { name: 'protected', protection: makeProtectionAdapter() },
+]) {
+  test(`rolls back an incomplete ${name} legacy migration when deleting the legacy session fails`, () => {
+    const dir = makeTempDir();
+    writeAuthSession(
+      dir,
+      { account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50 },
+      protection,
+    );
+    const legacyPath = getAuthSessionPath(dir);
+    const repositoryPath = getAccountStorePath(dir);
+    const legacyBytes = fs.readFileSync(legacyPath);
+    const originalRmSync = fs.rmSync;
+    fs.rmSync = (filePath, ...args) => {
+      if (filePath === legacyPath) throw new Error('legacy session is locked');
+      return originalRmSync(filePath, ...args);
+    };
+    try {
+      assert.throws(
+        () => createStore(dir, { protection }),
+        (error) => error instanceof AccountStoreRecoverableError && error.code === 'BAMBU_ACCOUNT_STORE_RECOVERABLE',
+      );
+    } finally {
+      fs.rmSync = originalRmSync;
+    }
+
+    assert.equal(fs.existsSync(repositoryPath), false);
+    assert.deepEqual(fs.readFileSync(legacyPath), legacyBytes);
+    assert.deepEqual(fs.readdirSync(dir).filter((file) => file.endsWith('.tmp')), []);
+    const retried = createStore(dir, { protection }).store;
+    assert.equal(retried.getPrivateAccounts()[0].accessToken, 'legacy-token');
+    assert.equal(fs.existsSync(legacyPath), false);
+  });
+}
+
+test('surfaces a diagnosable recoverable error when incomplete migration cleanup fails', () => {
+  const dir = makeTempDir();
+  writeAuthSession(dir, { account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50 });
+  const legacyPath = getAuthSessionPath(dir);
+  const repositoryPath = getAccountStorePath(dir);
+  const originalRmSync = fs.rmSync;
+  fs.rmSync = (filePath, ...args) => {
+    if (filePath === legacyPath || filePath === repositoryPath) throw new Error('cleanup is locked');
+    return originalRmSync(filePath, ...args);
+  };
+  try {
+    let error;
+    try {
+      createStore(dir);
+    } catch (failure) {
+      error = failure;
+    }
+    assert.ok(error instanceof AccountStoreRecoverableError);
+    assert.match(error.message, /clean up incomplete Bambu account migration/);
+    assert.equal(error.cause.message, 'cleanup is locked');
+    assert.equal(error.legacyDeletionError.message, 'cleanup is locked');
+  } finally {
+    fs.rmSync = originalRmSync;
+  }
+});
+
 test('refreshes duplicate accounts in place and only changes an explicitly supplied remark', () => {
   const dir = makeTempDir();
   const { store, setTime } = createStore(dir);

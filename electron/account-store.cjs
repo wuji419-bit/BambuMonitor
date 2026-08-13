@@ -243,7 +243,26 @@ function createAccountStore({ userDataPath, protection = null, randomId, now } =
       accounts: [record],
     };
     const written = writeRepository(repository);
-    fs.rmSync(legacyPath);
+    try {
+      fs.rmSync(legacyPath);
+      fsyncDirectory();
+    } catch (legacyDeletionError) {
+      try {
+        fs.rmSync(accountStorePath);
+        fsyncDirectory();
+      } catch (cleanupError) {
+        const error = new AccountStoreRecoverableError(
+          'Unable to clean up incomplete Bambu account migration',
+          cleanupError,
+        );
+        error.legacyDeletionError = legacyDeletionError;
+        throw error;
+      }
+      throw new AccountStoreRecoverableError(
+        'Unable to remove legacy Bambu auth session during migration',
+        legacyDeletionError,
+      );
+    }
     return written;
   }
 
