@@ -112,7 +112,6 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
   const subscribers = new Set();
   let order = [];
   let generation = 0;
-  let refreshSequence = 0;
   let activeScan = null;
   let stopped = false;
   let stopSessionPromise = null;
@@ -134,8 +133,8 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
   }
 
   function publicDevice(record) {
-    const labels = record.sources.map((source) => accountLabel(source.account)).filter((label, index, values) => label && values.indexOf(label) === index);
-    const accountIds = record.sources.map((source) => source.account.accountId).filter((id, index, values) => id && values.indexOf(id) === index);
+    const labels = record.sources.map((source) => accountLabel(source.entry.account)).filter((label, index, values) => label && values.indexOf(label) === index);
+    const accountIds = record.sources.map((source) => source.entry.account.accountId).filter((id, index, values) => id && values.indexOf(id) === index);
     const rawName = text(record.device.name) || record.serialNumber;
     return projectPublicDevice({
       ...record.device,
@@ -170,13 +169,21 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
   function getDevice(serialNumber) { const record = getRecord(serialNumber); return record ? publicDevice(record) : null; }
   function getAccountStates() { return clone([...accounts.values()].map(safeAccountState)); }
 
+  function ownsSource(source) {
+    return accounts.get(source.entry.account.accountId) === source.entry;
+  }
+
   function selectSource(record) {
     const ip = text(record.device.ip);
-    const localSource = record.sources.find((source) => text(source.cloudDevice.accessCode));
+    const localSource = record.sources.find((source) => ownsSource(source) && text(source.cloudDevice.accessCode));
     if (isValidPrinterAddress(ip) && localSource) {
       return { mode: 'local', ip, accessCode: text(localSource.cloudDevice.accessCode), source: localSource };
     }
-    const cloudSource = record.sources.find((source) => text(source.account.accessToken));
+    const cloudSource = record.sources.find((source) => (
+      ownsSource(source)
+      && source.entry.connectionState !== 'invalid'
+      && text(source.entry.account.accessToken)
+    ));
     return cloudSource ? { mode: 'cloud', source: cloudSource } : null;
   }
 
@@ -203,7 +210,7 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
         payload: { serialNumber: record.serialNumber, mode: 'local', ip: selected.ip, accessCode: selected.accessCode },
       };
     }
-    const { account } = selected.source;
+    const { account } = selected.source.entry;
     const username = text(account.username);
     return {
       mode: 'cloud',
@@ -214,7 +221,14 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
 
   function ensureConnection(record) {
     const connection = buildConnection(record);
-    if (!connection) return false;
+    if (!connection) {
+      if (fingerprints.has(record.serialNumber)) void disconnect(record.serialNumber);
+      record.device.connectionMode = 'cloud';
+      record.device.statusSource = 'cloud';
+      record.device.connectionState = 'error';
+      record.device.errorMsg = 'Printer connection needs attention';
+      return false;
+    }
     record.device.connectionMode = connection.mode;
     record.device.statusSource = connection.mode;
     if (fingerprints.get(record.serialNumber) === connection.fingerprint) return false;
@@ -251,7 +265,7 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
           record = { serialNumber: cloudDevice.serialNumber, device: mergeCloudDevice(previous?.device, cloudDevice, cache.get(cloudDevice.serialNumber) || {}), sources: [] };
           nextRecords.set(cloudDevice.serialNumber, record); nextOrder.push(cloudDevice.serialNumber);
         }
-        if (!record.sources.some((source) => source.account.accountId === entry.account.accountId)) record.sources.push({ account: clone(entry.account), cloudDevice });
+        if (!record.sources.some((source) => source.entry === entry)) record.sources.push({ entry, cloudDevice });
       }
     }
     const removed = order.filter((serial) => !nextRecords.has(serial));
@@ -305,54 +319,91 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
     try { return await Promise.race([work, aborted]); } finally { signal.removeEventListener('abort', onAbort); }
   }
 
-  async function refreshAccount(entry, { signal, expectedGeneration, expectedRefresh }) {
-    const account = clone(entry.account);
+  function beginAccountOperation(entry, externalSignal) {
+    entry.operationVersion += 1;
+    entry.abortController?.abort();
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    externalSignal?.addEventListener?.('abort', abort, { once: true });
+    if (externalSignal?.aborted) abort();
+    entry.abortController = controller;
     entry.connectionState = 'syncing'; entry.errorCode = null; emitAccount('account.updated', entry);
+    return {
+      entry,
+      version: entry.operationVersion,
+      generation,
+      signal: controller.signal,
+      requestSignal: externalSignal || controller.signal,
+      externalSignal,
+      cleanup() {
+        externalSignal?.removeEventListener?.('abort', abort);
+        if (entry.abortController === controller) entry.abortController = null;
+      },
+    };
+  }
+
+  function operationIsCurrent(operation) {
+    return !stopped
+      && generation === operation.generation
+      && accounts.get(operation.entry.account.accountId) === operation.entry
+      && operation.entry.operationVersion === operation.version;
+  }
+
+  async function refreshAccount(operation) {
+    const { entry, signal } = operation;
+    const account = clone(entry.account);
     let request;
-    try { request = signal ? cloud.listDevices(account.accessToken, { signal }) : cloud.listDevices(account.accessToken); }
+    try { request = cloud.listDevices(account.accessToken, { signal: operation.requestSignal }); }
     catch (error) { request = Promise.reject(error); }
     let outcome;
-    if (signal) {
+    if (operation.externalSignal) {
       outcome = await waitForCloud(Promise.resolve(request).then((result) => ({ result }), (error) => ({ error })), signal);
     } else {
       try { outcome = { result: await request }; } catch (error) { outcome = { error }; }
     }
-    if (stopped || generation !== expectedGeneration || refreshSequence !== expectedRefresh) return;
-    if (outcome.error || outcome.aborted || !outcome.result?.success || !Array.isArray(outcome.result?.devices)) {
-      const error = outcome.error;
-      if (isInvalidSessionError(error)) {
-        entry.connectionState = 'invalid'; entry.errorCode = String(error.status || 'INVALID_CREDENTIALS'); emitAccount('account.invalid', entry);
-      } else {
-        entry.connectionState = 'error'; entry.errorCode = String(error?.status || 'CLOUD_UNAVAILABLE'); emitAccount('account.updated', entry);
-        log('warn', 'device-runtime.cloud-refresh-failed', { accountId: entry.account.accountId, status: error?.status });
+    try {
+      if (!operationIsCurrent(operation)) return { current: false };
+      if (outcome.error || outcome.aborted || !outcome.result?.success || !Array.isArray(outcome.result?.devices)) {
+        const error = outcome.error;
+        if (isInvalidSessionError(error)) {
+          entry.connectionState = 'invalid'; entry.errorCode = String(error.status || 'INVALID_CREDENTIALS'); emitAccount('account.invalid', entry);
+        } else {
+          entry.connectionState = 'error'; entry.errorCode = String(error?.status || 'CLOUD_UNAVAILABLE'); emitAccount('account.updated', entry);
+          log('warn', 'device-runtime.cloud-refresh-failed', { accountId: entry.account.accountId, status: error?.status });
+        }
+        return { current: true, state: entry.connectionState };
       }
-      return;
+      entry.inventory = clone(outcome.result.devices);
+      entry.account.username = text(outcome.result.username) || account.username;
+      entry.connectionState = 'connected'; entry.errorCode = null; entry.syncedAt = now(); emitAccount('account.updated', entry);
+      return { current: true, state: 'connected' };
+    } finally {
+      operation.cleanup();
     }
-    entry.inventory = clone(outcome.result.devices); entry.account.username = text(outcome.result.username) || account.username;
-    entry.connectionState = 'connected'; entry.errorCode = null; entry.syncedAt = now(); emitAccount('account.updated', entry);
-    rebuildRecords(); emitSnapshot();
   }
 
   async function runPool(entries, task) {
     let cursor = 0;
+    const outcomes = [];
     async function worker() {
-      while (cursor < entries.length) { const index = cursor; cursor += 1; await task(entries[index]); }
+      while (cursor < entries.length) { const index = cursor; cursor += 1; outcomes.push(await task(entries[index])); }
     }
     await Promise.all(Array.from({ length: Math.min(MAX_CLOUD_CONCURRENCY, entries.length) }, worker));
+    return outcomes;
   }
 
   async function refresh({ accountId, signal, skipLan = false } = {}) {
     if (stopped || signal?.aborted) return snapshot();
-    const expectedGeneration = generation; const expectedRefresh = ++refreshSequence;
     const entries = accountId ? [accounts.get(text(accountId))].filter(Boolean) : [...accounts.values()];
     if (entries.length === 0) return snapshot();
-    for (const entry of entries) { entry.connectionState = 'syncing'; entry.errorCode = null; }
+    const operations = entries.map((entry) => beginAccountOperation(entry, signal));
     emitSnapshot();
-    const cloudWork = entries.length <= MAX_CLOUD_CONCURRENCY
-      ? Promise.all(entries.map((entry) => refreshAccount(entry, { signal, expectedGeneration, expectedRefresh })))
-      : runPool(entries, (entry) => refreshAccount(entry, { signal, expectedGeneration, expectedRefresh }));
-    await cloudWork;
-    if (stopped || generation !== expectedGeneration || refreshSequence !== expectedRefresh) return snapshot();
+    const outcomes = operations.length === 1
+      ? [await refreshAccount(operations[0])]
+      : operations.length <= MAX_CLOUD_CONCURRENCY
+        ? await Promise.all(operations.map(refreshAccount))
+      : await runPool(operations, refreshAccount);
+    if (stopped || generation !== operations[0].generation || !outcomes.some((outcome) => outcome.current)) return snapshot();
     rebuildRecords(); emitSnapshot();
     if (!skipLan) void scanLan({ signal });
     return snapshot();
@@ -398,11 +449,13 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
   async function start({ accounts: inputAccounts, accessToken, username, signal } = {}) {
     if (stopSessionPromise) await stopSessionPromise;
     if (stopped || signal?.aborted) return snapshot();
-    const expectedGeneration = ++generation; refreshSequence += 1; activeScan?.controller.abort(); accounts.clear();
+    const expectedGeneration = ++generation; activeScan?.controller.abort();
+    for (const entry of accounts.values()) entry.abortController?.abort();
+    accounts.clear();
     const supplied = Array.isArray(inputAccounts) ? inputAccounts : [{ accountId: 'legacy', accountMasked: '', remark: '', accessToken, username }];
     for (let index = 0; index < supplied.length; index += 1) {
       const account = normalizeAccount(supplied[index], `account-${index + 1}`); if (!account.accessToken || accounts.has(account.accountId)) continue;
-      accounts.set(account.accountId, { account, inventory: [], connectionState: 'idle', errorCode: null, syncedAt: null });
+      accounts.set(account.accountId, { account, inventory: [], connectionState: 'idle', errorCode: null, syncedAt: null, operationVersion: 0, abortController: null });
     }
     try { loadCache(); } catch { log('warn', 'device-runtime.cache-load-failed'); }
     if (stopped || signal?.aborted || generation !== expectedGeneration) return snapshot();
@@ -416,8 +469,11 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
     if (stopped || signal?.aborted) return snapshot();
     const normalized = normalizeAccount(account, `account-${accounts.size + 1}`); if (!normalized.accessToken) throw new TypeError('Account requires accessToken');
     if (accounts.has(normalized.accountId)) return updateAccount(normalized);
-    accounts.set(normalized.accountId, { account: normalized, inventory: [], connectionState: 'idle', errorCode: null, syncedAt: null });
-    await refresh({ accountId: normalized.accountId, signal }); return snapshot();
+    accounts.set(normalized.accountId, { account: normalized, inventory: [], connectionState: 'idle', errorCode: null, syncedAt: null, operationVersion: 0, abortController: null });
+    await refresh({ accountId: normalized.accountId, signal, skipLan: true });
+    if (stopped || signal?.aborted || !accounts.has(normalized.accountId)) return snapshot();
+    await scanLan({ signal });
+    return snapshot();
   }
 
   function updateAccount(account) {
@@ -439,17 +495,18 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
   }
   function removeAccount(accountId) {
     const entry = accounts.get(text(accountId)); if (!entry) return false;
+    entry.operationVersion += 1; entry.abortController?.abort();
     accounts.delete(entry.account.accountId); rebuildRecords(); emit({ type: 'account.removed', accountId: entry.account.accountId }); emitSnapshot(); return true;
   }
 
   function stopSession() {
     if (stopSessionPromise) return stopSessionPromise; if (stopped) return Promise.resolve(snapshot());
     const hadSession = records.size || accounts.size || activeScan; if (!hadSession) return Promise.resolve(snapshot());
-    generation += 1; refreshSequence += 1; activeScan?.controller.abort(); const serials = [...records.keys()]; records.clear(); cache.clear(); order = []; accounts.clear(); emitSnapshot();
+    generation += 1; activeScan?.controller.abort(); for (const entry of accounts.values()) entry.abortController?.abort(); const serials = [...records.keys()]; records.clear(); cache.clear(); order = []; accounts.clear(); emitSnapshot();
     const reset = Promise.allSettled(serials.map(disconnect)).then(snapshot); const wrapped = reset.finally(() => { if (stopSessionPromise === wrapped) stopSessionPromise = null; }); stopSessionPromise = wrapped; return wrapped;
   }
   function shutdown() {
-    if (shutdownPromise) return shutdownPromise; stopped = true; generation += 1; refreshSequence += 1; activeScan?.controller.abort(); subscribers.clear();
+    if (shutdownPromise) return shutdownPromise; stopped = true; generation += 1; activeScan?.controller.abort(); for (const entry of accounts.values()) entry.abortController?.abort(); subscribers.clear();
     try { removeMqttListener?.(); } catch { log('warn', 'device-runtime.mqtt-listener-remove-failed'); } removeMqttListener = null;
     const serials = [...records.keys()]; const pending = serials.map(disconnect); if (stopSessionPromise) pending.push(stopSessionPromise);
     shutdownPromise = Promise.allSettled(pending).then(async () => { try { await mqtt.shutdown(); } catch { log('warn', 'device-runtime.mqtt-shutdown-failed'); } fingerprints.clear(); return snapshot(); }); return shutdownPromise;

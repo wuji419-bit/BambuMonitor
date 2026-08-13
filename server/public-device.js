@@ -1,60 +1,64 @@
+import { createRequire } from 'node:module';
+
 import { isValidPrinterAddress } from '../src/utils/printerAddress.js';
 
-const PRIVATE_DEVICE_KEYS = new Set([
-  'ip',
-  'address',
-  'localaddress',
-  'accesscode',
-  'devaccesscode',
-  'rtsps',
-  'rtspsurl',
-  'cameraurl',
-  'snapshoturl',
-  'streamurl',
-  'password',
-  'secret',
-  'token',
-  'authtoken',
-  'credential',
-]);
+const require = createRequire(import.meta.url);
+const { projectPublicDeviceValue } = require('../core/device-aggregation.cjs');
 
-function normalizedKey(key) {
-  return String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+const CLOUD_STATES = new Set(['idle', 'syncing', 'connected', 'reconnecting', 'error', 'invalid']);
+const ACCOUNT_STATES = new Set(['idle', 'syncing', 'connected', 'error', 'invalid']);
+const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const CREDENTIAL_URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/[^\s/?#]*@|rtsps?:\/\//i;
+
+function safeText(value) {
+  return typeof value === 'string' && !CREDENTIAL_URL_PATTERN.test(value.trim()) ? value : null;
 }
 
-function projectValue(value) {
-  if (Array.isArray(value)) return value.map(projectValue);
-  if (!value || typeof value !== 'object') return value;
-  const projected = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (normalizedKey(key) === 'sources') continue;
-    if (PRIVATE_DEVICE_KEYS.has(normalizedKey(key))) continue;
-    if (typeof child === 'string' && /^rtsps?:\/\//i.test(child.trim())) continue;
-    projected[key] = projectValue(child);
-  }
-  return projected;
+function safeTimestamp(value) {
+  return Number.isFinite(value) ? value : null;
+}
+
+function safeAccountId(value) {
+  const accountId = safeText(value);
+  return accountId && ACCOUNT_ID_PATTERN.test(accountId) ? accountId : null;
+}
+
+function safeAccountState(state = {}) {
+  const connectionState = ACCOUNT_STATES.has(state.connectionState) ? state.connectionState : 'idle';
+  const errorCode = safeText(state.errorCode) || null;
+  return {
+    connectionState,
+    errorCode,
+    syncedAt: safeTimestamp(state.syncedAt),
+    deviceCount: Number.isSafeInteger(state.deviceCount) && state.deviceCount >= 0 ? state.deviceCount : 0,
+  };
 }
 
 export function projectPublicDevice(device = {}) {
-  const projected = projectValue(device);
-  projected.hasLocalAddress = Boolean(
-    device?.hasLocalAddress || isValidPrinterAddress(device?.ip),
-  );
-  return projected;
+  return {
+    ...projectPublicDeviceValue(device),
+    hasLocalAddress: Boolean(device?.hasLocalAddress || isValidPrinterAddress(device?.ip)),
+  };
 }
 
 export function projectPublicDeviceEvent(event = {}) {
   if (event?.type === 'devices.snapshot') {
     return {
-      ...projectValue(event),
+      type: 'devices.snapshot',
       devices: Array.isArray(event.devices) ? event.devices.map(projectPublicDevice) : [],
+      syncedAt: safeTimestamp(event.syncedAt),
+      cloudState: CLOUD_STATES.has(event.cloudState) ? event.cloudState : 'idle',
     };
   }
-  if (event?.type === 'device.updated') {
-    return {
-      ...projectValue(event),
-      device: projectPublicDevice(event.device),
-    };
+  if (event?.type === 'device.updated') return { type: 'device.updated', device: projectPublicDevice(event.device) };
+  if (event?.type === 'account.updated' || event?.type === 'account.invalid') {
+    const accountId = safeAccountId(event.accountId);
+    if (!accountId) return null;
+    return { type: event.type, accountId, state: safeAccountState(event.state) };
   }
-  return projectValue(event);
+  if (event?.type === 'account.removed') {
+    const accountId = safeAccountId(event.accountId);
+    return accountId ? { type: 'account.removed', accountId } : null;
+  }
+  return null;
 }

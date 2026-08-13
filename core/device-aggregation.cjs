@@ -234,6 +234,27 @@ function projectUniqueStrings(values) {
   return projected;
 }
 
+function projectPublicDeviceValue(value = {}) {
+  const projected = projectPublicValue(value);
+  const serialNumber = normalizeSerial(value?.dev_id ?? value?.id ?? value?.serialNumber);
+  const projectedName = projectSafeScalar(readRawName(value));
+  const name = projectedName === OMIT || !String(projectedName).trim()
+    ? serialNumber
+    : projectedName;
+  const projectedDisplayName = projectSafeScalar(value?.displayName);
+  const displayName = projectedDisplayName === OMIT || !String(projectedDisplayName).trim()
+    ? name || serialNumber
+    : projectedDisplayName;
+  return {
+    ...projected,
+    ...(serialNumber ? { dev_id: serialNumber } : {}),
+    ...(name ? { name } : {}),
+    ...(displayName ? { displayName } : {}),
+    accountIds: projectUniqueStrings(value?.accountIds),
+    accountLabels: projectUniqueStrings(value?.accountLabels),
+  };
+}
+
 function normalizeSerial(value) {
   return String(value ?? '')
     .trim()
@@ -325,7 +346,7 @@ function toPublicAggregatedDevice(record) {
   const serialNumber = normalizeSerial(record.serialNumber ?? record.device?.dev_id);
   if (!serialNumber) throw new TypeError('Invalid aggregated device record');
 
-  const device = projectPublicValue(record.device ?? {});
+  const device = projectPublicDeviceValue(record.device ?? {});
   const projectedName = projectSafeScalar(readRawName(record.device));
   const rawName = projectedName === OMIT ? '' : projectedName;
   const displayBase = rawName.trim() || serialNumber;
@@ -352,5 +373,6 @@ module.exports = {
   aggregateDeviceInventories,
   aggregateDeviceRecords,
   normalizeSerial,
+  projectPublicDeviceValue,
   toPublicAggregatedDevice,
 };

@@ -1087,3 +1087,161 @@ test('updates account credentials in place without replacing its masked public l
   assert.deepEqual(harness.runtime.getDevice('SERIAL_A').accountLabels, ['o***@example.com']);
   assert.equal(JSON.stringify(harness.runtime.snapshot()).includes('office@example.com'), false);
 });
+
+test('invalid duplicate source fails over once and all invalid sources disconnect with safe attention', async () => {
+  const invalid = Object.assign(new Error('expired'), { status: 401, tokenInvalid: true });
+  const harness = createHarness({
+    cloudResults: [
+      { success: true, devices: [cloudDevice('DUPLICATE')] },
+      { success: true, devices: [cloudDevice('DUPLICATE')] },
+      invalid,
+      invalid,
+    ],
+    scanResults: [[]],
+  });
+  await harness.runtime.start({ accounts: [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token' },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: '', accessToken: 'second-token' },
+  ] });
+  const initialConnections = harness.connectCalls.length;
+
+  await harness.runtime.refresh({ accountId: 'first', skipLan: true });
+  assert.equal(harness.connectCalls.length, initialConnections + 1);
+  assert.equal(harness.connectCalls.at(-1).authToken, 'second-token');
+
+  await harness.runtime.refresh({ accountId: 'second', skipLan: true });
+  assert.deepEqual(harness.disconnectCalls, ['DUPLICATE']);
+  assert.equal(harness.runtime.getDevice('DUPLICATE').connectionState, 'error');
+  assert.equal(harness.runtime.getDevice('DUPLICATE').statusSource, 'cloud');
+  assert.equal(harness.connectCalls.some((call) => call.authToken === 'first-token' && harness.connectCalls.indexOf(call) >= initialConnections), false);
+});
+
+test('waits for a full batch before connecting duplicate sources in insertion order', async () => {
+  const first = deferred();
+  const second = deferred();
+  const harness = createHarness({ cloudResults: [first.promise, second.promise], scanResults: [[]] });
+  const started = harness.runtime.start({ accounts: [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token' },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: '', accessToken: 'second-token' },
+  ] });
+  await Promise.resolve();
+  second.resolve({ success: true, devices: [cloudDevice('DUPLICATE')] });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(harness.connectCalls.length, 0);
+  first.resolve({ success: true, devices: [cloudDevice('DUPLICATE')] });
+  await started;
+  assert.equal(harness.connectCalls.length, 1);
+  assert.equal(harness.connectCalls[0].authToken, 'first-token');
+});
+
+test('uses a later duplicate access code with cached LAN IP without a transient cloud connect', async () => {
+  const first = deferred();
+  const second = deferred();
+  const harness = createHarness({
+    cache: { DUPLICATE: { ip: '192.168.1.88' } },
+    cloudResults: [first.promise, second.promise],
+    scanResults: [[]],
+  });
+  const started = harness.runtime.start({ accounts: [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token' },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: '', accessToken: 'second-token' },
+  ] });
+  second.resolve({ success: true, devices: [cloudDevice('DUPLICATE', { accessCode: 'later-code' })] });
+  first.resolve({ success: true, devices: [cloudDevice('DUPLICATE', { accessCode: '' })] });
+  await started;
+  assert.deepEqual(harness.connectCalls, [{ serialNumber: 'DUPLICATE', mode: 'local', ip: '192.168.1.88', accessCode: 'later-code' }]);
+});
+
+test('keeps independent account refreshes from cancelling each other', async () => {
+  const first = deferred();
+  const second = deferred();
+  const harness = createHarness({
+    cloudResults: [
+      { success: true, devices: [cloudDevice('FIRST_OLD')] },
+      { success: true, devices: [cloudDevice('SECOND_OLD')] },
+      first.promise,
+      second.promise,
+    ],
+    scanResults: [[], [], []],
+  });
+  await harness.runtime.start({ accounts: [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token' },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: '', accessToken: 'second-token' },
+  ] });
+  const refreshFirst = harness.runtime.refresh({ accountId: 'first', skipLan: true });
+  const refreshSecond = harness.runtime.refresh({ accountId: 'second', skipLan: true });
+  second.resolve({ success: true, devices: [cloudDevice('SECOND_NEW')] });
+  first.resolve({ success: true, devices: [cloudDevice('FIRST_NEW')] });
+  await Promise.all([refreshFirst, refreshSecond]);
+  assert.deepEqual(harness.runtime.snapshot().devices.map((device) => device.dev_id), ['FIRST_NEW', 'SECOND_NEW']);
+});
+
+test('rejects an older completion from the same account refresh', async () => {
+  const stale = deferred();
+  const current = deferred();
+  const harness = createHarness({
+    cloudResults: [{ success: true, devices: [cloudDevice('OLD')] }, stale.promise, current.promise],
+    scanResults: [[], [], []],
+  });
+  await harness.runtime.start({ accounts: [{ accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token' }] });
+  const firstRefresh = harness.runtime.refresh({ accountId: 'first', skipLan: true });
+  const secondRefresh = harness.runtime.refresh({ accountId: 'first', skipLan: true });
+  current.resolve({ success: true, devices: [cloudDevice('CURRENT')] });
+  stale.resolve({ success: true, devices: [cloudDevice('STALE')] });
+  await Promise.all([firstRefresh, secondRefresh]);
+  assert.deepEqual(harness.runtime.snapshot().devices.map((device) => device.dev_id), ['CURRENT']);
+});
+
+test('removing an account aborts its in-flight refresh without late account or device events', async () => {
+  const late = deferred();
+  const harness = createHarness({
+    cloudResults: [{ success: true, devices: [cloudDevice('SERIAL_A')] }, late.promise],
+    scanResults: [[]],
+  });
+  await harness.runtime.start({ accounts: [{ accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token' }] });
+  const events = [];
+  harness.runtime.subscribe((event) => events.push(event));
+  const refreshing = harness.runtime.refresh({ accountId: 'first', skipLan: true });
+  await Promise.resolve();
+  harness.runtime.removeAccount('first');
+  const countAfterRemoval = events.length;
+  late.resolve({ success: true, devices: [cloudDevice('LATE')] });
+  await refreshing;
+  assert.equal(events.length, countAfterRemoval);
+  assert.deepEqual(harness.runtime.snapshot().devices, []);
+});
+
+test('addAccount waits for one owned LAN scan before resolving', async () => {
+  const scan = deferred();
+  const harness = createHarness({
+    cloudResults: [
+      { success: true, devices: [cloudDevice('FIRST')] },
+      { success: true, devices: [cloudDevice('SECOND')] },
+    ],
+    scanResults: [[], scan.promise],
+  });
+  await harness.runtime.start({ accounts: [{ accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'first-token' }] });
+  let settled = false;
+  const adding = harness.runtime.addAccount({ accountId: 'second', accountMasked: 's***@example.com', remark: '', accessToken: 'second-token' }).then(() => { settled = true; });
+  while (harness.scanCalls.length < 2) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.scanCalls.length, 2);
+  assert.equal(settled, false);
+  scan.resolve([]);
+  await adding;
+  assert.equal(settled, true);
+});
+
+test('a credential update followed by refresh restores an invalid account', async () => {
+  const invalid = Object.assign(new Error('expired'), { status: 403, tokenInvalid: true });
+  const harness = createHarness({
+    cloudResults: [invalid, { success: true, devices: [cloudDevice('RECOVERED')] }],
+    scanResults: [[], []],
+  });
+  await harness.runtime.start({ accounts: [{ accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'old-token' }] });
+  assert.equal(harness.runtime.getAccountStates()[0].connectionState, 'invalid');
+  harness.runtime.updateAccount({ accountId: 'first', accessToken: 'new-token' });
+  await harness.runtime.refresh({ accountId: 'first', skipLan: true });
+  assert.equal(harness.runtime.getAccountStates()[0].connectionState, 'connected');
+  assert.equal(harness.connectCalls.at(-1).authToken, 'new-token');
+});
