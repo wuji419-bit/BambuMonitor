@@ -56,6 +56,37 @@ test('creates a validated private record with a generated stable account id', ()
   assert.deepEqual(validateAccountRecord(record), record);
 });
 
+test('supports an unknown legacy identity and completes it once after authentication', () => {
+  const legacy = createAccountRecord({
+    account: '',
+    accessToken: 'legacy-token',
+    remark: 'Imported',
+  }, { accountId: 'acc-legacy', timestamp: 100 });
+
+  assert.deepEqual(toPublicAccount(legacy), {
+    accountId: 'acc-legacy',
+    accountMasked: '***',
+    remark: 'Imported',
+    label: 'Imported',
+    savedAt: 100,
+    updatedAt: 100,
+  });
+
+  const completed = updateAccountRecord(legacy, {
+    account: 'maker@example.com',
+    accessToken: 'renewed-token',
+  }, { timestamp: 200 });
+  assert.equal(completed.accountId, 'acc-legacy');
+  assert.equal(completed.account, 'maker@example.com');
+  assert.equal(completed.accountMasked, 'm***@example.com');
+  assert.equal(completed.savedAt, 100);
+  assert.equal(completed.remark, 'Imported');
+  assert.throws(
+    () => updateAccountRecord(completed, { account: 'other@example.com' }, { timestamp: 300 }),
+    /different account/,
+  );
+});
+
 test('refreshes duplicate credentials without changing identity or an omitted remark', () => {
   const original = createAccountRecord({
     account: 'maker@example.com',

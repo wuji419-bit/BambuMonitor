@@ -137,6 +137,14 @@ function createAccountStore({ userDataPath, protection = null, randomId, now } =
     }
   }
 
+  function repositoryFileIsProtected() {
+    try {
+      return JSON.parse(fs.readFileSync(accountStorePath, 'utf8'))?.protected === true;
+    } catch (error) {
+      throw new AccountStoreRecoverableError('Unable to read Bambu account repository', error);
+    }
+  }
+
   function fsyncDirectory() {
     let descriptor;
     try {
@@ -217,27 +225,42 @@ function createAccountStore({ userDataPath, protection = null, randomId, now } =
     if (!fs.existsSync(legacyPath)) return { version: REPOSITORY_VERSION, accounts: [] };
 
     let session;
+    let record;
     try {
       session = readAuthSessionStrict(userDataPath, protection);
+      if (session) {
+        record = createAccountRecord(session, {
+          randomId,
+          timestamp: session.savedAt,
+        });
+      }
     } catch (error) {
       throw new AccountStoreRecoverableError('Unable to migrate Bambu auth session', error);
     }
     if (!session) return { version: REPOSITORY_VERSION, accounts: [] };
     const repository = {
       version: REPOSITORY_VERSION,
-      accounts: [createAccountRecord(session, {
-        randomId,
-        timestamp: session.savedAt,
-      })],
+      accounts: [record],
     };
     const written = writeRepository(repository);
     fs.rmSync(legacyPath);
     return written;
   }
 
-  let repository = fs.existsSync(accountStorePath)
-    ? readRepository()
-    : migrateLegacySession();
+  let repository;
+  if (fs.existsSync(accountStorePath)) {
+    repository = readRepository();
+    if (canProtect(protection) && !repositoryFileIsProtected()) {
+      try {
+        repository = writeRepository(repository);
+      } catch (error) {
+        if (error instanceof AccountStoreRecoverableError) throw error;
+        throw new AccountStoreRecoverableError('Unable to protect Bambu account repository', error);
+      }
+    }
+  } else {
+    repository = migrateLegacySession();
+  }
 
   function commit(accounts) {
     const written = writeRepository({ version: REPOSITORY_VERSION, accounts });

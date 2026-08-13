@@ -82,6 +82,55 @@ test('protects the entire account repository without leaving account secrets on 
   assert.equal(JSON.parse(raw).protected, true);
 });
 
+test('re-protects an existing plaintext account repository before using it with protection', () => {
+  const dir = makeTempDir();
+  const { store: plaintextStore } = createStore(dir);
+  plaintextStore.addAccount({ account: 'secure@example.com', accessToken: 'secret-token' });
+  const repositoryPath = getAccountStorePath(dir);
+  const plaintext = fs.readFileSync(repositoryPath, 'utf8');
+
+  const reopened = createStore(dir, { protection: makeProtectionAdapter() }).store;
+  const protectedRaw = fs.readFileSync(repositoryPath, 'utf8');
+
+  assert.doesNotMatch(protectedRaw, /secure@example\.com|secret-token/);
+  assert.equal(JSON.parse(protectedRaw).protected, true);
+  assert.deepEqual(reopened.getPrivateAccounts(), plaintextStore.getPrivateAccounts());
+  assert.notEqual(protectedRaw, plaintext);
+});
+
+test('preserves a plaintext repository when re-protection fails', () => {
+  const dir = makeTempDir();
+  const { store } = createStore(dir);
+  store.addAccount({ account: 'secure@example.com', accessToken: 'secret-token' });
+  const repositoryPath = getAccountStorePath(dir);
+  const plaintext = fs.readFileSync(repositoryPath, 'utf8');
+  const protection = { protect() { throw new Error('key unavailable'); } };
+
+  assert.throws(
+    () => createStore(dir, { protection }),
+    (error) => error instanceof AccountStoreRecoverableError && error.code === 'BAMBU_ACCOUNT_STORE_RECOVERABLE',
+  );
+  assert.equal(fs.readFileSync(repositoryPath, 'utf8'), plaintext);
+});
+
+test('rolls back a plaintext repository when re-protection verification fails', () => {
+  const dir = makeTempDir();
+  const { store } = createStore(dir);
+  store.addAccount({ account: 'secure@example.com', accessToken: 'secret-token' });
+  const repositoryPath = getAccountStorePath(dir);
+  const plaintext = fs.readFileSync(repositoryPath, 'utf8');
+  const protection = {
+    protect(value) { return Buffer.from(value, 'utf8'); },
+    unprotect() { throw new Error('verification key unavailable'); },
+  };
+
+  assert.throws(
+    () => createStore(dir, { protection }),
+    (error) => error instanceof AccountStoreRecoverableError && error.code === 'BAMBU_ACCOUNT_STORE_RECOVERABLE',
+  );
+  assert.equal(fs.readFileSync(repositoryPath, 'utf8'), plaintext);
+});
+
 test('migrates a plaintext legacy auth session only when the account repository is absent', () => {
   const dir = makeTempDir();
   writeAuthSession(dir, { account: 'legacy@example.com', accessToken: 'legacy-token', savedAt: 50 });
@@ -92,6 +141,55 @@ test('migrates a plaintext legacy auth session only when the account repository 
   assert.equal(store.getPrivateAccounts()[0].savedAt, 50);
   assert.equal(fs.existsSync(getAuthSessionPath(dir)), false);
   assert.equal(fs.existsSync(getAccountStorePath(dir)), true);
+});
+
+test('migrates a token-only legacy session as an unknown account identity', () => {
+  const dir = makeTempDir();
+  writeAuthSession(dir, { accessToken: 'legacy-token', savedAt: 50 });
+
+  const { store } = createStore(dir);
+
+  assert.deepEqual(store.getPrivateAccounts().map(({ accountId, account, accountMasked, savedAt }) => ({
+    accountId, account, accountMasked, savedAt,
+  })), [{ accountId: 'acc-2', account: '', accountMasked: '***', savedAt: 50 }]);
+  assert.deepEqual(store.listAccounts().map(({ accountMasked, label }) => ({ accountMasked, label })), [
+    { accountMasked: '***', label: '***' },
+  ]);
+
+  const legacy = store.getPrivateAccounts()[0];
+  store.reauthenticateAccount(legacy.accountId, {
+    account: 'maker@example.com',
+    accessToken: 'renewed-token',
+  });
+  assert.deepEqual(store.getPrivateAccounts().map(({ accountId, account, savedAt }) => ({ accountId, account, savedAt })), [
+    { accountId: legacy.accountId, account: 'maker@example.com', savedAt: 50 },
+  ]);
+  assert.throws(
+    () => store.reauthenticateAccount(legacy.accountId, { account: 'other@example.com', accessToken: 'bad' }),
+    /different account/,
+  );
+});
+
+test('refreshes rather than duplicates an unknown account identity', () => {
+  const { store } = createStore(makeTempDir());
+  const first = store.addAccount({ account: '', accessToken: 'first-token' });
+  const refreshed = store.addAccount({ account: '', accessToken: 'second-token' });
+
+  assert.equal(refreshed.accountId, first.accountId);
+  assert.equal(store.getPrivateAccounts().length, 1);
+  assert.equal(store.getPrivateAccounts()[0].accessToken, 'second-token');
+});
+
+test('wraps legacy record normalization failures as recoverable errors', () => {
+  const dir = makeTempDir();
+  writeAuthSession(dir, { accessToken: 'x'.repeat(16385), savedAt: 50 });
+
+  assert.throws(
+    () => createStore(dir),
+    (error) => error instanceof AccountStoreRecoverableError && error.code === 'BAMBU_ACCOUNT_STORE_RECOVERABLE',
+  );
+  assert.equal(fs.existsSync(getAccountStorePath(dir)), false);
+  assert.equal(fs.existsSync(getAuthSessionPath(dir)), true);
 });
 
 test('migrates a protected legacy auth session into a protected account repository', () => {

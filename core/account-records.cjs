@@ -82,7 +82,7 @@ function validateAccountRecord(value) {
   const valid = hasExactKeys(value, expectedKeys)
     && isBoundedString(value.accountId, MAX_ACCOUNT_ID_LENGTH)
     && ACCOUNT_ID_PATTERN.test(value.accountId)
-    && isBoundedString(value.account, MAX_ACCOUNT_LENGTH)
+    && isBoundedString(value.account, MAX_ACCOUNT_LENGTH, { allowEmpty: true })
     && value.account === value.account.trim()
     && isBoundedString(value.accountMasked, MAX_ACCOUNT_MASK_LENGTH)
     && value.accountMasked === maskAccount(value.account)
@@ -165,15 +165,15 @@ function updateAccountRecord(current, input, options = {}) {
   const account = Object.hasOwn(input, 'account')
     ? String(input.account ?? '').trim()
     : existing.account;
-  if (account !== existing.account) {
+  if (existing.account && account !== existing.account) {
     throw new TypeError('Cannot update credentials for a different account');
   }
 
   const timestamp = readTimestamp(options.timestamp);
   const record = {
     accountId: existing.accountId,
-    account: existing.account,
-    accountMasked: maskAccount(existing.account),
+    account,
+    accountMasked: maskAccount(account),
     remark: Object.hasOwn(input, 'remark') ? normalizeRemark(input.remark) : existing.remark,
     accessToken: Object.hasOwn(input, 'accessToken') ? input.accessToken : existing.accessToken,
     username: Object.hasOwn(input, 'username') ? input.username : existing.username,
