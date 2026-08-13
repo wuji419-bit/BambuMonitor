@@ -109,6 +109,8 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
   const records = new Map();
   const cache = new Map();
   const fingerprints = new Map();
+  const disconnectTasks = new Map();
+  const deferredConnects = new Set();
   const subscribers = new Set();
   let order = [];
   let generation = 0;
@@ -231,6 +233,10 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
     }
     record.device.connectionMode = connection.mode;
     record.device.statusSource = connection.mode;
+    if (disconnectTasks.has(record.serialNumber)) {
+      deferConnection(record.serialNumber);
+      return false;
+    }
     if (fingerprints.get(record.serialNumber) === connection.fingerprint) return false;
     fingerprints.set(record.serialNumber, connection.fingerprint);
     record.device.connectionState = 'connecting'; record.device.errorMsg = '';
@@ -247,9 +253,29 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
   }
 
   function disconnect(serialNumber) {
+    const existing = disconnectTasks.get(serialNumber);
+    if (existing) return existing;
     fingerprints.delete(serialNumber);
-    try { return Promise.resolve(mqtt.disconnect(serialNumber)).catch(() => log('warn', 'device-runtime.mqtt-disconnect-failed', { serialNumber })); }
-    catch { log('warn', 'device-runtime.mqtt-disconnect-failed', { serialNumber }); return Promise.resolve(); }
+    let pending;
+    try { pending = mqtt.disconnect(serialNumber); }
+    catch { pending = Promise.reject(new Error('MQTT disconnect failed')); }
+    const task = Promise.resolve(pending)
+      .catch(() => log('warn', 'device-runtime.mqtt-disconnect-failed', { serialNumber }))
+      .finally(() => { if (disconnectTasks.get(serialNumber) === task) disconnectTasks.delete(serialNumber); });
+    disconnectTasks.set(serialNumber, task);
+    return task;
+  }
+
+  function deferConnection(serialNumber) {
+    if (deferredConnects.has(serialNumber)) return;
+    const task = disconnectTasks.get(serialNumber);
+    if (!task) return;
+    deferredConnects.add(serialNumber);
+    void task.finally(() => {
+      deferredConnects.delete(serialNumber);
+      const current = records.get(serialNumber);
+      if (!stopped && current) ensureConnection(current);
+    });
   }
 
   function rebuildRecords() {
@@ -321,23 +347,23 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
 
   function beginAccountOperation(entry, externalSignal) {
     entry.operationVersion += 1;
-    entry.abortController?.abort();
+    entry.activeController?.abort();
     const controller = new AbortController();
     const abort = () => controller.abort();
     externalSignal?.addEventListener?.('abort', abort, { once: true });
     if (externalSignal?.aborted) abort();
-    entry.abortController = controller;
+    entry.activeController = controller;
     entry.connectionState = 'syncing'; entry.errorCode = null; emitAccount('account.updated', entry);
     return {
       entry,
       version: entry.operationVersion,
       generation,
       signal: controller.signal,
-      requestSignal: externalSignal || controller.signal,
+      requestSignal: controller.signal,
       externalSignal,
       cleanup() {
         externalSignal?.removeEventListener?.('abort', abort);
-        if (entry.abortController === controller) entry.abortController = null;
+        if (entry.activeController === controller) entry.activeController = null;
       },
     };
   }
@@ -450,12 +476,12 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
     if (stopSessionPromise) await stopSessionPromise;
     if (stopped || signal?.aborted) return snapshot();
     const expectedGeneration = ++generation; activeScan?.controller.abort();
-    for (const entry of accounts.values()) entry.abortController?.abort();
+    for (const entry of accounts.values()) entry.activeController?.abort();
     accounts.clear();
     const supplied = Array.isArray(inputAccounts) ? inputAccounts : [{ accountId: 'legacy', accountMasked: '', remark: '', accessToken, username }];
     for (let index = 0; index < supplied.length; index += 1) {
       const account = normalizeAccount(supplied[index], `account-${index + 1}`); if (!account.accessToken || accounts.has(account.accountId)) continue;
-      accounts.set(account.accountId, { account, inventory: [], connectionState: 'idle', errorCode: null, syncedAt: null, operationVersion: 0, abortController: null });
+      accounts.set(account.accountId, { account, inventory: [], connectionState: 'idle', errorCode: null, syncedAt: null, operationVersion: 0, activeController: null });
     }
     try { loadCache(); } catch { log('warn', 'device-runtime.cache-load-failed'); }
     if (stopped || signal?.aborted || generation !== expectedGeneration) return snapshot();
@@ -469,7 +495,7 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
     if (stopped || signal?.aborted) return snapshot();
     const normalized = normalizeAccount(account, `account-${accounts.size + 1}`); if (!normalized.accessToken) throw new TypeError('Account requires accessToken');
     if (accounts.has(normalized.accountId)) return updateAccount(normalized);
-    accounts.set(normalized.accountId, { account: normalized, inventory: [], connectionState: 'idle', errorCode: null, syncedAt: null, operationVersion: 0, abortController: null });
+    accounts.set(normalized.accountId, { account: normalized, inventory: [], connectionState: 'idle', errorCode: null, syncedAt: null, operationVersion: 0, activeController: null });
     await refresh({ accountId: normalized.accountId, signal, skipLan: true });
     if (stopped || signal?.aborted || !accounts.has(normalized.accountId)) return snapshot();
     await scanLan({ signal });
@@ -484,6 +510,11 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
       next[field] = field === 'savedAt' || field === 'updatedAt' ? account[field] : text(account[field]);
     }
     if (!next.accountMasked) next.accountMasked = entry.account.accountMasked || '***';
+    const identityChanged = ['account', 'accessToken', 'username'].some((field) => next[field] !== entry.account[field]);
+    if (identityChanged) {
+      entry.operationVersion += 1;
+      entry.activeController?.abort();
+    }
     entry.account = next;
     rebuildRecords(); emitAccount('account.updated', entry); emitSnapshot(); return safeAccountState(entry);
   }
@@ -495,20 +526,21 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
   }
   function removeAccount(accountId) {
     const entry = accounts.get(text(accountId)); if (!entry) return false;
-    entry.operationVersion += 1; entry.abortController?.abort();
+    entry.operationVersion += 1; entry.activeController?.abort();
     accounts.delete(entry.account.accountId); rebuildRecords(); emit({ type: 'account.removed', accountId: entry.account.accountId }); emitSnapshot(); return true;
   }
 
   function stopSession() {
     if (stopSessionPromise) return stopSessionPromise; if (stopped) return Promise.resolve(snapshot());
     const hadSession = records.size || accounts.size || activeScan; if (!hadSession) return Promise.resolve(snapshot());
-    generation += 1; activeScan?.controller.abort(); for (const entry of accounts.values()) entry.abortController?.abort(); const serials = [...records.keys()]; records.clear(); cache.clear(); order = []; accounts.clear(); emitSnapshot();
-    const reset = Promise.allSettled(serials.map(disconnect)).then(snapshot); const wrapped = reset.finally(() => { if (stopSessionPromise === wrapped) stopSessionPromise = null; }); stopSessionPromise = wrapped; return wrapped;
+    generation += 1; activeScan?.controller.abort(); for (const entry of accounts.values()) entry.activeController?.abort(); const serials = [...records.keys()]; records.clear(); cache.clear(); order = []; accounts.clear(); emitSnapshot();
+    const pending = [...new Set([...serials.map(disconnect), ...disconnectTasks.values()])];
+    const reset = Promise.allSettled(pending).then(snapshot); const wrapped = reset.finally(() => { if (stopSessionPromise === wrapped) stopSessionPromise = null; }); stopSessionPromise = wrapped; return wrapped;
   }
   function shutdown() {
-    if (shutdownPromise) return shutdownPromise; stopped = true; generation += 1; activeScan?.controller.abort(); for (const entry of accounts.values()) entry.abortController?.abort(); subscribers.clear();
+    if (shutdownPromise) return shutdownPromise; stopped = true; generation += 1; activeScan?.controller.abort(); for (const entry of accounts.values()) entry.activeController?.abort(); subscribers.clear();
     try { removeMqttListener?.(); } catch { log('warn', 'device-runtime.mqtt-listener-remove-failed'); } removeMqttListener = null;
-    const serials = [...records.keys()]; const pending = serials.map(disconnect); if (stopSessionPromise) pending.push(stopSessionPromise);
+    const serials = [...records.keys()]; const pending = [...new Set([...serials.map(disconnect), ...disconnectTasks.values()])]; if (stopSessionPromise) pending.push(stopSessionPromise);
     shutdownPromise = Promise.allSettled(pending).then(async () => { try { await mqtt.shutdown(); } catch { log('warn', 'device-runtime.mqtt-shutdown-failed'); } fingerprints.clear(); return snapshot(); }); return shutdownPromise;
   }
 

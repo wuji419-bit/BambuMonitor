@@ -30,6 +30,7 @@ function createHarness({
   cache = {},
   cloudResults = [],
   connectImpl,
+  disconnectImpl,
   logger,
   mqttEvents,
   scanResults = [],
@@ -62,6 +63,7 @@ function createHarness({
     },
     disconnect(serialNumber) {
       disconnectCalls.push(serialNumber);
+      if (disconnectImpl) return disconnectImpl(serialNumber);
       return Promise.resolve({ success: true });
     },
     subscribe(listener) {
@@ -170,9 +172,11 @@ test('start threads AbortSignal to cloud and stale cloud completion cannot mutat
   await Promise.resolve();
   await Promise.resolve();
 
-  assert.equal(cloudOptions.signal, controller.signal);
+  assert.notEqual(cloudOptions.signal, controller.signal);
+  assert.equal(cloudOptions.signal.aborted, false);
   controller.abort();
   await started;
+  assert.equal(cloudOptions.signal.aborted, true);
   assert.equal(harness.runtime.snapshot().cloudState, 'reconnecting');
 
   cloud.resolve({ success: true, devices: [cloudDevice('STALE')], username: 'stale-user' });
@@ -1243,5 +1247,77 @@ test('a credential update followed by refresh restores an invalid account', asyn
   harness.runtime.updateAccount({ accountId: 'first', accessToken: 'new-token' });
   await harness.runtime.refresh({ accountId: 'first', skipLan: true });
   assert.equal(harness.runtime.getAccountStates()[0].connectionState, 'connected');
+  assert.equal(harness.connectCalls.at(-1).authToken, 'new-token');
+});
+
+test('credential replacement invalidates a live refresh before its stale completion can mutate', async () => {
+  const stale = deferred();
+  let staleOptions;
+  const harness = createHarness({
+    cloudResults: [
+      { success: true, username: 'old-user', devices: [cloudDevice('CURRENT')] },
+      (_accessToken, options) => { staleOptions = options; return stale.promise; },
+      { success: true, username: 'new-user', devices: [cloudDevice('REAUTHENTICATED')] },
+    ],
+    scanResults: [[], []],
+  });
+  await harness.runtime.start({ accounts: [{ accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'old-token', username: 'old-user' }] });
+  const external = new AbortController();
+  const refreshing = harness.runtime.refresh({ accountId: 'first', signal: external.signal, skipLan: true });
+  await Promise.resolve();
+  harness.runtime.updateAccount({ accountId: 'first', accessToken: 'new-token', username: 'new-user' });
+  const afterUpdate = harness.runtime.snapshot();
+  const accountStateAfterUpdate = harness.runtime.getAccountStates()[0];
+  assert.equal(staleOptions.signal.aborted, true);
+  stale.resolve({ success: true, username: 'stale-user', devices: [cloudDevice('STALE')] });
+  await refreshing;
+  assert.deepEqual(harness.runtime.snapshot(), afterUpdate);
+  assert.deepEqual(harness.runtime.getAccountStates()[0], accountStateAfterUpdate);
+
+  await harness.runtime.refresh({ accountId: 'first', skipLan: true });
+  assert.deepEqual(harness.runtime.snapshot().devices.map((device) => device.dev_id), ['REAUTHENTICATED']);
+  assert.equal(harness.connectCalls.at(-1).authToken, 'new-token');
+  assert.equal(harness.connectCalls.at(-1).username, 'new-user');
+});
+
+test('coalesces invalid-source disconnect with immediate stop and shutdown', async () => {
+  for (const lifecycle of ['stopSession', 'shutdown']) {
+    const invalid = Object.assign(new Error('expired'), { status: 401, tokenInvalid: true });
+    const disconnecting = deferred();
+    const harness = createHarness({
+      cloudResults: [{ success: true, devices: [cloudDevice('SERIAL_A')] }, invalid],
+      disconnectImpl: () => disconnecting.promise,
+      scanResults: [[]],
+    });
+    await harness.runtime.start({ accessToken: 'token', username: 'user' });
+    await harness.runtime.refresh({ skipLan: true });
+    const closing = harness.runtime[lifecycle]();
+    assert.deepEqual(harness.disconnectCalls, ['SERIAL_A']);
+    disconnecting.resolve();
+    await closing;
+    assert.deepEqual(harness.disconnectCalls, ['SERIAL_A']);
+  }
+});
+
+test('reauth waits for an active disconnect before connecting the current source once', async () => {
+  const invalid = Object.assign(new Error('expired'), { status: 403, tokenInvalid: true });
+  const disconnecting = deferred();
+  const harness = createHarness({
+    cloudResults: [
+      { success: true, devices: [cloudDevice('SERIAL_A')] },
+      invalid,
+      { success: true, devices: [cloudDevice('SERIAL_A')] },
+    ],
+    disconnectImpl: () => disconnecting.promise,
+    scanResults: [[]],
+  });
+  await harness.runtime.start({ accounts: [{ accountId: 'first', accountMasked: 'f***@example.com', remark: '', accessToken: 'old-token' }] });
+  await harness.runtime.refresh({ accountId: 'first', skipLan: true });
+  harness.runtime.updateAccount({ accountId: 'first', accessToken: 'new-token' });
+  await harness.runtime.refresh({ accountId: 'first', skipLan: true });
+  assert.equal(harness.connectCalls.length, 1);
+  disconnecting.resolve();
+  while (harness.connectCalls.length < 2) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.connectCalls.length, 2);
   assert.equal(harness.connectCalls.at(-1).authToken, 'new-token');
 });
