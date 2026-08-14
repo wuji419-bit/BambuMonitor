@@ -63,7 +63,9 @@ function projectSnapshot(value = {}) {
           ...projected,
           accountIds: safeIds,
           accountLabels: safeLabels,
-          displayName: safeLabels.length ? `${name}（${safeLabels.join(' / ')}）` : name,
+          displayName: accounts.length > 1 && safeLabels.length
+            ? `${name}（${safeLabels.join(' / ')}）`
+            : name,
         };
       })
       : [],

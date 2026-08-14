@@ -142,7 +142,9 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
       ...record.device,
       dev_id: record.serialNumber,
       name: rawName,
-      displayName: labels.length ? `${rawName}（${labels.join(' / ')}）` : rawName,
+      displayName: accounts.size > 1 && labels.length
+        ? `${rawName}（${labels.join(' / ')}）`
+        : rawName,
       accountIds,
       accountLabels: labels,
     });

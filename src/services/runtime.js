@@ -22,7 +22,9 @@ export function replaceRuntimeSnapshot(_current, devices) {
 
 function normalizeRuntimeDevice(device = {}) {
   const next = { ...device };
+  const rawName = typeof next.name === 'string' ? next.name.trim() : '';
   const displayName = typeof next.displayName === 'string' ? next.displayName.trim() : '';
+  if (rawName && displayName && displayName !== rawName) next.baseName = rawName;
   if (displayName) next.name = displayName;
   return next;
 }

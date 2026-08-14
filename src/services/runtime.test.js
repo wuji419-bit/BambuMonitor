@@ -49,6 +49,7 @@ test('runtime inventory consistently promotes the account-qualified display name
   const updated = mergeRuntimeDevice(snapshot, { dev_id: 'A', progress: 42, name: 'A2L01' });
   assert.equal(updated[0].name, 'A2L01（工作室）');
   assert.equal(updated[0].progress, 42);
+  assert.equal(updated[0].baseName, 'A2L01');
 });
 
 test('Electron runtime fails closed when the managed account preload is unavailable', async () => {

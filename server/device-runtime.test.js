@@ -1089,6 +1089,7 @@ test('updates account credentials in place without replacing its masked public l
 
   assert.equal(harness.connectCalls.at(-1).authToken, 'new-token');
   assert.deepEqual(harness.runtime.getDevice('SERIAL_A').accountLabels, ['o***@example.com']);
+  assert.equal(harness.runtime.getDevice('SERIAL_A').displayName, 'Printer SERIAL_A');
   assert.equal(JSON.stringify(harness.runtime.snapshot()).includes('office@example.com'), false);
 });
 

@@ -4,7 +4,11 @@ import PrinterWidget from './components/PrinterWidget';
 import appIconUrl from './assets/app-icon.svg';
 import { bambuClient, scanPrinters } from './services/bambu';
 import { electronEvents, electronWindow } from './services/electron';
-import { dispatchPrinterNotification, getPrinterNotificationEvent } from './services/notifications';
+import {
+  dispatchPrinterNotification,
+  getPrinterNotificationEvent,
+  getPrinterNotificationName,
+} from './services/notifications';
 import {
   mergeRuntimeDevice,
   replaceRuntimeSnapshot,
@@ -1019,7 +1023,7 @@ function App() {
       // Speech and webhook share one finish-transition source so a printer
       // never speaks without notifying (or vice versa).
       if (notificationEvent === 'print_finished') {
-        const message = `${printer.name || '打印机'} 打印完成`;
+        const message = `${getPrinterNotificationName(printer)} 打印完成`;
         try {
           if (typeof window !== 'undefined' && window.speechSynthesis && window.SpeechSynthesisUtterance) {
             const utterance = new window.SpeechSynthesisUtterance(message);

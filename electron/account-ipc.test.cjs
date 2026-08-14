@@ -116,7 +116,7 @@ test('projects malicious runtime results to public account and device fields', a
   assert.equal(result.success, true);
   assert.equal(result.snapshot.accounts[0].label, 'Studio');
   assert.equal(result.snapshot.accountStates[0].status, 'connected');
-  assert.equal(result.snapshot.devices[0].displayName, 'P1S（Studio）');
+  assert.equal(result.snapshot.devices[0].displayName, 'P1S');
   assert.deepEqual(result.snapshot.devices[0].accountIds, ['account-1']);
   assert.deepEqual(result.snapshot.devices[0].accountLabels, ['Studio']);
   assert.equal(JSON.stringify(result).includes('leaked-token'), false);
@@ -125,6 +125,28 @@ test('projects malicious runtime results to public account and device fields', a
   assert.equal(JSON.stringify(result).includes('192.168.1.50'), false);
   assert.equal(JSON.stringify(result).includes('leaked-token-id'), false);
   assert.equal(JSON.stringify(result).includes('leaked-token-label'), false);
+});
+
+test('projected device names include account labels only when multiple accounts are connected', async () => {
+  const accounts = [
+    { accountId: 'first', accountMasked: 'f***@example.com', remark: 'Studio', label: 'Studio', savedAt: 10, updatedAt: 10 },
+    { accountId: 'second', accountMasked: 's***@example.com', remark: 'Home', label: 'Home', savedAt: 10, updatedAt: 10 },
+  ];
+  const snapshot = {
+    accounts,
+    accountStates: [],
+    devices: [{
+      dev_id: 'SERIAL',
+      name: 'P1S',
+      accountIds: ['first'],
+      accountLabels: ['Studio'],
+    }],
+  };
+  const harness = createIpcHarness({ listAccounts: () => snapshot });
+
+  const result = await harness.invoke(ACCOUNT_IPC_CHANNELS.list);
+
+  assert.equal(result.snapshot.devices[0].displayName, 'P1S（Studio）');
 });
 
 test('routes account mutations and emits only the projected snapshot', async () => {

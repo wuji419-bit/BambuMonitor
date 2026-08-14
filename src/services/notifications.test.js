@@ -6,9 +6,17 @@ import {
   createDefaultNotificationConfig,
   getTestNotificationError,
   getPrinterNotificationEvent,
+  getPrinterNotificationName,
   mergeNotificationConfig,
   sendTestNotification,
 } from './notifications.js';
+
+test('notification and speech names never include the account-qualified display name', () => {
+  assert.equal(getPrinterNotificationName({
+    name: 'A2L01（工作室）',
+    baseName: 'A2L01',
+  }), 'A2L01');
+});
 
 test('emits print completion from job status transition', () => {
   assert.equal(

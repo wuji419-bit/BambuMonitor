@@ -235,11 +235,15 @@ export function getPrinterNotificationEvent(previousValue, currentValue) {
   return null;
 }
 
+export function getPrinterNotificationName(printer = {}) {
+  return String(printer.baseName || printer.name || '').trim() || '未命名打印机';
+}
+
 function buildPrinterSnapshot(printer) {
   return {
     id: printer.dev_id,
     cloudId: printer.cloudId,
-    name: printer.name || '未命名打印机',
+    name: getPrinterNotificationName(printer),
     ip: printer.ip || '',
     status: printer.status || '',
     progress: Math.max(0, Math.min(Number(printer.progress) || 0, 100)),
