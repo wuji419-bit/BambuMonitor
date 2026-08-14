@@ -250,6 +250,11 @@ test('exposes fresh server-only camera config without leaking access codes throu
 
   await harness.runtime.start({ accessToken: 'private-cloud-token', username: 'cloud-user' });
 
+  assert.deepEqual(harness.updateCalls, [{
+    serialNumber: 'SERIAL_A',
+    patch: { accessCode: 'private-camera-code' },
+  }]);
+
   const first = harness.runtime.getCameraConfig('serial_a');
   assert.deepEqual(first, {
     serialNumber: 'SERIAL_A',
@@ -271,6 +276,33 @@ test('exposes fresh server-only camera config without leaking access codes throu
   }
   assert.equal(harness.runtime.getDevice('SERIAL_A').hasLocalAddress, true);
   assert.equal(harness.runtime.getDevice('SERIAL_A').connectionMode, 'local');
+});
+
+test('keeps a cached camera access code when a later cloud inventory omits it', async () => {
+  const harness = createHarness({
+    cache: {
+      SERIAL_A: {
+        ip: '192.168.1.20',
+        accessCode: 'saved-camera-code',
+      },
+    },
+    cloudResults: [{
+      success: true,
+      devices: [cloudDevice('SERIAL_A', { accessCode: '' })],
+      username: 'cloud-user',
+    }],
+    scanResults: [[]],
+  });
+
+  await harness.runtime.start({ accessToken: 'private-cloud-token', username: 'cloud-user' });
+
+  assert.deepEqual(harness.connectCalls.at(-1), {
+    serialNumber: 'SERIAL_A',
+    mode: 'local',
+    ip: '192.168.1.20',
+    accessCode: 'saved-camera-code',
+  });
+  assert.equal(harness.runtime.getCameraConfig('SERIAL_A').accessCode, 'saved-camera-code');
 });
 
 test('stopSession clears live state without shutting down MQTT and a later start synchronizes again', async () => {
@@ -541,6 +573,8 @@ test('merges cache and verified LAN fields by serial, persists them, and ignores
   );
   assert.equal(harness.runtime.getDevice('SERIAL_A').hasLocalAddress, true);
   assert.deepEqual(harness.updateCalls, [{
+    serialNumber: 'SERIAL_A', patch: { accessCode: 'code-SERIAL_A' },
+  }, {
     serialNumber: 'SERIAL_A',
     patch: { ip: '192.168.1.11', name: 'Discovered A', model: 'X1 Carbon' },
   }]);

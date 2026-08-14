@@ -200,6 +200,9 @@ function normalizeDevicePatch(value) {
       result[field] = normalizeString(value[field], MAX_TEXT_LENGTH, invalidDevice, field);
     }
   }
+  if (Object.hasOwn(value, 'accessCode')) {
+    result.accessCode = normalizeString(value.accessCode, MAX_TEXT_LENGTH, invalidDevice, 'accessCode');
+  }
   return result;
 }
 

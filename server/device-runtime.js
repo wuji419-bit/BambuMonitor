@@ -287,10 +287,12 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
       for (const rawDevice of entry.inventory) {
         const cloudDevice = readCloudDevice(rawDevice);
         if (!cloudDevice.serialNumber) continue;
+        const cached = cache.get(cloudDevice.serialNumber) || {};
+        if (!cloudDevice.accessCode) cloudDevice.accessCode = text(cached.accessCode);
         let record = nextRecords.get(cloudDevice.serialNumber);
         if (!record) {
           const previous = records.get(cloudDevice.serialNumber);
-          record = { serialNumber: cloudDevice.serialNumber, device: mergeCloudDevice(previous?.device, cloudDevice, cache.get(cloudDevice.serialNumber) || {}), sources: [] };
+          record = { serialNumber: cloudDevice.serialNumber, device: mergeCloudDevice(previous?.device, cloudDevice, cached), sources: [] };
           nextRecords.set(cloudDevice.serialNumber, record); nextOrder.push(cloudDevice.serialNumber);
         }
         if (!record.sources.some((source) => source.entry === entry)) record.sources.push({ entry, cloudDevice });
@@ -420,6 +422,26 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
     return outcomes;
   }
 
+  function persistCameraAccessCodes(entries, expectedGeneration) {
+    const writes = [];
+    for (const entry of entries) {
+      for (const rawDevice of entry.inventory) {
+        if (stopped || generation !== expectedGeneration) return null;
+        const cloudDevice = readCloudDevice(rawDevice);
+        const cached = cache.get(cloudDevice.serialNumber) || {};
+        if (!cloudDevice.serialNumber || !cloudDevice.accessCode || !isValidPrinterAddress(cached.ip)
+          || text(cached.accessCode) === cloudDevice.accessCode) continue;
+        writes.push(configStore.updateDevice(cloudDevice.serialNumber, { accessCode: cloudDevice.accessCode })
+          .then((persisted) => {
+            if (stopped || generation !== expectedGeneration) return;
+            cache.set(cloudDevice.serialNumber, { ...cached, ...persisted, accessCode: cloudDevice.accessCode });
+          })
+          .catch(() => log('warn', 'device-runtime.camera-access-code-cache-failed', { serialNumber: cloudDevice.serialNumber })));
+      }
+    }
+    return writes.length ? Promise.all(writes) : null;
+  }
+
   async function refresh({ accountId, signal, skipLan = false } = {}) {
     if (stopped || signal?.aborted) return snapshot();
     const entries = accountId ? [accounts.get(text(accountId))].filter(Boolean) : [...accounts.values()];
@@ -432,6 +454,9 @@ export function createDeviceRuntime({ cloud, mqtt, mqttEvents = mqtt, discovery,
         ? await Promise.all(operations.map(refreshAccount))
       : await runPool(operations, refreshAccount);
     if (stopped || generation !== operations[0].generation || !outcomes.some((outcome) => outcome.current)) return snapshot();
+    const cameraCredentialsWrite = persistCameraAccessCodes(entries, operations[0].generation);
+    if (cameraCredentialsWrite) await cameraCredentialsWrite;
+    if (stopped || generation !== operations[0].generation) return snapshot();
     rebuildRecords(); emitSnapshot();
     if (!skipLan) void scanLan({ signal });
     return snapshot();

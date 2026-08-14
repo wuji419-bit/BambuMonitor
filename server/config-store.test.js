@@ -60,11 +60,16 @@ test('persists defaults, restores updates, and returns defensive deep clones', a
   assert.deepEqual(first.getDeviceCache(), DEFAULT_CACHE);
 
   await first.update({ camera: { autoOpen: true, customUrls: { A1: ' https://cam.example/live ' } }, debug: true });
-  await first.updateDevice('01P', { ip: ' 192.168.1.50 ', name: ' A1 mini ', model: ' N2S ' });
+  await first.updateDevice('01P', {
+    ip: ' 192.168.1.50 ',
+    name: ' A1 mini ',
+    model: ' N2S ',
+    accessCode: ' camera-secret ',
+  });
   const restarted = await createConfigStore({ storage, now: () => 200 });
   assert.deepEqual(restarted.get().camera, { autoOpen: true, customUrls: { A1: 'https://cam.example/live' } });
   assert.deepEqual(restarted.getDeviceCache().devices['01P'], {
-    ip: '192.168.1.50', name: 'A1 mini', model: 'N2S', updatedAt: 100,
+    ip: '192.168.1.50', name: 'A1 mini', model: 'N2S', accessCode: 'camera-secret', updatedAt: 100,
   });
 });
 
@@ -199,14 +204,16 @@ test('serializes concurrent config and device mutations without lost updates', a
   assert.deepEqual(Object.keys(store.getDeviceCache().devices).sort(), ['A', 'B']);
 });
 
-test('device updates validate serial and address and persist only allowed normalized fields', async () => {
+test('device updates validate serial, address, and camera credentials while dropping unknown fields', async () => {
   const storage = memoryStorage();
   const store = await createConfigStore({ storage, now: () => 1234 });
   const device = await store.updateDevice(' SERIAL_01 ', {
     ip: ' printer.local ', name: ' Printer ', model: ' X1C ', updatedAt: 1,
     accessCode: '12345678', token: 'hidden', password: 'hidden', unknown: 'drop',
   });
-  assert.deepEqual(device, { ip: 'printer.local', name: 'Printer', model: 'X1C', updatedAt: 1234 });
+  assert.deepEqual(device, {
+    ip: 'printer.local', name: 'Printer', model: 'X1C', accessCode: '12345678', updatedAt: 1234,
+  });
   assert.deepEqual(storage.files['device-cache.json'].devices.SERIAL_01, device);
   for (const serial of ['', '../bad', 'x'.repeat(129)]) {
     await assert.rejects(store.updateDevice(serial, { ip: '10.0.0.1' }), /Invalid device/);
