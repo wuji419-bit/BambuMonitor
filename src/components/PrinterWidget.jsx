@@ -16,6 +16,7 @@ import {
   getCameraConfig,
   getCustomCameraUrl,
   getPrinterCameraKey,
+  isServerManagedCameraSource,
   isAutoCameraSupported,
   mergeCameraConfig,
   saveCameraConfig,
@@ -551,6 +552,7 @@ export default function PrinterWidget({
     ? `同步失败：${deviceSyncError}`
     : (isRefreshingDevices ? '正在同步设备...' : formatDeviceSyncTime(lastDeviceSyncAt));
   const displayInfoLine = (printer) => infoLine(printer, { showRawAddress: isElectron });
+  const serverManagedCameraSource = isServerManagedCameraSource(runtime, capabilities);
   const cameraSourceKey = useMemo(() => JSON.stringify(printers.map((printer) => {
     const key = getPrinterCameraKey(printer);
     return {
@@ -565,9 +567,9 @@ export default function PrinterWidget({
       customUrl: getCustomCameraUrl(cameraConfig, printer),
       cameraMode: getCameraTransport(printer),
       autoCameraSupported: isAutoCameraSupported(printer),
-      serverManaged: Boolean(capabilities.serverSettings),
+      serverManaged: serverManagedCameraSource,
     };
-  })), [printers, cameraConfig, capabilities.serverSettings]);
+  })), [printers, cameraConfig, serverManagedCameraSource]);
   cameraWallOpenRef.current = cameraOpen;
   nativeModeRef.current = nativeMode;
   submittingIpRef.current = submittingIp;

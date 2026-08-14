@@ -9,6 +9,7 @@ import {
   createDefaultCameraConfig,
   getCameraTransport,
   isAutoCameraSupported,
+  isServerManagedCameraSource,
   mergeCameraConfig,
 } from './camera.js';
 
@@ -83,6 +84,15 @@ test('only sends the serial number to the NAS camera runtime', () => {
     ip: '192.168.1.2',
     accessCode: '12345678',
   });
+  assert.deepEqual(buildCameraStartPayload({ kind: 'electron', accounts: {} }, source), {
+    serialNumber: 'SERIAL-1',
+  });
+});
+
+test('managed desktop accounts resolve private camera credentials in the main process', () => {
+  assert.equal(isServerManagedCameraSource({ accounts: {} }, { serverSettings: false }), true);
+  assert.equal(isServerManagedCameraSource(null, { serverSettings: true }), true);
+  assert.equal(isServerManagedCameraSource(null, { serverSettings: false }), false);
 });
 
 test('merges and serializes the server camera settings shape', () => {
