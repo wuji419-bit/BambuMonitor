@@ -1,7 +1,11 @@
 import React, { useEffect, useRef } from 'react';
 import { Camera, Maximize2, RefreshCw } from 'lucide-react';
 import { cameraCompatibilityNote, getCustomCameraUrl, getPrinterCameraKey } from '../../services/camera';
-import { buildCameraFrameUrl, createVisibilityAwareCameraPoller } from '../../utils/cameraFrame';
+import {
+  buildCameraFrameUrl,
+  buildCameraPollErrorState,
+  createVisibilityAwareCameraPoller,
+} from '../../utils/cameraFrame';
 import { buildCameraZoomState } from '../../utils/cameraZoom';
 import { buildCameraAddressLabel, buildCameraCardPresentation, cameraRetryLabel } from '../../utils/cameraPresentation';
 import { isPublicCaptureSearch, publicCameraAddress } from '../../utils/publicCapture';
@@ -41,7 +45,7 @@ export function ChamberSnapshotCanvas({ snapshotUrl, imageKey, alt, isReady, set
     let mounted = true;
     let frame = 0;
     const markReady = () => setCameraImageStates((prev) => prev[imageKey]?.status === 'ready' ? prev : ({ ...prev, [imageKey]: { status: 'ready' } }));
-    const markWaiting = () => setCameraImageStates((prev) => prev[imageKey]?.status === 'ready' ? prev : ({ ...prev, [imageKey]: { status: 'loading', message: '正在等待摄像头画面...' } }));
+    const markError = () => setCameraImageStates((prev) => prev[imageKey]?.status === 'ready' ? prev : ({ ...prev, [imageKey]: buildCameraPollErrorState() }));
     const poller = createVisibilityAwareCameraPoller({
       documentVisible: document.visibilityState !== 'hidden',
       cardVisible: typeof IntersectionObserver !== 'function',
@@ -61,7 +65,7 @@ export function ChamberSnapshotCanvas({ snapshotUrl, imageKey, alt, isReady, set
         }
       },
       onError(error) {
-        if (mounted && error?.name !== 'AbortError') markWaiting();
+        if (mounted && error?.name !== 'AbortError') markError();
       },
     });
     const handleVisibilityChange = () => {

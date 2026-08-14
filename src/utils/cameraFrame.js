@@ -6,8 +6,15 @@ export function usesCameraStartupTimeout(stream) {
   return Boolean(
     stream?.success
     && stream?.url
-    && !['chamber-image-mjpeg', 'nas-gateway'].includes(stream.mode),
+    && stream.mode !== 'chamber-image-mjpeg',
   );
+}
+
+export function buildCameraPollErrorState() {
+  return {
+    status: 'error',
+    message: '摄像头没有返回画面，将自动重试',
+  };
 }
 
 export function createVisibilityAwareCameraPoller({

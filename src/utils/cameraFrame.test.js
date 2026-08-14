@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildCameraFrameUrl,
+  buildCameraPollErrorState,
   createVisibilityAwareCameraPoller,
   isChamberSnapshotStream,
   usesCameraStartupTimeout,
@@ -26,14 +27,20 @@ test('builds a fresh frame URL without losing the original snapshot token', () =
   );
 });
 
-test('pauses NAS polling beyond startup timeout and resumes without exhausting it', async () => {
+test('NAS camera streams use the startup timeout instead of staying connected forever', () => {
   assert.equal(usesCameraStartupTimeout({
     success: true,
     mode: 'nas-gateway',
     snapshotUrl: '/frame',
     url: '/stream',
-  }), false);
+  }), true);
+  assert.deepEqual(buildCameraPollErrorState(), {
+    status: 'error',
+    message: '摄像头没有返回画面，将自动重试',
+  });
+});
 
+test('pauses NAS polling while hidden and resumes without overlapping requests', async () => {
   let nextTimer = 1;
   let now = 0;
   const timers = new Map();
