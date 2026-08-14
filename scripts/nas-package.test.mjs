@@ -4,15 +4,15 @@ import test from 'node:test';
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
 
-test('package metadata exposes the NAS commands at version 1.2.0', async () => {
+test('package metadata exposes the NAS commands with consistent release versions', async () => {
   const [manifest, lockfile] = await Promise.all([
     read('package.json').then(JSON.parse),
     read('package-lock.json').then(JSON.parse),
   ]);
 
-  assert.equal(manifest.version, '1.2.0');
-  assert.equal(lockfile.version, '1.2.0');
-  assert.equal(lockfile.packages[''].version, '1.2.0');
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(lockfile.version, manifest.version);
+  assert.equal(lockfile.packages[''].version, manifest.version);
   assert.equal(manifest.scripts.server, 'node server/index.js');
   assert.equal(manifest.scripts['server:dev'], 'concurrently -k "vite --host 0.0.0.0" "node --watch server/index.js"');
   assert.equal(manifest.scripts['docker:smoke'], 'node scripts/docker-smoke.mjs');
