@@ -219,9 +219,13 @@ test('resolves serial-only MQTT and camera payloads while retaining legacy expli
 
   assert.equal(resolveManagedMqttPayload(getRuntime, { serialNumber: 'serial' }).authToken, 'private-token');
   assert.equal(resolveManagedCameraPayload(getRuntime, { serialNumber: 'serial' }).accessCode, 'private-code');
+  assert.equal(resolveManagedCameraPayload(getRuntime, {
+    serialNumber: 'serial', ip: '10.0.0.8',
+  }).accessCode, 'private-code');
   assert.deepEqual(calls, [
     ['mqtt', { serialNumber: 'serial' }],
     ['camera', { serialNumber: 'serial' }],
+    ['camera', { serialNumber: 'serial', ip: '10.0.0.8' }],
   ]);
 
   const legacyMqtt = { serialNumber: 'SERIAL', mode: 'local', ip: '10.0.0.2', accessCode: 'legacy-code' };
@@ -232,5 +236,5 @@ test('resolves serial-only MQTT and camera payloads while retaining legacy expli
   assert.notEqual(resolveManagedCameraPayload(getRuntime, legacyCamera), legacyCamera);
   assert.deepEqual(resolveManagedMqttPayload(getRuntime, {}), {});
   assert.deepEqual(resolveManagedCameraPayload(getRuntime, {}), {});
-  assert.equal(runtimeReads, 2);
+  assert.equal(runtimeReads, 3);
 });

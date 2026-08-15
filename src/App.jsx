@@ -52,6 +52,19 @@ function readCachedPrinterIps() {
   }
 }
 
+function restoreCachedPrinterIps(devices = []) {
+  const cachedIps = readCachedPrinterIps();
+  return devices.map((device) => {
+    if (device.ip) return device;
+    const nameKey = String(device.name || '').trim().toLowerCase().replace(/\s+/g, '');
+    const ip = cachedIps[device.cloudId]
+      || cachedIps[device.dev_id]
+      || cachedIps[device.id]
+      || cachedIps[nameKey];
+    return ip ? { ...device, ip, hasLocalAddress: true } : device;
+  });
+}
+
 function syncCloudDeviceSnapshot(cloudDevices, scannedPrinters = []) {
   const snapshot = buildDeviceSyncSnapshot({
     cloudDevices,
@@ -791,7 +804,7 @@ function App() {
         const result = await runtime.devices.refresh();
         if (deviceSyncGenerationRef.current !== generation) return;
         if (!result?.success) throw new Error(result?.error || '同步设备失败');
-        const refreshedPrinters = replaceRuntimeSnapshot([], result.devices);
+        const refreshedPrinters = restoreCachedPrinterIps(replaceRuntimeSnapshot([], result.devices));
         if (isElectron) {
           const removedIds = getRemovedPrinterIds(bambuClient.getAllPrinters(), refreshedPrinters);
           await Promise.allSettled(removedIds.map((serialNumber) => bambuClient.disconnect(serialNumber)));
@@ -962,7 +975,7 @@ function App() {
 
     const offSnapshot = runtime.events.onDeviceSnapshot((event) => {
       if (!isCurrent()) return;
-      const nextPrinters = replaceRuntimeSnapshot([], event.devices);
+      const nextPrinters = restoreCachedPrinterIps(replaceRuntimeSnapshot([], event.devices));
       if (managedDesktop) {
         const removedIds = getRemovedPrinterIds(bambuClient.getAllPrinters(), nextPrinters);
         void Promise.allSettled(removedIds.map((serialNumber) => bambuClient.disconnect(serialNumber)));

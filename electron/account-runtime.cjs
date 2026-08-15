@@ -36,6 +36,7 @@ async function runBounded(items, limit, worker) {
 
 function createAccountRuntime({
   accountStore,
+  deviceCredentialStore,
   cloud,
   scan,
   refreshConcurrency = DEFAULT_REFRESH_CONCURRENCY,
@@ -54,6 +55,16 @@ function createAccountRuntime({
   const inventories = new Map();
   const accountStates = new Map();
   const localPrinters = new Map();
+  const credentialStore = deviceCredentialStore || {
+    entries: () => [],
+    get: () => null,
+    update: () => null,
+  };
+  for (const [serialNumber, credentials] of credentialStore.entries?.() || []) {
+    const normalizedSerial = normalizeSerial(serialNumber);
+    const ip = text(credentials?.ip);
+    if (normalizedSerial && ip) localPrinters.set(normalizedSerial, { ip });
+  }
   let records = new Map();
   let mutationQueue = Promise.resolve();
 
@@ -126,7 +137,16 @@ function createAccountRuntime({
       if (text(result.username) && text(result.username) !== text(account.username)) {
         accountStore.reauthenticateAccount(account.accountId, { username: text(result.username) });
       }
-      inventories.set(account.accountId, { devices: clone(result.devices) });
+      const devices = result.devices.map((device) => {
+        const serialNumber = normalizeSerial(device?.id ?? device?.dev_id);
+        const cached = serialNumber ? credentialStore.get?.(serialNumber) : null;
+        const accessCode = text(device?.accessCode ?? device?.dev_access_code) || text(cached?.accessCode);
+        if (serialNumber && accessCode && accessCode !== text(cached?.accessCode)) {
+          try { credentialStore.update?.(serialNumber, { accessCode }); } catch { /* cache is best effort */ }
+        }
+        return accessCode ? { ...device, accessCode } : { ...device };
+      });
+      inventories.set(account.accountId, { devices: clone(devices) });
       accountStates.set(account.accountId, { accountId: account.accountId, status: 'connected' });
     } catch (error) {
       accountStates.set(account.accountId, {
@@ -140,11 +160,13 @@ function createAccountRuntime({
     try {
       const printers = await scan();
       if (!Array.isArray(printers)) return;
-      localPrinters.clear();
       for (const printer of printers) {
         const serialNumber = normalizeSerial(printer?.serial ?? printer?.serialNumber);
         const ip = text(printer?.ip);
-        if (serialNumber && ip) localPrinters.set(serialNumber, { ip });
+        if (serialNumber && ip) {
+          localPrinters.set(serialNumber, { ip });
+          try { credentialStore.update?.(serialNumber, { ip }); } catch { /* cache is best effort */ }
+        }
       }
     } catch {
       // A LAN scan failure must not discard cloud inventory or saved accounts.
@@ -377,16 +399,22 @@ function createAccountRuntime({
     };
   }
 
-  function resolveCameraPayload({ serialNumber } = {}) {
+  function resolveCameraPayload({ serialNumber, ip: requestedIp } = {}) {
     const record = getRecord(serialNumber);
-    const selected = selectSource(record);
-    if (!record || !selected || selected.mode !== 'local') return null;
+    if (!record) return null;
+    const localSource = record.sources.find(({ device }) => text(device?.accessCode));
+    const ip = text(requestedIp) || text(record.device.ip);
+    if (!localSource || !ip) return null;
+    if (text(requestedIp) && text(requestedIp) !== text(record.device.ip)) {
+      localPrinters.set(record.serialNumber, { ip });
+      try { credentialStore.update?.(record.serialNumber, { ip }); } catch { /* cache is best effort */ }
+    }
     const payload = {
       serialNumber: record.serialNumber,
       dev_id: record.serialNumber,
       name: text(record.device.name) || record.serialNumber,
-      ip: selected.ip,
-      accessCode: selected.accessCode,
+      ip,
+      accessCode: text(localSource.device.accessCode),
     };
     for (const field of ['model', 'modelCode', 'cameraMode']) {
       const value = text(record.device[field]);

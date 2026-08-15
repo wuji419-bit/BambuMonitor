@@ -207,9 +207,13 @@ function resolveManagedMqttPayload(runtimeOrProvider, payload = {}) {
 }
 
 function resolveManagedCameraPayload(runtimeOrProvider, payload = {}) {
-  if (!text(payload.serialNumber) || text(payload.ip) || text(payload.accessCode)) return { ...payload };
+  if (!text(payload.serialNumber) || (text(payload.ip) && text(payload.accessCode))) return { ...payload };
   const runtime = readRuntime(runtimeOrProvider);
-  const resolved = runtime?.resolveCameraPayload?.({ serialNumber: payload.serialNumber });
+  const request = {
+    serialNumber: payload.serialNumber,
+    ...(text(payload.ip) ? { ip: text(payload.ip) } : {}),
+  };
+  const resolved = runtime?.resolveCameraPayload?.(request);
   if (!resolved) throw new Error('No saved camera source for this printer');
   return resolved;
 }

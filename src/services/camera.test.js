@@ -86,6 +86,7 @@ test('only sends the serial number to the NAS camera runtime', () => {
   });
   assert.deepEqual(buildCameraStartPayload({ kind: 'electron', accounts: {} }, source), {
     serialNumber: 'SERIAL-1',
+    ip: '192.168.1.2',
   });
 });
 

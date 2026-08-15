@@ -22,7 +22,11 @@ export function buildServerCameraConfig(config = {}) {
 
 export function buildCameraStartPayload(runtime, source = {}) {
   const serialNumber = source.key || source.serialNumber || '';
-  if (runtime?.kind !== 'electron' || runtime?.accounts) return { serialNumber };
+  if (runtime?.kind !== 'electron') return { serialNumber };
+  if (runtime?.accounts) return {
+    serialNumber,
+    ...(source.ip ? { ip: source.ip } : {}),
+  };
   return {
     serialNumber,
     cloudId: source.cloudId,

@@ -80,6 +80,49 @@ test('desktop refresh returns one safe device and resolves local MQTT and camera
   });
 });
 
+test('restores private camera credentials when a later desktop session receives no access code or LAN result', async (t) => {
+  const store = createStore(t);
+  store.addAccount({ account: 'first@example.com', accessToken: 'token-a', username: 'user-a' });
+  const credentials = new Map();
+  const deviceCredentialStore = {
+    entries: () => [...credentials.entries()],
+    get: (serial) => credentials.get(serial) || null,
+    update: (serial, patch) => {
+      const next = { ...(credentials.get(serial) || {}), ...patch };
+      credentials.set(serial, next);
+      return next;
+    },
+  };
+
+  const first = createAccountRuntime({
+    accountStore: store,
+    deviceCredentialStore,
+    cloud: { async listDevices() { return { success: true, username: 'user-a', devices: [{ id: 'SERIAL-A', name: 'A1mini', accessCode: 'camera-secret' }] }; } },
+    scan: async () => [{ serial: 'SERIAL-A', ip: '192.168.1.20' }],
+  });
+  await first.refreshAccounts();
+
+  const restarted = createAccountRuntime({
+    accountStore: store,
+    deviceCredentialStore,
+    cloud: { async listDevices() { return { success: true, username: 'user-a', devices: [{ id: 'SERIAL-A', name: 'A1mini', accessCode: '' }] }; } },
+    scan: async () => [],
+  });
+  await restarted.refreshAccounts();
+
+  assert.deepEqual(restarted.resolveCameraPayload({ serialNumber: 'SERIAL-A' }), {
+    serialNumber: 'SERIAL-A', dev_id: 'SERIAL-A', name: 'A1mini',
+    ip: '192.168.1.20', accessCode: 'camera-secret',
+  });
+  assert.deepEqual(restarted.resolveCameraPayload({
+    serialNumber: 'SERIAL-A', ip: '192.168.1.21',
+  }), {
+    serialNumber: 'SERIAL-A', dev_id: 'SERIAL-A', name: 'A1mini',
+    ip: '192.168.1.21', accessCode: 'camera-secret',
+  });
+  assert.equal(deviceCredentialStore.get('SERIAL-A').ip, '192.168.1.21');
+});
+
 test('account-scoped refresh updates only the selected account and preserves other inventories', async (t) => {
   const store = createStore(t);
   const first = store.addAccount({

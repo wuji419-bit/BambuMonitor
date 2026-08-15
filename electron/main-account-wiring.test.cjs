@@ -10,6 +10,7 @@ test('main process wires the protected account store, runtime, and constrained I
 
   assert.match(main, /require\(['"]\.\/account-store\.cjs['"]\)/);
   assert.match(main, /require\(['"]\.\/account-runtime\.cjs['"]\)/);
+  assert.match(main, /require\(['"]\.\/device-credential-store\.cjs['"]\)/);
   assert.match(main, /require\(['"]\.\/account-ipc\.cjs['"]\)/);
   assert.match(main, /registerAccountIpc\(\{/);
   assert.match(main, /getRuntime:\s*getAccountRuntime/);
@@ -30,12 +31,13 @@ test('main process resolves serial-only MQTT and camera requests without registe
   assert.doesNotMatch(main, /require\(['"]\.\/auth-session\.cjs['"]\)/);
 });
 
-test('desktop package includes the account runtime and IPC tests', () => {
-  for (const file of ['electron/account-runtime.cjs', 'electron/account-ipc.cjs']) {
+test('desktop package includes the account runtime, encrypted device store, and IPC tests', () => {
+  for (const file of ['electron/account-runtime.cjs', 'electron/device-credential-store.cjs', 'electron/account-ipc.cjs']) {
     assert.equal(packageJson.build.files.includes(file), true);
   }
   for (const testFile of [
     'electron/account-runtime.test.cjs',
+    'electron/device-credential-store.test.cjs',
     'electron/account-ipc.test.cjs',
     'electron/preload-accounts.test.cjs',
     'electron/main-account-wiring.test.cjs',

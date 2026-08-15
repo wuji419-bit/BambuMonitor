@@ -10,6 +10,7 @@ const { enforceSingleInstance } = require('./single-instance.cjs');
 const { connectMqttForRenderer } = require('./mqtt-ipc-result.cjs');
 const { createAccountStore } = require('./account-store.cjs');
 const { createAccountRuntime } = require('./account-runtime.cjs');
+const { createDeviceCredentialStore } = require('./device-credential-store.cjs');
 const {
   registerAccountIpc,
   resolveManagedCameraPayload,
@@ -35,6 +36,7 @@ installSafeConsole();
 const bambuCloud = createBambuCloudClient({ logger: console });
 let desktopAccountStore = null;
 let desktopAccountRuntime = null;
+let desktopDeviceCredentialStore = null;
 
 function getAuthSessionProtection() {
   try {
@@ -60,8 +62,15 @@ function getAccountStore() {
 
 function getAccountRuntime() {
   if (!desktopAccountRuntime) {
+    if (!desktopDeviceCredentialStore) {
+      desktopDeviceCredentialStore = createDeviceCredentialStore({
+        userDataPath: app.getPath('userData'),
+        protection: getAuthSessionProtection(),
+      });
+    }
     desktopAccountRuntime = createAccountRuntime({
       accountStore: getAccountStore(),
+      deviceCredentialStore: desktopDeviceCredentialStore,
       cloud: bambuCloud,
       scan: () => scanBambuPrinters({ logger: console }),
     });
