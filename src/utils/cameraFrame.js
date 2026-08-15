@@ -10,6 +10,14 @@ export function usesCameraStartupTimeout(stream) {
   );
 }
 
+export function shouldRestartCameraAfterImageError(imageState, stream, retryable) {
+  return Boolean(
+    retryable
+    && imageState?.status === 'error'
+    && !isChamberSnapshotStream(stream),
+  );
+}
+
 export function buildCameraPollErrorState() {
   return {
     status: 'error',

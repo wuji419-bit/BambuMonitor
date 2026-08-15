@@ -4,7 +4,12 @@ export function buildCameraZoomState({ key, printer, stream, imageState, purpose
   const isNasWallSnapshot = stream?.mode === 'nas-gateway' && purpose === 'wall';
   const isSnapshotStream = isNasWallSnapshot || isChamberSnapshotStream(stream);
   const imageUrl = isSnapshotStream ? stream?.snapshotUrl : stream?.url;
-  const canZoom = Boolean(key && stream?.success && imageUrl && imageState?.status !== 'error');
+  const canZoom = Boolean(
+    key
+    && stream?.success
+    && imageUrl
+    && (imageState?.status !== 'error' || isSnapshotStream),
+  );
 
   return {
     key: key || '',

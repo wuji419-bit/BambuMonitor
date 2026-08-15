@@ -39,6 +39,7 @@ import {
   sortPrintersForDisplay,
 } from '../utils/printerPresentation';
 import {
+  shouldRestartCameraAfterImageError,
   usesCameraStartupTimeout,
 } from '../utils/cameraFrame';
 import {
@@ -1056,13 +1057,17 @@ export default function PrinterWidget({
       if (imageState?.status === 'ready') {
         clearCameraRetryTimer(key);
         cameraRetryAttemptsRef.current[key] = 0;
-      } else if (imageState?.status === 'error' && retryableKeys.has(key)) {
+      } else if (shouldRestartCameraAfterImageError(
+        imageState,
+        cameraStreams[key],
+        retryableKeys.has(key),
+      )) {
         scheduleCameraRetry(key);
       }
     });
 
     return undefined;
-  }, [cameraImageStates, cameraOpen, cameraSourceKey, clearCameraRetryTimer, scheduleCameraRetry]);
+  }, [cameraImageStates, cameraOpen, cameraSourceKey, cameraStreams, clearCameraRetryTimer, scheduleCameraRetry]);
 
   useEffect(() => {
     if (!capabilities.nativeWindow) return undefined;

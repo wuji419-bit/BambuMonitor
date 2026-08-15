@@ -6,6 +6,7 @@ import {
   buildCameraPollErrorState,
   createVisibilityAwareCameraPoller,
   isChamberSnapshotStream,
+  shouldRestartCameraAfterImageError,
   usesCameraStartupTimeout,
 } from './cameraFrame.js';
 
@@ -38,6 +39,17 @@ test('NAS camera streams use the startup timeout instead of staying connected fo
     status: 'error',
     message: '摄像头没有返回画面，将自动重试',
   });
+});
+
+test('snapshot polling errors keep the warm printer connection instead of restarting it', () => {
+  assert.equal(shouldRestartCameraAfterImageError({ status: 'error' }, {
+    mode: 'chamber-image-mjpeg', snapshotUrl: '/camera-frame/A2',
+  }, true), false);
+  assert.equal(shouldRestartCameraAfterImageError({ status: 'error' }, {
+    mode: 'rtsps-mjpeg', url: '/camera/A',
+  }, true), true);
+  assert.equal(shouldRestartCameraAfterImageError({ status: 'ready' }, {}, true), false);
+  assert.equal(shouldRestartCameraAfterImageError({ status: 'error' }, {}, false), false);
 });
 
 test('pauses NAS polling while hidden and resumes without overlapping requests', async () => {

@@ -32,6 +32,22 @@ test('does not zoom cameras without a ready image URL', () => {
   assert.equal(state.canZoom, false);
 });
 
+test('keeps recoverable snapshot streams mounted after a transient frame error', () => {
+  const state = buildCameraZoomState({
+    key: 'A2-SLOW',
+    stream: {
+      success: true,
+      mode: 'chamber-image-mjpeg',
+      snapshotUrl: '/camera-frame/A2-SLOW',
+    },
+    imageState: { status: 'error' },
+  });
+
+  assert.equal(state.canZoom, true);
+  assert.equal(state.isSnapshotStream, true);
+  assert.equal(state.imageUrl, '/camera-frame/A2-SLOW');
+});
+
 test('uses NAS snapshot on the wall and MJPEG in zoom', () => {
   const stream = {
     success: true,
