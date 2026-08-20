@@ -210,7 +210,10 @@ export function getPrinterNotificationEvent(previousValue, currentValue) {
   const current = normalizeNotificationState(currentValue);
   if (!previous || !current) return null;
 
-  if (previous.jobStatus !== 'finished' && current.jobStatus === 'finished') {
+  if (
+    ['printing', 'paused', 'preparing'].includes(previous.jobStatus)
+    && current.jobStatus === 'finished'
+  ) {
     return 'print_finished';
   }
 

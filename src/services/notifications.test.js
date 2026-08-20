@@ -28,6 +28,16 @@ test('emits print completion from job status transition', () => {
   );
 });
 
+test('does not repeat completion when stale cloud state changes idle back to finished', () => {
+  assert.equal(
+    getPrinterNotificationEvent(
+      { status: 'idle', connectionState: 'online' },
+      { status: 'finished', connectionState: 'online' },
+    ),
+    null,
+  );
+});
+
 test('emits disconnect while preserving an active print status', () => {
   assert.equal(
     getPrinterNotificationEvent(
