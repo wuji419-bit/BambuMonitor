@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 
 const {
   installSafeConsole,
@@ -31,9 +32,28 @@ test('swallows EPIPE from console methods without hiding other errors', () => {
     },
   };
 
-  installSafeConsole(fakeConsole);
+  installSafeConsole(fakeConsole, []);
 
   assert.doesNotThrow(() => fakeConsole.log('mqtt reconnecting'));
   assert.throws(() => fakeConsole.warn('real issue'), fatal);
   assert.doesNotThrow(() => fakeConsole.error('still ok'));
+});
+
+test('swallows asynchronous EPIPE errors emitted by stdout or stderr', () => {
+  const stream = new EventEmitter();
+  const fakeConsole = {
+    log() {},
+    info() {},
+    warn() {},
+    error() {},
+    debug() {},
+  };
+  const epipe = new Error('EPIPE: broken pipe, write');
+  epipe.code = 'EPIPE';
+
+  installSafeConsole(fakeConsole, [stream]);
+
+  assert.doesNotThrow(() => stream.emit('error', epipe));
+  const fatal = new Error('unexpected stream failure');
+  assert.throws(() => stream.emit('error', fatal), fatal);
 });
