@@ -10,3 +10,7 @@ export function noDragRegionStyle() {
     WebkitAppRegion: 'no-drag',
   };
 }
+
+export function miniSurfaceDragStyle({ isLocked = false, isNativeWindow = true } = {}) {
+  return dragRegionStyle(isLocked || !isNativeWindow);
+}
