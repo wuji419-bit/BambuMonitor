@@ -67,6 +67,7 @@ import {
 import { isValidPrinterAddress, normalizePrinterAddress } from '../utils/printerAddress';
 import { applySettingsTransaction, updateServerSettingsWhenReady } from '../utils/settingsTransaction';
 import { getPreviewViewMode, shouldLoadServerSettings } from '../utils/previewMode';
+import { legacySurfaceDragStyle } from '../utils/windowDragRegions';
 
 const statusMap = {
   no_ip: ['云端概览', '#8cc8ff', 'rgba(102, 178, 255, 0.14)', 'rgba(102, 178, 255, 0.22)'],
@@ -1340,7 +1341,11 @@ export default function PrinterWidget({
           boxShadow: 'none',
           color: 'var(--text-hi)',
           cursor: 'default',
-          WebkitAppRegion: 'no-drag',
+          ...legacySurfaceDragStyle({
+            isMini,
+            isLocked,
+            isNativeWindow: Boolean(capabilities.nativeWindow),
+          }),
           overflow: settingsOpen || ipDialog || isFullPanel || isMini ? 'hidden' : 'auto',
         }}
       >

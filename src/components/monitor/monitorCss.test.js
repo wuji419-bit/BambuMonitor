@@ -14,3 +14,18 @@ test('keeps the visible camera zoom identity draggable while actions remain clic
     /\.camera-zoom__actions\s*\{[^}]*-webkit-app-region:\s*no-drag;/s,
   );
 });
+
+test('keeps every mini device descendant draggable while actions remain clickable', () => {
+  assert.match(
+    css,
+    /\.mini-monitor(?:,\s*\.mini-monitor \*)?\s*\{[^}]*-webkit-app-region:\s*drag;/s,
+  );
+  assert.match(
+    css,
+    /\.mini-actions(?:,\s*\.mini-actions \*)?\s*\{[^}]*-webkit-app-region:\s*no-drag;/s,
+  );
+  assert.match(
+    css,
+    /\.monitor-shell\.is-locked \.mini-monitor(?:,\s*\.monitor-shell\.is-locked \.mini-monitor \*)?\s*\{[^}]*-webkit-app-region:\s*no-drag;/s,
+  );
+});
