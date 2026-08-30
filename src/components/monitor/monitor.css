@@ -665,19 +665,17 @@
 .compact-empty { padding: 22px 10px; color: var(--muted); text-align: center; font-size: 11px; }
 
 .monitor-shell--mini .monitor-legacy-surface { padding: 0 !important; }
-.mini-monitor { display: grid; grid-template-columns: 22px minmax(0, 1fr) 58px; align-items: center; gap: 5px; width: 100%; height: 100%; min-width: 0; min-height: 0; padding: 5px 5px 5px 2px; overflow: hidden; }
-.mini-drag-handle { display: flex; align-items: center; justify-content: center; align-self: stretch; color: #71829a; cursor: move; }
-.mini-drag-handle * { pointer-events: none; }
-.monitor-content .mini-drag-handle { -webkit-app-region: drag; }
-.monitor-shell.is-locked .monitor-content .mini-drag-handle,
-.monitor-shell--web .monitor-content .mini-drag-handle { cursor: default; -webkit-app-region: no-drag; }
-.mini-center { display: grid; grid-template-rows: 18px 14px 5px; align-content: center; gap: 2px; min-width: 0; overflow: hidden; }
+.mini-monitor { display: grid; grid-template-columns: minmax(0, 1fr) 58px; align-items: stretch; gap: 5px; width: 100%; height: 100%; min-width: 0; min-height: 0; padding: 5px; overflow: hidden; }
+.mini-device-strip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); align-items: stretch; min-width: 0; overflow: hidden; }
+.mini-device { display: grid; grid-template-rows: 18px 14px 5px; align-content: center; gap: 2px; min-width: 0; padding: 0 8px; overflow: hidden; border-right: 1px solid var(--line); }
+.mini-device:last-child { border-right: 0; }
+.mini-empty { display: flex; align-items: center; min-width: 0; padding: 0 8px; color: var(--muted); font-size: 10px; }
 .mini-primary { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; min-width: 0; }
 .mini-primary strong, .mini-primary span, .mini-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: 0; }
 .mini-primary strong { min-width: 0; color: var(--text); font-size: 11px; }
 .mini-primary span { flex: 0 0 auto; color: var(--mint-soft); font-size: 9px; font-weight: 700; }
 .mini-status { color: var(--muted); font-size: 9px; }
-.mini-actions { display: grid; grid-template-columns: repeat(2, 27px); gap: 4px; -webkit-app-region: no-drag; }
+.mini-actions { display: grid; grid-template-columns: repeat(2, 27px); align-self: center; gap: 4px; -webkit-app-region: no-drag; }
 .mini-actions button { display: inline-flex; width: 27px; height: 27px; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-md); color: var(--text-secondary); background: rgba(255,255,255,.06); cursor: pointer; -webkit-app-region: no-drag; }
 
 .monitor-modal-backdrop {

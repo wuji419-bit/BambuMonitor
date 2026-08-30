@@ -256,10 +256,6 @@ function temperatureText(printer) {
   return `喷嘴 ${formatTemperatureValue(temperature.nozzle)} · 热床 ${formatTemperatureValue(temperature.bed)}`;
 }
 
-function isFinishedPrinter(printer) {
-  return printer.status === 'finished' || safeProgress(printer.progress) >= 100;
-}
-
 function progressPalette(status) {
   switch (status) {
     case 'printing':
@@ -498,7 +494,8 @@ export default function PrinterWidget({
     const stored = Number(localStorage.getItem(OPACITY_KEY));
     return Number.isFinite(stored) && stored >= 0.5 && stored <= 1 ? stored : 1;
   });
-  const [miniActiveIndex, setMiniActiveIndex] = useState(0);
+  const [miniPageIndex, setMiniPageIndex] = useState(0);
+  const [miniPageCount, setMiniPageCount] = useState(1);
   const [ipDialog, setIpDialog] = useState(null);
   const [ipDialogError, setIpDialogError] = useState('');
   const [submittingIp, setSubmittingIp] = useState(false);
@@ -542,13 +539,6 @@ export default function PrinterWidget({
   const onlineCount = summary.online;
   const reconnectingCount = summary.reconnecting;
   const cloudOverviewCount = displayPrinters.filter((printer) => isCloudOverview(printer)).length;
-  const finishedPrinters = displayPrinters.filter((printer) => isFinishedPrinter(printer));
-  const activeMiniPrinters = displayPrinters.filter((printer) => (
-    ['printing', 'drying', 'preparing', 'paused'].includes(getPrinterJobStatus(printer))
-  ));
-  const rotatingMiniPrinter = activeMiniPrinters.length > 0
-    ? activeMiniPrinters[miniActiveIndex % activeMiniPrinters.length]
-    : null;
   const deviceSyncCopy = deviceSyncError
     ? `同步失败：${deviceSyncError}`
     : (isRefreshingDevices ? '正在同步设备...' : formatDeviceSyncTime(lastDeviceSyncAt));
@@ -727,17 +717,13 @@ export default function PrinterWidget({
   }, [capabilities.nativeWindow, runtime, windowOpacity]);
 
   useEffect(() => {
-    if (!isMini || activeMiniPrinters.length <= 1) {
-      setMiniActiveIndex(0);
-      return undefined;
-    }
-
+    setMiniPageIndex((current) => current % Math.max(1, miniPageCount));
+    if (!isMini || miniPageCount <= 1) return undefined;
     const timer = setInterval(() => {
-      setMiniActiveIndex((prev) => (prev + 1) % activeMiniPrinters.length);
+      setMiniPageIndex((current) => (current + 1) % miniPageCount);
     }, MINI_ROTATE_MS);
-
     return () => clearInterval(timer);
-  }, [isMini, activeMiniPrinters.length]);
+  }, [isMini, miniPageCount]);
 
   useEffect(() => {
     if (!loadsServerSettings) {
@@ -1359,7 +1345,17 @@ export default function PrinterWidget({
         }}
       >
       {cameraOpen ? renderCameraView() : isMini ? (
-        <MiniMonitor finishedPrinters={finishedPrinters} activePrinter={rotatingMiniPrinter} presentation={{ infoLine: displayInfoLine, progressPalette, safeProgress, statusText }} isAlwaysOnTop={isAlwaysOnTop} onToggleTop={toggleAlwaysOnTop} onReturnFull={() => changeViewMode('full')} />
+        <MiniMonitor
+          printers={displayPrinters}
+          pageIndex={miniPageIndex}
+          onPageCountChange={setMiniPageCount}
+          presentation={{ infoLine: displayInfoLine, progressPalette, safeProgress, statusText }}
+          isAlwaysOnTop={isAlwaysOnTop}
+          isLocked={isLocked}
+          isNativeWindow={Boolean(capabilities.nativeWindow)}
+          onToggleTop={toggleAlwaysOnTop}
+          onReturnFull={() => changeViewMode('full')}
+        />
       ) : isCompact ? (
         <CompactMonitor printers={displayPrinters} summary={summary} presentation={{ amsInfo, infoLine: displayInfoLine, progressPalette, safeProgress, statusText, temperatureText }} renderAction={renderAction} showRawAddress={isElectron} />
       ) : (
